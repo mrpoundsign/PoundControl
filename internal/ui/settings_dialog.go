@@ -16,6 +16,7 @@ import (
 	"github.com/mrpoundsign/PoundDeck/internal/app"
 	"github.com/mrpoundsign/PoundDeck/internal/version"
 	"github.com/mrpoundsign/PoundDeck/pkg/sdplugin"
+	"github.com/mrpoundsign/PoundDeck/pkg/wasmplugin"
 )
 
 const (
@@ -30,6 +31,7 @@ func showSettingsDialog(
 	engine *app.Engine,
 	obsCtrl OBSController,
 	sdCtrl SDPluginController,
+	wasmCtrl WasmPluginController,
 	webCtrl WebDeckController,
 	cfgPath string,
 	activeHotkeys int,
@@ -70,7 +72,7 @@ func showSettingsDialog(
 	obsContent, obsCleanup := buildOBSConnectionContent(obsCtrl, onStatus)
 
 	// Plugins Tab
-	pluginsTab, pluginsCleanup := buildPluginsSettingsTab(win, engine, sdCtrl, onReloadPlugins, onStatus)
+	pluginsTab, pluginsCleanup := buildPluginsSettingsTab(win, engine, sdCtrl, wasmCtrl, onReloadPlugins, onStatus)
 
 	// Web Deck Tab
 	webTab, webCleanup := buildWebDeckSettingsTab(webCtrl, onStatus)
@@ -106,6 +108,7 @@ func buildPluginsSettingsTab(
 	win fyne.Window,
 	engine *app.Engine,
 	sdCtrl SDPluginController,
+	wasmCtrl WasmPluginController,
 	onReloadPlugins func() error,
 	onStatus func(string),
 ) (fyne.CanvasObject, func()) {
@@ -121,19 +124,82 @@ func buildPluginsSettingsTab(
 	}
 	rebuildProviders()
 
-	if sdCtrl == nil {
-		upcomingLbl := widget.NewLabel(
-			"External plugin host controller is not attached in this mode.\n" +
-				"  • Milestone 5 adds pure-Go wazero WebAssembly (.wasm) dynamic plugins",
-		)
-		upcomingLbl.Wrapping = fyne.TextWrapWord
-		return container.NewVScroll(container.NewPadded(container.NewVBox(
-			providersBox,
-			widget.NewSeparator(),
-			upcomingLbl,
-		))), nil
+	var (
+		refreshes []func()
+		cleanups  []func()
+	)
+
+	reloadAll := func(reason string) {
+		var err error
+		switch {
+		case onReloadPlugins != nil:
+			err = onReloadPlugins()
+		default:
+			if sdCtrl != nil {
+				err = sdCtrl.Reload()
+			}
+			if err == nil && wasmCtrl != nil {
+				err = wasmCtrl.Reload()
+			}
+		}
+		if err != nil {
+			if onStatus != nil {
+				onStatus(fmt.Sprintf("Plugin reload failed: %v", err))
+			}
+		} else if reason != "" && onStatus != nil {
+			onStatus(reason)
+		}
+		rebuildProviders()
+		for _, fn := range refreshes {
+			fn()
+		}
 	}
 
+	items := []fyne.CanvasObject{
+		widget.NewLabelWithStyle("Active Providers", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		providersBox,
+	}
+
+	if sdCtrl == nil && wasmCtrl == nil {
+		msg := widget.NewLabel("External plugin host controllers are not attached in this mode.")
+		msg.Wrapping = fyne.TextWrapWord
+		items = append(items, widget.NewSeparator(), msg)
+		return container.NewVScroll(container.NewPadded(container.NewVBox(items...))), nil
+	}
+
+	if sdCtrl != nil {
+		sdObj, sdRefresh, sdCleanup := buildSDPluginSection(win, sdCtrl, reloadAll, onStatus)
+		items = append(items, widget.NewSeparator(), sdObj)
+		if sdRefresh != nil {
+			refreshes = append(refreshes, sdRefresh)
+		}
+		if sdCleanup != nil {
+			cleanups = append(cleanups, sdCleanup)
+		}
+	}
+
+	if wasmCtrl != nil {
+		wasmObj, wasmRefresh := buildWasmPluginSection(win, wasmCtrl, reloadAll, onStatus)
+		items = append(items, widget.NewSeparator(), wasmObj)
+		if wasmRefresh != nil {
+			refreshes = append(refreshes, wasmRefresh)
+		}
+	}
+
+	cleanup := func() {
+		for _, fn := range cleanups {
+			fn()
+		}
+	}
+	return container.NewVScroll(container.NewPadded(container.NewVBox(items...))), cleanup
+}
+
+func buildSDPluginSection(
+	win fyne.Window,
+	sdCtrl SDPluginController,
+	reloadAll func(string),
+	onStatus func(string),
+) (fyne.CanvasObject, func(), func()) {
 	var (
 		closed       atomic.Bool
 		dlMu         sync.Mutex
@@ -150,23 +216,6 @@ func buildPluginsSettingsTab(
 	pluginsContainer := container.NewVBox()
 
 	var refreshState func()
-
-	reloadAll := func(reason string) {
-		var err error
-		if onReloadPlugins != nil {
-			err = onReloadPlugins()
-		} else {
-			err = sdCtrl.Reload()
-		}
-		if err != nil {
-			if onStatus != nil {
-				onStatus(fmt.Sprintf("Plugin reload failed: %v", err))
-			}
-		} else if reason != "" && onStatus != nil {
-			onStatus(reason)
-		}
-		refreshState()
-	}
 
 	saveAndReload := func(cfg sdplugin.HostConfig, reason string) {
 		if err := sdCtrl.SaveHostConfig(cfg); err != nil {
@@ -310,12 +359,10 @@ func buildPluginsSettingsTab(
 	addPathRow := container.NewBorder(nil, nil, nil, container.NewHBox(browseBtn, addPathBtn), addPathEnt)
 
 	reloadBtn := widget.NewButtonWithIcon("Reload Plugins", theme.ViewRefreshIcon(), func() {
-		reloadAll("Reloaded external .sdPlugin bundles")
+		reloadAll("Reloaded external plugins")
 	})
 
 	refreshState = func() {
-		rebuildProviders()
-
 		curCfg := sdCtrl.HostConfig()
 		if scanElgatoCh.Checked != curCfg.ScanElgato {
 			scanElgatoCh.SetChecked(curCfg.ScanElgato)
@@ -333,7 +380,7 @@ func buildPluginsSettingsTab(
 
 		extraContainer.Objects = nil
 		if len(curCfg.ExtraPaths) == 0 {
-			emptyPaths := widget.NewLabel("No custom external plugin paths configured.")
+			emptyPaths := widget.NewLabel("No custom .sdPlugin paths configured.")
 			emptyPaths.Wrapping = fyne.TextWrapWord
 			extraContainer.Add(emptyPaths)
 		} else {
@@ -350,7 +397,7 @@ func buildPluginsSettingsTab(
 					next = append(next, latest.ExtraPaths[:idx]...)
 					next = append(next, latest.ExtraPaths[idx+1:]...)
 					latest.ExtraPaths = next
-					saveAndReload(latest, "Removed external plugin search path")
+					saveAndReload(latest, "Removed .sdPlugin search path")
 				})
 				extraContainer.Add(container.NewBorder(nil, nil, nil, rmBtn, pathLbl))
 			}
@@ -412,13 +459,7 @@ func buildPluginsSettingsTab(
 
 	refreshState()
 
-	upcomingLbl := widget.NewLabel("Milestone 5 will add pure-Go wazero WebAssembly (.wasm) dynamic plugins.")
-	upcomingLbl.Wrapping = fyne.TextWrapWord
-
 	content := container.NewVBox(
-		widget.NewLabelWithStyle("Active Providers", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		providersBox,
-		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Node.js Runtime (for .sdPlugin bundles)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		nodeStatus,
 		container.NewHBox(dlBtn, cancelDlBtn),
@@ -437,7 +478,6 @@ func buildPluginsSettingsTab(
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Discovered .sdPlugin Bundles", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		pluginsContainer,
-		upcomingLbl,
 	)
 
 	cleanup := func() {
@@ -449,5 +489,143 @@ func buildPluginsSettingsTab(
 		dlMu.Unlock()
 	}
 
-	return container.NewVScroll(container.NewPadded(content)), cleanup
+	return content, refreshState, cleanup
+}
+
+func buildWasmPluginSection(
+	win fyne.Window,
+	wasmCtrl WasmPluginController,
+	reloadAll func(string),
+	onStatus func(string),
+) (fyne.CanvasObject, func()) {
+	extraContainer := container.NewVBox()
+	pluginsContainer := container.NewVBox()
+
+	saveAndReload := func(cfg wasmplugin.HostConfig, reason string) {
+		if err := wasmCtrl.SaveHostConfig(cfg); err != nil {
+			if onStatus != nil {
+				onStatus("Failed to save WebAssembly settings: " + err.Error())
+			}
+			return
+		}
+		reloadAll(reason)
+	}
+
+	defaultDirLbl := widget.NewLabel(wasmCtrl.DefaultPluginsDir())
+	defaultDirLbl.Wrapping = fyne.TextWrapBreak
+
+	addPathEnt := widget.NewEntry()
+	addPathEnt.SetPlaceHolder("Path to a .wasm plugin file or directory")
+	browseBtn := widget.NewButtonWithIcon("Browse...", theme.FolderOpenIcon(), func() {
+		dlg := dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
+			if err == nil && uri != nil {
+				addPathEnt.SetText(uri.Path())
+			}
+		}, win)
+		dlg.Show()
+	})
+	addPathBtn := widget.NewButtonWithIcon("Add Path", theme.ContentAddIcon(), func() {
+		p := strings.TrimSpace(addPathEnt.Text)
+		if p == "" {
+			return
+		}
+		cur := wasmCtrl.HostConfig()
+		cur.ExtraPaths = append(cur.ExtraPaths, p)
+		addPathEnt.SetText("")
+		saveAndReload(cur, "Added WebAssembly search path")
+	})
+	addPathRow := container.NewBorder(nil, nil, nil, container.NewHBox(browseBtn, addPathBtn), addPathEnt)
+
+	reloadBtn := widget.NewButtonWithIcon("Reload Plugins", theme.ViewRefreshIcon(), func() {
+		reloadAll("Reloaded external plugins")
+	})
+
+	refreshState := func() {
+		curCfg := wasmCtrl.HostConfig()
+		extraContainer.Objects = nil
+		if len(curCfg.ExtraPaths) == 0 {
+			emptyLbl := widget.NewLabel("No custom WebAssembly paths configured.")
+			emptyLbl.Wrapping = fyne.TextWrapWord
+			extraContainer.Add(emptyLbl)
+		} else {
+			for i, pathItem := range curCfg.ExtraPaths {
+				idx := i
+				pathLbl := widget.NewLabel(pathItem)
+				pathLbl.Wrapping = fyne.TextWrapBreak
+				rmBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
+					latest := wasmCtrl.HostConfig()
+					if idx < 0 || idx >= len(latest.ExtraPaths) {
+						return
+					}
+					next := make([]string, 0, len(latest.ExtraPaths)-1)
+					next = append(next, latest.ExtraPaths[:idx]...)
+					next = append(next, latest.ExtraPaths[idx+1:]...)
+					latest.ExtraPaths = next
+					saveAndReload(latest, "Removed WebAssembly search path")
+				})
+				extraContainer.Add(container.NewBorder(nil, nil, nil, rmBtn, pathLbl))
+			}
+		}
+		extraContainer.Refresh()
+
+		pluginsContainer.Objects = nil
+		statuses := wasmCtrl.Plugins()
+		if len(statuses) == 0 {
+			noneLbl := widget.NewLabel("No WebAssembly (.wasm) plugins discovered yet. Drop .wasm files in the default folder or add a path above.")
+			noneLbl.Wrapping = fyne.TextWrapWord
+			pluginsContainer.Add(noneLbl)
+		} else {
+			for _, st := range statuses {
+				stateLabel := string(st.State)
+				switch st.State {
+				case wasmplugin.StatusRunning:
+					stateLabel = "Running (sandboxed)"
+				case wasmplugin.StatusError:
+					stateLabel = "Error"
+				case wasmplugin.StatusStopped:
+					stateLabel = "Stopped"
+				}
+
+				titleText := fmt.Sprintf("%s v%s — %s (%d actions)", st.Name, st.Version, stateLabel, st.ActionCount)
+				if st.Version == "" {
+					titleText = fmt.Sprintf("%s — %s (%d actions)", st.Name, stateLabel, st.ActionCount)
+				}
+				titleLbl := widget.NewLabel(titleText)
+				titleLbl.TextStyle = fyne.TextStyle{Bold: true}
+				titleLbl.Wrapping = fyne.TextWrapWord
+
+				metaText := st.UUID
+				if st.Author != "" {
+					metaText += " • by " + st.Author
+				}
+				if len(st.AllowedHosts) > 0 {
+					metaText += "\nAllowed HTTP hosts: " + strings.Join(st.AllowedHosts, ", ")
+				}
+				metaText += "\n" + st.Path
+				if st.Error != "" {
+					metaText += "\n" + st.Error
+				}
+				metaLbl := widget.NewLabel(metaText)
+				metaLbl.Wrapping = fyne.TextWrapBreak
+
+				pluginsContainer.Add(container.NewVBox(titleLbl, metaLbl, widget.NewSeparator()))
+			}
+		}
+		pluginsContainer.Refresh()
+	}
+
+	refreshState()
+
+	content := container.NewVBox(
+		widget.NewLabelWithStyle("WebAssembly (.wasm) Plugins (wazero)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewForm(widget.NewFormItem("Default Folder", defaultDirLbl)),
+		widget.NewLabel("Extra WebAssembly Paths"),
+		extraContainer,
+		addPathRow,
+		container.NewHBox(reloadBtn),
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Discovered .wasm Modules", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		pluginsContainer,
+	)
+	return content, refreshState
 }

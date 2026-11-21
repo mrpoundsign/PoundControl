@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/mrpoundsign/PoundDeck/pkg/sdplugin"
+	"github.com/mrpoundsign/PoundDeck/pkg/wasmplugin"
 )
 
 // PIViewer displays interactive HTML Property Inspector pages for external plugins.
@@ -25,7 +26,19 @@ type SDPluginController interface {
 	NeedsNodeForAction(actionUUID string) (minMajor int, ok bool)
 }
 
-var _ SDPluginController = (*sdplugin.Provider)(nil)
+// WasmPluginController exposes external WebAssembly (.wasm) discovery, lifecycle, and status to UI surfaces.
+type WasmPluginController interface {
+	HostConfig() wasmplugin.HostConfig
+	SaveHostConfig(cfg wasmplugin.HostConfig) error
+	Reload() error
+	Plugins() []wasmplugin.PluginStatus
+	DefaultPluginsDir() string
+}
+
+var (
+	_ SDPluginController   = (*sdplugin.Provider)(nil)
+	_ WasmPluginController = (*wasmplugin.Provider)(nil)
+)
 
 // NewDefaultPIViewer returns the platform-appropriate Property Inspector viewer.
 func NewDefaultPIViewer() PIViewer {

@@ -8,6 +8,7 @@ require (
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef
+	github.com/tetratelabs/wazero v1.12.0
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/image v0.24.0
 	golang.org/x/net v0.35.0
@@ -49,7 +50,7 @@ require (
 	github.com/urfave/cli/v2 v2.27.7 // indirect
 	github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 // indirect
 	github.com/yuin/goldmark v1.8.2 // indirect
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -20,6 +20,7 @@ import (
 	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
 	"github.com/mrpoundsign/PoundDeck/pkg/sdplugin"
 	"github.com/mrpoundsign/PoundDeck/pkg/secrets"
+	"github.com/mrpoundsign/PoundDeck/pkg/wasmplugin"
 )
 
 func main() {
@@ -48,6 +49,12 @@ func main() {
 	if err := reg.RegisterProvider(sdHost); err != nil {
 		log.Fatalf("register sdplugin host: %v", err)
 	}
+	wasmHost := wasmplugin.NewProvider(wasmplugin.Options{
+		DefaultPluginsDir: filepath.Join(filepath.Dir(cfgPath), "wasm"),
+	})
+	if err := reg.RegisterProvider(wasmHost); err != nil {
+		log.Fatalf("register wasmplugin host: %v", err)
+	}
 
 	eng, err := app.NewEngine(store, reg)
 	if err != nil {
@@ -68,6 +75,19 @@ func main() {
 	} else {
 		if refErr := reg.RefreshProvider(sdHost); refErr != nil {
 			log.Printf("refresh sdplugin actions: %v", refErr)
+		}
+		eng.ReloadVisibleActions()
+	}
+	defer func() {
+		if closeErr := wasmHost.Close(); closeErr != nil {
+			log.Printf("close wasmplugin host: %v", closeErr)
+		}
+	}()
+	if startErr := wasmHost.Start(); startErr != nil {
+		log.Printf("start wasmplugin host: %v", startErr)
+	} else {
+		if refErr := reg.RefreshProvider(wasmHost); refErr != nil {
+			log.Printf("refresh wasmplugin actions: %v", refErr)
 		}
 		eng.ReloadVisibleActions()
 	}
@@ -97,6 +117,7 @@ func main() {
 	win.SetHotkeySuspender(hkMgr.SetSuspended)
 	win.SetOBSController(obsProvider)
 	win.SetSDPluginController(sdHost)
+	win.SetWasmPluginController(wasmHost)
 	win.SetPIViewer(ui.NewDefaultPIViewer())
 
 	webSrv := webdeck.NewServer(eng)

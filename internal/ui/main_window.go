@@ -52,6 +52,7 @@ type MainWindow struct {
 	obsCtrl     OBSController
 	obsUnsub    func()
 	sdCtrl      SDPluginController
+	wasmCtrl    WasmPluginController
 	webCtrl     WebDeckController
 	webUnsub    func()
 	piViewer    PIViewer
@@ -290,6 +291,7 @@ func (mw *MainWindow) ShowSettingsDialogTab(tab int) *dialog.CustomDialog {
 		mw.engine,
 		mw.obsCtrl,
 		mw.sdCtrl,
+		mw.wasmCtrl,
 		mw.webCtrl,
 		mw.cfgPath,
 		hotkeys,
@@ -310,6 +312,11 @@ func (mw *MainWindow) SetSDPluginController(ctrl SDPluginController) {
 	mw.applySnapshot(mw.engine.Snapshot())
 }
 
+// SetWasmPluginController attaches a WebAssembly (.wasm) plugin host controller for Settings management.
+func (mw *MainWindow) SetWasmPluginController(ctrl WasmPluginController) {
+	mw.wasmCtrl = ctrl
+}
+
 // SetPIViewer attaches the Property Inspector viewer for interactive HTML plugin views.
 func (mw *MainWindow) SetPIViewer(v PIViewer) {
 	mw.piViewer = v
@@ -318,13 +325,23 @@ func (mw *MainWindow) SetPIViewer(v PIViewer) {
 	}
 }
 
-// ReloadExternalPlugins rescans .sdPlugin bundles, refreshes the unified action catalog, and updates visible tiles.
+// ReloadExternalPlugins rescans .sdPlugin and .wasm plugins, refreshes the catalog, and updates visible tiles.
 func (mw *MainWindow) ReloadExternalPlugins() error {
 	if mw.sdCtrl != nil {
 		if err := mw.sdCtrl.Reload(); err != nil {
 			return err
 		}
 		if prov, ok := mw.sdCtrl.(plugin.Provider); ok {
+			if err := mw.engine.Registry().RefreshProvider(prov); err != nil {
+				return err
+			}
+		}
+	}
+	if mw.wasmCtrl != nil {
+		if err := mw.wasmCtrl.Reload(); err != nil {
+			return err
+		}
+		if prov, ok := mw.wasmCtrl.(plugin.Provider); ok {
 			if err := mw.engine.Registry().RefreshProvider(prov); err != nil {
 				return err
 			}
@@ -825,19 +842,6 @@ func (mw *MainWindow) RefreshActionCatalog() {
 		btn.Alignment = widget.ButtonAlignLeading
 		mw.catalogButtons[uuid] = btn
 		items = append(items, btn)
-	}
-
-	// Future milestones roadmap preview.
-	items = append(items, widget.NewSeparator())
-	upcomingTitle := canvas.NewText("Upcoming Providers", ColorMutedText)
-	upcomingTitle.TextSize = 11
-	upcomingTitle.TextStyle = fyne.TextStyle{Bold: true}
-	items = append(items, upcomingTitle)
-	for _, note := range []string{
-		"WebAssembly (wazero) — M5",
-	} {
-		lbl := widget.NewLabel("  • " + note)
-		items = append(items, lbl)
 	}
 
 	mw.catalogList.Objects = items

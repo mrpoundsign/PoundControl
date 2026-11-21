@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
 	"github.com/mrpoundsign/PoundDeck/pkg/sdplugin"
 	"github.com/mrpoundsign/PoundDeck/pkg/secrets"
+	"github.com/mrpoundsign/PoundDeck/pkg/wasmplugin"
 )
 
 type fakeAppsDriver struct {
@@ -933,4 +935,106 @@ func TestMainWindowWebDeckSettingsAndHeaderBadge(t *testing.T) {
 	if _, _, err := resolveGrid(); err == nil {
 		t.Fatal("expected resolveGrid(20x2) validation error")
 	}
+}
+
+func TestMainWindowWasmPluginReloadAndSettings(t *testing.T) {
+	testApp := test.NewApp()
+	t.Cleanup(func() {
+		drainUI()
+		testApp.Quit()
+	})
+	testApp.Settings().SetTheme(&StudioTheme{})
+
+	tmp := t.TempDir()
+	defaultDir := filepath.Join(tmp, "wasm_default")
+	extraDir := filepath.Join(tmp, "wasm_extra")
+	if err := os.MkdirAll(extraDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll extraDir: %v", err)
+	}
+	wasmPath := filepath.Join(extraDir, "pomodoro.wasm")
+
+	cmd := exec.Command("go", "build", "-buildmode=c-shared", "-o", wasmPath, ".")
+	cmd.Dir = filepath.Join("..", "..", "examples", "wasm-pomodoro")
+	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build wasm-pomodoro failed: %v\n%s", err, out)
+	}
+
+	reg := plugin.NewRegistry()
+	if err := reg.RegisterProvider(core.New()); err != nil {
+		t.Fatalf("RegisterProvider(core) error = %v", err)
+	}
+	wasmHost := wasmplugin.NewProvider(wasmplugin.Options{
+		DefaultPluginsDir: defaultDir,
+	})
+	if err := reg.RegisterProvider(wasmHost); err != nil {
+		t.Fatalf("RegisterProvider(wasmHost) error = %v", err)
+	}
+
+	eng, err := app.NewEngine(deck.NewMemoryStore(nil), reg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = wasmHost.Close()
+		_ = eng.Close()
+		drainUI()
+	})
+	if err := wasmHost.Start(); err != nil {
+		t.Fatalf("wasmHost.Start() error = %v", err)
+	}
+
+	mw := NewMainWindow(testApp, eng)
+	mw.SetWasmPluginController(wasmHost)
+	drainUI()
+
+	if mw.catalogButtons["com.pounddeck.examples.pomodoro"] != nil {
+		t.Fatal("expected pomodoro wasm action absent before adding extra search path")
+	}
+
+	if err := wasmHost.SaveHostConfig(wasmplugin.HostConfig{
+		ExtraPaths: []string{extraDir},
+	}); err != nil {
+		t.Fatalf("SaveHostConfig() error = %v", err)
+	}
+	if err := mw.ReloadExternalPlugins(); err != nil {
+		t.Fatalf("ReloadExternalPlugins() error = %v", err)
+	}
+	drainUI()
+
+	pomoBtn := mw.catalogButtons["com.pounddeck.examples.pomodoro"]
+	if pomoBtn == nil {
+		t.Fatal("expected reloaded Action Catalog to include com.pounddeck.examples.pomodoro")
+	}
+
+	test.Tap(pomoBtn)
+	drainUI()
+
+	for _, key := range []string{"label", "minutes", "color"} {
+		if _, ok := mw.inspector.fields[key]; !ok {
+			t.Fatalf("expected inspector field %q for pomodoro action, got %+v", key, mw.inspector.fields)
+		}
+	}
+
+	if mw.inspector.triggerBtn == nil {
+		t.Fatal("expected trigger button in inspector")
+	}
+	test.Tap(mw.inspector.triggerBtn)
+	drainUI()
+
+	tile00 := mw.surface.tiles["0,0"]
+	if tile00 == nil {
+		t.Fatal("expected tile widget for (0,0)")
+	}
+	if tile00.title != "Focus" {
+		t.Fatalf("expected tile (0,0) title \"Focus\", got %q", tile00.title)
+	}
+	if tile00.subtitle == "" {
+		t.Fatal("expected non-empty countdown subtitle on tile (0,0)")
+	}
+
+	pluginsDlg := mw.ShowSettingsDialogTab(settingsTabPlugins)
+	drainUI()
+	pluginsDlg.Hide()
+	drainUI()
 }
