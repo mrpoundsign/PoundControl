@@ -1,0 +1,11 @@
+Website = "https://github.com/mrpoundsign/PoundDeck"
+
+[Details]
+  Icon = "assets/icon.png"
+  Name = "PoundDeck"
+  ID = "com.github.mrpoundsign.pounddeck"
+  Version = "0.1.0"
+  Build = 1
+
+[Migrations]
+  fyneDo = true

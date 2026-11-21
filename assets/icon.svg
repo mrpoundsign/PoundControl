@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect x="24" y="24" width="464" height="464" rx="88" fill="#0A0A0C" stroke="#1E293B" stroke-width="12"/>
+  <!-- 3x3 Deck Key Grid -->
+  <!-- Row 0 -->
+  <rect x="76"  y="76"  width="104" height="104" rx="22" fill="#141416" stroke="#475569" stroke-width="6"/>
+  <rect x="204" y="76"  width="104" height="104" rx="22" fill="#1E293B" stroke="#38BDF8" stroke-width="8"/>
+  <rect x="332" y="76"  width="104" height="104" rx="22" fill="#141416" stroke="#475569" stroke-width="6"/>
+  <!-- Row 1 -->
+  <rect x="76"  y="204" width="104" height="104" rx="22" fill="#1E293B" stroke="#38BDF8" stroke-width="8"/>
+  <rect x="204" y="204" width="104" height="104" rx="22" fill="#38BDF8" stroke="#FFFFFF" stroke-width="6"/>
+  <rect x="332" y="204" width="104" height="104" rx="22" fill="#1E293B" stroke="#38BDF8" stroke-width="8"/>
+  <!-- Row 2 -->
+  <rect x="76"  y="332" width="104" height="104" rx="22" fill="#141416" stroke="#475569" stroke-width="6"/>
+  <rect x="204" y="332" width="104" height="104" rx="22" fill="#1E293B" stroke="#38BDF8" stroke-width="8"/>
+  <rect x="332" y="332" width="104" height="104" rx="22" fill="#141416" stroke="#475569" stroke-width="6"/>
+  <!-- Pound (#) Glyph inside Center Hero Key -->
+  <path d="M242 226 L236 286 M274 226 L268 286 M226 244 L286 244 M222 268 L282 268" stroke="#0A0A0C" stroke-width="10" stroke-linecap="round"/>
+</svg>

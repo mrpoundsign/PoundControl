@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# PoundDeck Git Pre-Commit Hook
+# Enforces:
+#   1. go fix -diff ./... (0 diff)
+#   2. golangci-lint-v2 run ./... (0 issues)
+#   3. go test -count=1 -v ./... (all tests pass)
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+cd "$ROOT_DIR"
+
+echo "==> [pre-commit] Running PoundDeck Quality Gate..."
+
+if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+    if command -v wsl.exe &>/dev/null; then
+        WSL_PATH="$(wsl.exe wslpath -a "$ROOT_DIR" | tr -d '\r')"
+        wsl.exe -e bash -lc "cd '$WSL_PATH' && ./build.sh lint && ./build.sh test"
+    else
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File build.ps1 -Target lint
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File build.ps1 -Target test
+    fi
+else
+    ./build.sh lint
+    ./build.sh test
+fi
+
+echo "✓ [pre-commit] All quality gate checks passed!"
