@@ -1,8 +1,9 @@
-// Package plugin defines the unified plugin manifest, provider, and action descriptor contracts
+// Package plugin defines the unified plugin manifest, schema, runtime, and registry contracts
 // shared across built-in Go plugins, Elgato .sdPlugin hosts, and wazero WebAssembly plugins.
 package plugin
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -25,13 +26,16 @@ const (
 
 // ActionDescriptor describes a single assignable action exposed by a plugin.
 type ActionDescriptor struct {
-	UUID        string                `json:"uuid"`
-	PluginUUID  string                `json:"pluginUuid"`
-	Name        string                `json:"name"`
-	Category    string                `json:"category,omitempty"`
-	Tooltip     string                `json:"tooltip,omitempty"`
-	Controllers []deck.ControllerType `json:"controllers,omitempty"`
-	Provider    ProviderKind          `json:"provider"`
+	UUID           string                `json:"uuid"`
+	PluginUUID     string                `json:"pluginUuid"`
+	Name           string                `json:"name"`
+	Category       string                `json:"category,omitempty"`
+	Tooltip        string                `json:"tooltip,omitempty"`
+	DefaultTitle   string                `json:"defaultTitle,omitempty"`
+	DefaultColor   string                `json:"defaultColor,omitempty"`
+	Controllers    []deck.ControllerType `json:"controllers,omitempty"`
+	SettingsSchema []SettingField        `json:"settingsSchema,omitempty"`
+	Provider       ProviderKind          `json:"provider"`
 }
 
 // SupportsController reports whether the action can bind to the given controller type.
@@ -82,10 +86,13 @@ func (m Manifest) Validate() error {
 	return nil
 }
 
-// Provider supplies actions from a plugin runtime backend to the PoundDeck registry.
+// Provider supplies and executes actions from one plugin backend in the PoundDeck registry.
 type Provider interface {
 	Kind() ProviderKind
 	Name() string
+	Manifests() []Manifest
 	Actions() []ActionDescriptor
+	BindHost(host HostAPI)
+	Dispatch(ctx context.Context, ev ActionEvent) error
 	Close() error
 }
