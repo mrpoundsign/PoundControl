@@ -67,6 +67,10 @@ func TestFileStoreAtomicSaveAndLoad(t *testing.T) {
 
 	// Second save exercises atomic replacement on existing destination file.
 	initial.Profiles[0].Pages[0].Slots["1,2"].Title = "Clicks Updated"
+	initial.PluginSettings["com.github.mrpoundsign.pounddeck.obs"] = map[string]any{
+		"host": "127.0.0.1",
+		"port": float64(4455),
+	}
 	if err := store.Save(initial); err != nil {
 		t.Fatalf("second Save() error = %v", err)
 	}
@@ -81,6 +85,10 @@ func TestFileStoreAtomicSaveAndLoad(t *testing.T) {
 	gotSlot := reloaded.Profiles[0].Pages[0].Slots["1,2"]
 	if gotSlot == nil || gotSlot.Title != "Clicks Updated" {
 		t.Fatalf("unexpected reloaded slot: %+v", gotSlot)
+	}
+	obsCfg := reloaded.PluginSettings["com.github.mrpoundsign.pounddeck.obs"]
+	if obsCfg["host"] != "127.0.0.1" {
+		t.Fatalf("unexpected reloaded PluginSettings: %+v", obsCfg)
 	}
 
 	// Ensure no leftover temp files remain.

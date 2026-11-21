@@ -123,9 +123,10 @@ func (p *Profile) Clone() *Profile {
 
 // Config is the top-level persisted PoundDeck configuration document.
 type Config struct {
-	SchemaVersion   int        `json:"schemaVersion"`
-	ActiveProfileID string     `json:"activeProfileId"`
-	Profiles        []*Profile `json:"profiles"`
+	SchemaVersion   int                       `json:"schemaVersion"`
+	ActiveProfileID string                    `json:"activeProfileId"`
+	Profiles        []*Profile                `json:"profiles"`
+	PluginSettings  map[string]map[string]any `json:"pluginSettings,omitempty"`
 }
 
 // DefaultConfig returns a valid baseline configuration with a 5x3 "Default" profile.
@@ -151,6 +152,7 @@ func DefaultConfig() *Config {
 				Folders: make(map[string]*Folder),
 			},
 		},
+		PluginSettings: make(map[string]map[string]any),
 	}
 }
 
@@ -163,10 +165,15 @@ func (c *Config) Clone() *Config {
 	for i, p := range c.Profiles {
 		profiles[i] = p.Clone()
 	}
+	pluginSettings := make(map[string]map[string]any, len(c.PluginSettings))
+	for pid, settings := range c.PluginSettings {
+		pluginSettings[pid] = cloneAnyMap(settings)
+	}
 	return &Config{
 		SchemaVersion:   c.SchemaVersion,
 		ActiveProfileID: c.ActiveProfileID,
 		Profiles:        profiles,
+		PluginSettings:  pluginSettings,
 	}
 }
 
@@ -177,6 +184,15 @@ func (c *Config) Normalize() {
 	}
 	if c.SchemaVersion <= 0 {
 		c.SchemaVersion = CurrentSchemaVersion
+	}
+	if c.PluginSettings == nil {
+		c.PluginSettings = make(map[string]map[string]any)
+	} else {
+		for pid, settings := range c.PluginSettings {
+			if settings == nil {
+				c.PluginSettings[pid] = make(map[string]any)
+			}
+		}
 	}
 	if len(c.Profiles) == 0 {
 		def := DefaultConfig()

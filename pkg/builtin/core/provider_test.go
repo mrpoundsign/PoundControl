@@ -65,9 +65,11 @@ func (h *mockHost) UpdateVisual(_ string, patch plugin.VisualPatch) {
 	h.patches = append(h.patches, patch)
 }
 
-func (h *mockHost) SaveSettings(string, map[string]any) error { return nil }
-func (h *mockHost) Log(string, string)                        {}
-func (h *mockHost) Deck() plugin.DeckControl                  { return h.deck }
+func (h *mockHost) SaveSettings(string, map[string]any) error       { return nil }
+func (h *mockHost) GetGlobalSettings(string) map[string]any         { return nil }
+func (h *mockHost) SaveGlobalSettings(string, map[string]any) error { return nil }
+func (h *mockHost) Log(string, string)                               {}
+func (h *mockHost) Deck() plugin.DeckControl                        { return h.deck }
 
 func TestCoreProviderNavigationAndManifest(t *testing.T) {
 	p := New()

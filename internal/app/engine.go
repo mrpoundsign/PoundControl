@@ -1191,6 +1191,49 @@ func (e *Engine) TriggerAction(ctx context.Context, actionUUID string, settings 
 	})
 }
 
+// DynamicOptions queries registered providers for live inspector choices matching optionsKey.
+func (e *Engine) DynamicOptions(ctx context.Context, optionsKey string, currentSettings map[string]any) []plugin.SelectOption {
+	if e.registry == nil {
+		return nil
+	}
+	return e.registry.DynamicOptions(ctx, optionsKey, currentSettings)
+}
+
+// GlobalSettings returns a cloned copy of persisted plugin-wide settings for pluginUUID.
+func (e *Engine) GlobalSettings(pluginUUID string) map[string]any {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.cfg == nil || e.cfg.PluginSettings == nil {
+		return make(map[string]any)
+	}
+	return cloneSettings(e.cfg.PluginSettings[pluginUUID])
+}
+
+// SaveGlobalSettings persists plugin-wide settings for pluginUUID atomically.
+func (e *Engine) SaveGlobalSettings(pluginUUID string, settings map[string]any) error {
+	pid := strings.TrimSpace(pluginUUID)
+	if pid == "" {
+		return errors.New("plugin UUID cannot be empty")
+	}
+
+	e.opMu.Lock()
+	e.mu.Lock()
+	if e.cfg.PluginSettings == nil {
+		e.cfg.PluginSettings = make(map[string]map[string]any)
+	}
+	e.cfg.PluginSettings[pid] = cloneSettings(settings)
+	cfgCopy := e.cfg.Clone()
+	e.mu.Unlock()
+
+	err := e.store.Save(cfgCopy)
+	e.opMu.Unlock()
+	if err != nil {
+		return err
+	}
+	e.notifySubscribers()
+	return nil
+}
+
 func (e *Engine) updateVisual(ctxID string, patch plugin.VisualPatch) {
 	e.mu.Lock()
 	cur := e.visuals[ctxID]
@@ -1308,6 +1351,14 @@ func (h *engineHost) UpdateVisual(ctxID string, patch plugin.VisualPatch) {
 
 func (h *engineHost) SaveSettings(ctxID string, settings map[string]any) error {
 	return h.eng.saveContextSettings(ctxID, settings)
+}
+
+func (h *engineHost) GetGlobalSettings(pluginUUID string) map[string]any {
+	return h.eng.GlobalSettings(pluginUUID)
+}
+
+func (h *engineHost) SaveGlobalSettings(pluginUUID string, settings map[string]any) error {
+	return h.eng.SaveGlobalSettings(pluginUUID, settings)
 }
 
 func (h *engineHost) Log(pluginUUID, message string) {

@@ -59,6 +59,8 @@ type DeckControl interface {
 type HostAPI interface {
 	UpdateVisual(context string, patch VisualPatch)
 	SaveSettings(context string, settings map[string]any) error
+	GetGlobalSettings(pluginUUID string) map[string]any
+	SaveGlobalSettings(pluginUUID string, settings map[string]any) error
 	Log(pluginUUID, message string)
 	Deck() DeckControl
 }

@@ -171,6 +171,14 @@ func TestEngineCounterDialMultiActionAndFilePersistence(t *testing.T) {
 		t.Errorf("expected MultiAction to advance to PageIndex 1, got %d", snap.PageIndex)
 	}
 
+	// Save plugin global settings and verify persistence across reload.
+	if err := eng.SaveGlobalSettings("com.example.obs", map[string]any{
+		"host": "127.0.0.1",
+		"port": float64(4455),
+	}); err != nil {
+		t.Fatalf("SaveGlobalSettings() error = %v", err)
+	}
+
 	// Reload from FileStore in a brand-new Engine to prove disk persistence.
 	_ = eng.Close()
 	eng2 := newTestEngine(t, deck.NewFileStore(cfgPath))
@@ -181,5 +189,8 @@ func TestEngineCounterDialMultiActionAndFilePersistence(t *testing.T) {
 	slot0 := snap2.Slots["0,0"]
 	if slot0.Config == nil || slot0.Config.Title != "Kills" || slot0.Visual.Subtitle != "1" {
 		t.Fatalf("unexpected reloaded slot 0,0: %+v", slot0)
+	}
+	if gs := eng2.GlobalSettings("com.example.obs"); gs["host"] != "127.0.0.1" {
+		t.Fatalf("reloaded GlobalSettings = %+v, want host=127.0.0.1", gs)
 	}
 }

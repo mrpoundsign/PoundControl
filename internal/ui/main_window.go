@@ -17,6 +17,7 @@ import (
 
 	"github.com/mrpoundsign/PoundDeck/internal/app"
 	"github.com/mrpoundsign/PoundDeck/internal/version"
+	"github.com/mrpoundsign/PoundDeck/pkg/builtin/obs"
 	"github.com/mrpoundsign/PoundDeck/pkg/deck"
 )
 
@@ -38,11 +39,13 @@ var studioGridPresets = []gridPreset{
 
 // MainWindow hosts the PoundDeck desktop studio and interactive virtual macro deck.
 type MainWindow struct {
-	app    fyne.App
-	win    fyne.Window
-	engine *app.Engine
-	unsub  func()
-	popOut *PopOutPad
+	app      fyne.App
+	win      fyne.Window
+	engine   *app.Engine
+	unsub    func()
+	obsCtrl  OBSController
+	obsUnsub func()
+	popOut   *PopOutPad
 
 	selectedController deck.ControllerType
 	selectedSlot       deck.Coordinates
@@ -56,6 +59,7 @@ type MainWindow struct {
 	profileSelect  *widget.Select
 	pageLabel      *widget.Label
 	backBtn        *widget.Button
+	obsBtn         *widget.Button
 	runModeCheck   *widget.Check
 	pluginsBadge   *canvas.Text
 	webBadge       *canvas.Text
@@ -112,6 +116,10 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 	})
 
 	win.SetOnClosed(func() {
+		if mw.obsUnsub != nil {
+			mw.obsUnsub()
+			mw.obsUnsub = nil
+		}
 		if mw.unsub != nil {
 			mw.unsub()
 			mw.unsub = nil
@@ -202,6 +210,42 @@ func (mw *MainWindow) OpenPopOutPad() *PopOutPad {
 	})
 	mw.popOut.Show()
 	return mw.popOut
+}
+
+// SetOBSController attaches an OBSController so the Studio header badge displays live OBS status
+// and clicking it opens the OBS connection configuration dialog.
+func (mw *MainWindow) SetOBSController(ctrl OBSController) {
+	if mw.obsUnsub != nil {
+		mw.obsUnsub()
+		mw.obsUnsub = nil
+	}
+	mw.obsCtrl = ctrl
+	if ctrl == nil {
+		mw.obsBtn.Hide()
+		return
+	}
+
+	mw.obsBtn.Show()
+	mw.applyOBSStatus(ctrl.Status())
+	mw.obsUnsub = ctrl.SubscribeStatus(func(st obs.ClientStatus) {
+		dispatchUI(func() {
+			mw.applyOBSStatus(st)
+		})
+	})
+}
+
+func (mw *MainWindow) applyOBSStatus(st obs.ClientStatus) {
+	if mw.obsBtn == nil {
+		return
+	}
+	mw.obsBtn.SetText(obsBadgeLabel(st))
+	if st.State == obs.StateConnected {
+		mw.obsBtn.Importance = widget.HighImportance
+		mw.inspector.RefreshDynamicOptions()
+	} else {
+		mw.obsBtn.Importance = widget.MediumImportance
+	}
+	mw.obsBtn.Refresh()
 }
 
 func (mw *MainWindow) setStatus(msg string) {
@@ -397,6 +441,11 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 		mw.SetRunMode(checked)
 	})
 
+	mw.obsBtn = widget.NewButton("OBS: Off", func() {
+		showOBSConnectionDialog(mw.win, mw.obsCtrl, mw.setStatus)
+	})
+	mw.obsBtn.Hide()
+
 	popOutBtn := widget.NewButton("Pop-Out Pad", func() {
 		mw.OpenPopOutPad()
 	})
@@ -422,6 +471,7 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 		addPageBtn,
 		mw.backBtn,
 		layout.NewSpacer(),
+		mw.obsBtn,
 		mw.runModeCheck,
 		popOutBtn,
 		widget.NewSeparator(),
@@ -484,7 +534,6 @@ func (mw *MainWindow) buildActionCatalog() fyne.CanvasObject {
 	upcomingTitle.TextStyle = fyne.TextStyle{Bold: true}
 	list.Add(upcomingTitle)
 	for _, note := range []string{
-		"OBS Studio (WebSocket v5) — M2",
 		"App & Macro Control — M3",
 		"Elgato .sdPlugin Host — M4",
 		"WebAssembly (wazero) — M5",

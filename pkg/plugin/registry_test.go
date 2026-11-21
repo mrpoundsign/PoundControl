@@ -31,12 +31,21 @@ func (s *stubProvider) Close() error {
 	return s.closeErr
 }
 
+func (s *stubProvider) DynamicOptions(_ context.Context, key string, _ map[string]any) []SelectOption {
+	if key == "stub.items" {
+		return []SelectOption{{Label: "Item A", Value: "a"}}
+	}
+	return nil
+}
+
 type stubHost struct{}
 
-func (h *stubHost) UpdateVisual(string, VisualPatch)         {}
-func (h *stubHost) SaveSettings(string, map[string]any) error { return nil }
-func (h *stubHost) Log(string, string)                        {}
-func (h *stubHost) Deck() DeckControl                         { return nil }
+func (h *stubHost) UpdateVisual(string, VisualPatch)                   {}
+func (h *stubHost) SaveSettings(string, map[string]any) error          { return nil }
+func (h *stubHost) GetGlobalSettings(string) map[string]any            { return nil }
+func (h *stubHost) SaveGlobalSettings(string, map[string]any) error    { return nil }
+func (h *stubHost) Log(string, string)                                  {}
+func (h *stubHost) Deck() DeckControl                                   { return nil }
 
 func TestRegistryRegistrationSortingDispatchAndClose(t *testing.T) {
 	reg := NewRegistry()
@@ -108,6 +117,15 @@ func TestRegistryRegistrationSortingDispatchAndClose(t *testing.T) {
 
 	if err := reg.Dispatch(context.Background(), ActionEvent{ActionUUID: "missing"}); err == nil {
 		t.Error("expected error dispatching unknown action")
+	}
+
+	// DynamicOptions delegates to DynamicOptionsProviders.
+	opts := reg.DynamicOptions(context.Background(), "stub.items", nil)
+	if len(opts) != 1 || opts[0].Value != "a" {
+		t.Fatalf("unexpected DynamicOptions(): %+v", opts)
+	}
+	if empty := reg.DynamicOptions(context.Background(), "other", nil); len(empty) != 0 {
+		t.Fatalf("expected empty DynamicOptions for unknown key, got %+v", empty)
 	}
 
 	// Verify Close aggregates errors and marks providers closed.

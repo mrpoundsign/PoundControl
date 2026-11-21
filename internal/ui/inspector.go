@@ -273,26 +273,41 @@ func (ins *ActionInspector) buildSchemaField(field plugin.SettingField, settings
 		out = append(out, chk)
 
 	case plugin.FieldSelect:
-		labels := make([]string, len(field.Options))
-		optMap := make(map[string]string, len(field.Options))
-		selLabel := ""
-		curVal := fmt.Sprint(val)
-		for i, opt := range field.Options {
-			labels[i] = opt.Label
-			optMap[opt.Label] = opt.Value
-			if opt.Value == curVal || opt.Label == curVal {
-				selLabel = opt.Label
+		if field.OptionsKey != "" {
+			opts := ins.engine.DynamicOptions(context.Background(), field.OptionsKey, settings)
+			choices := make([]string, len(opts))
+			for i, opt := range opts {
+				choices[i] = opt.Value
 			}
+			se := widget.NewSelectEntry(choices)
+			se.SetPlaceHolder(field.Placeholder)
+			if val != nil {
+				se.SetText(fmt.Sprint(val))
+			}
+			ins.fields[field.Key] = inspectorFieldBinding{schema: field, widget: se}
+			out = append(out, widget.NewLabel(field.Label), se)
+		} else {
+			labels := make([]string, len(field.Options))
+			optMap := make(map[string]string, len(field.Options))
+			selLabel := ""
+			curVal := fmt.Sprint(val)
+			for i, opt := range field.Options {
+				labels[i] = opt.Label
+				optMap[opt.Label] = opt.Value
+				if opt.Value == curVal || opt.Label == curVal {
+					selLabel = opt.Label
+				}
+			}
+			if selLabel == "" && len(labels) > 0 {
+				selLabel = labels[0]
+			}
+			sel := widget.NewSelect(labels, nil)
+			if selLabel != "" {
+				sel.SetSelected(selLabel)
+			}
+			ins.fields[field.Key] = inspectorFieldBinding{schema: field, widget: sel, optMap: optMap}
+			out = append(out, widget.NewLabel(field.Label), sel)
 		}
-		if selLabel == "" && len(labels) > 0 {
-			selLabel = labels[0]
-		}
-		sel := widget.NewSelect(labels, nil)
-		if selLabel != "" {
-			sel.SetSelected(selLabel)
-		}
-		ins.fields[field.Key] = inspectorFieldBinding{schema: field, widget: sel, optMap: optMap}
-		out = append(out, widget.NewLabel(field.Label), sel)
 
 	case plugin.FieldMultiline:
 		entry := widget.NewMultiLineEntry()
@@ -343,6 +358,8 @@ func (ins *ActionInspector) collectSettings() map[string]any {
 			} else {
 				out[key] = w.Selected
 			}
+		case *widget.SelectEntry:
+			out[key] = strings.TrimSpace(w.Text)
 		case *widget.Entry:
 			if binding.schema.Type == plugin.FieldNumber {
 				out[key] = parseNumberValue(w.Text, binding.schema.Default)
@@ -352,6 +369,26 @@ func (ins *ActionInspector) collectSettings() map[string]any {
 		}
 	}
 	return out
+}
+
+// RefreshDynamicOptions repopulates any live SelectEntry dropdowns from registered dynamic providers.
+func (ins *ActionInspector) RefreshDynamicOptions() {
+	if len(ins.fields) == 0 {
+		return
+	}
+	cur := ins.collectSettings()
+	for _, binding := range ins.fields {
+		se, ok := binding.widget.(*widget.SelectEntry)
+		if !ok || binding.schema.OptionsKey == "" {
+			continue
+		}
+		opts := ins.engine.DynamicOptions(context.Background(), binding.schema.OptionsKey, cur)
+		choices := make([]string, len(opts))
+		for i, opt := range opts {
+			choices[i] = opt.Value
+		}
+		se.SetOptions(choices)
+	}
 }
 
 func (ins *ActionInspector) selectedColorHex() string {

@@ -33,14 +33,20 @@ func TestConfigCloneIsolationAndValidate(t *testing.T) {
 		},
 	}
 
+	cfg.PluginSettings["com.example.obs"] = map[string]any{"host": "127.0.0.1", "port": float64(4455)}
+
 	cp := cfg.Clone()
 	cp.Profiles[0].Pages[0].Slots["0,0"].Title = "Mutated"
 	cp.Profiles[0].Pages[0].Slots["0,0"].Settings["nested"].(map[string]any)["count"] = 99
 	cp.Profiles[0].Pages[0].Slots["0,0"].Settings["items"].([]any)[0] = "z"
+	cp.PluginSettings["com.example.obs"]["host"] = "mutated"
 
 	orig := cfg.Profiles[0].Pages[0].Slots["0,0"]
 	if orig.Title != "Original" {
 		t.Errorf("Clone leaked Title mutation: got %q", orig.Title)
+	}
+	if got := cfg.PluginSettings["com.example.obs"]["host"]; got != "127.0.0.1" {
+		t.Errorf("Clone leaked PluginSettings mutation: got %v", got)
 	}
 	if got := orig.Settings["nested"].(map[string]any)["count"]; got != 1 {
 		t.Errorf("Clone leaked nested map mutation: got %v", got)

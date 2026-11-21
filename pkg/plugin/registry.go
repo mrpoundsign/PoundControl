@@ -139,6 +139,23 @@ func (r *Registry) Dispatch(ctx context.Context, ev ActionEvent) error {
 	return entry.provider.Dispatch(ctx, ev)
 }
 
+// DynamicOptions queries registered DynamicOptionsProviders for live inspector choices matching optionsKey.
+func (r *Registry) DynamicOptions(ctx context.Context, optionsKey string, currentSettings map[string]any) []SelectOption {
+	if strings.TrimSpace(optionsKey) == "" {
+		return nil
+	}
+	providers := r.Providers()
+	for _, p := range providers {
+		if dop, ok := p.(DynamicOptionsProvider); ok {
+			opts := dop.DynamicOptions(ctx, optionsKey, currentSettings)
+			if len(opts) > 0 {
+				return slices.Clone(opts)
+			}
+		}
+	}
+	return nil
+}
+
 // Close closes every registered provider and returns any joined close errors.
 func (r *Registry) Close() error {
 	r.mu.Lock()

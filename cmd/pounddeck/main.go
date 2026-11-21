@@ -10,8 +10,10 @@ import (
 	"github.com/mrpoundsign/PoundDeck/internal/ui"
 	"github.com/mrpoundsign/PoundDeck/internal/version"
 	"github.com/mrpoundsign/PoundDeck/pkg/builtin/core"
+	"github.com/mrpoundsign/PoundDeck/pkg/builtin/obs"
 	"github.com/mrpoundsign/PoundDeck/pkg/deck"
 	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundDeck/pkg/secrets"
 )
 
 func main() {
@@ -20,10 +22,15 @@ func main() {
 		log.Fatalf("resolve config path: %v", err)
 	}
 	store := deck.NewFileStore(cfgPath)
+	secretStore := secrets.NewKeyringStore(secrets.ServiceName)
 
 	reg := plugin.NewRegistry()
 	if err := reg.RegisterProvider(core.New()); err != nil {
 		log.Fatalf("register built-in core plugin: %v", err)
+	}
+	obsProvider := obs.New(secretStore)
+	if err := reg.RegisterProvider(obsProvider); err != nil {
+		log.Fatalf("register built-in obs plugin: %v", err)
 	}
 
 	eng, err := app.NewEngine(store, reg)
@@ -41,5 +48,8 @@ func main() {
 	myApp.Settings().SetTheme(&ui.StudioTheme{})
 
 	win := ui.NewMainWindow(myApp, eng)
+	win.SetOBSController(obsProvider)
+	obsProvider.StartFromGlobalSettings()
+
 	win.ShowAndRun()
 }
