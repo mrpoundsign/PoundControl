@@ -1,6 +1,10 @@
 package plugin
 
-import "context"
+import (
+	"context"
+
+	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+)
 
 // FieldType identifies the UI control type used to render a declarative setting field in Fyne.
 type FieldType string
@@ -40,4 +44,23 @@ type SettingField struct {
 // (such as OBS scenes, audio inputs, or scene sources) for SettingField.OptionsKey.
 type DynamicOptionsProvider interface {
 	DynamicOptions(ctx context.Context, optionsKey string, currentSettings map[string]any) []SelectOption
+}
+
+// PropertyInspectorSession describes an HTML/WebView Property Inspector endpoint for a slot or dial.
+type PropertyInspectorSession struct {
+	Title string `json:"title"`
+	URL   string `json:"url"`
+}
+
+// PropertyInspectorProvider can be implemented optionally by a Provider (such as .sdPlugin hosts)
+// to provide an HTML Property Inspector URL for a bound action instance.
+type PropertyInspectorProvider interface {
+	PropertyInspectorURL(
+		ctxID string,
+		actionUUID string,
+		controller deck.ControllerType,
+		coords deck.Coordinates,
+		dial int,
+		settings map[string]any,
+	) (PropertyInspectorSession, bool)
 }

@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
+	"image"
 	"image/color"
 	"strconv"
 	"strings"
@@ -14,7 +16,10 @@ import (
 
 	"github.com/mrpoundsign/PoundDeck/internal/app"
 	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+	"github.com/mrpoundsign/PoundDeck/pkg/tile"
 )
+
+var sharedTileCache = tile.NewCache(256)
 
 func parseHexColor(hex string, fallback color.RGBA) color.RGBA {
 	s := strings.TrimPrefix(strings.TrimSpace(hex), "#")
@@ -35,17 +40,19 @@ func parseHexColor(hex string, fallback color.RGBA) color.RGBA {
 
 type deckTileWidget struct {
 	widget.BaseWidget
-	coords    deck.Coordinates
-	title     string
-	subtitle  string
-	hotkey    string
-	accentHex string
-	flash     string
-	assigned  bool
-	autoBack  bool
-	selected  bool
-	hovered   bool
-	onTapped  func(deck.Coordinates)
+	coords     deck.Coordinates
+	title      string
+	subtitle   string
+	hotkey     string
+	accentHex  string
+	flash      string
+	imageURI   string
+	decodedImg image.Image
+	assigned   bool
+	autoBack   bool
+	selected   bool
+	hovered    bool
+	onTapped   func(deck.Coordinates)
 }
 
 var (
@@ -78,6 +85,8 @@ func (t *deckTileWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 		t.hotkey = ""
 		t.accentHex = ""
 		t.flash = ""
+		t.imageURI = ""
+		t.decodedImg = nil
 		t.assigned = false
 		t.autoBack = false
 	} else {
@@ -90,6 +99,17 @@ func (t *deckTileWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 		}
 		t.accentHex = rendered.Visual.Color
 		t.flash = rendered.Visual.Flash
+		uri := strings.TrimSpace(rendered.Visual.ImageURI)
+		if uri != t.imageURI {
+			t.imageURI = uri
+			if uri == "" {
+				t.decodedImg = nil
+			} else if decoded, err := sharedTileCache.GetOrDecode(uri, 144); err == nil {
+				t.decodedImg = decoded
+			} else {
+				t.decodedImg = nil
+			}
+		}
 		t.assigned = rendered.Config != nil
 		t.autoBack = rendered.AutoBack
 	}
@@ -124,6 +144,14 @@ func (t *deckTileWidget) CreateRenderer() fyne.WidgetRenderer {
 	accentBar := canvas.NewRectangle(ColorSlateBorder)
 	accentBar.CornerRadius = 2
 
+	artImg := canvas.NewImageFromImage(t.decodedImg)
+	artImg.FillMode = canvas.ImageFillContain
+	artImg.ScaleMode = canvas.ImageScaleSmooth
+	artImg.SetMinSize(fyne.NewSize(0, 0))
+	if t.decodedImg == nil {
+		artImg.Hide()
+	}
+
 	titleTxt := canvas.NewText(t.title, ColorChromeWhite)
 	titleTxt.TextSize = 12
 	titleTxt.TextStyle = fyne.TextStyle{Bold: true}
@@ -139,22 +167,28 @@ func (t *deckTileWidget) CreateRenderer() fyne.WidgetRenderer {
 	coordTxt.Alignment = fyne.TextAlignCenter
 
 	return &deckTileRenderer{
-		tile:      t,
-		bg:        bg,
-		accentBar: accentBar,
-		titleTxt:  titleTxt,
-		subTxt:    subTxt,
-		coordTxt:  coordTxt,
+		tile:         t,
+		bg:           bg,
+		accentBar:    accentBar,
+		artImg:       artImg,
+		titleTxt:     titleTxt,
+		subTxt:       subTxt,
+		coordTxt:     coordTxt,
+		lastImageURI: t.imageURI,
+		hasArt:       t.decodedImg != nil,
 	}
 }
 
 type deckTileRenderer struct {
-	tile      *deckTileWidget
-	bg        *canvas.Rectangle
-	accentBar *canvas.Rectangle
-	titleTxt  *canvas.Text
-	subTxt    *canvas.Text
-	coordTxt  *canvas.Text
+	tile         *deckTileWidget
+	bg           *canvas.Rectangle
+	accentBar    *canvas.Rectangle
+	artImg       *canvas.Image
+	titleTxt     *canvas.Text
+	subTxt       *canvas.Text
+	coordTxt     *canvas.Text
+	lastImageURI string
+	hasArt       bool
 }
 
 func (r *deckTileRenderer) Layout(size fyne.Size) {
@@ -165,9 +199,56 @@ func (r *deckTileRenderer) Layout(size fyne.Size) {
 	r.accentBar.Move(fyne.NewPos(12, 7))
 	r.accentBar.Resize(fyne.NewSize(barW, 3))
 
+	hasArt := r.tile.decodedImg != nil
+	fullArt := hasArt && strings.TrimSpace(r.tile.title) == "" && strings.TrimSpace(r.tile.subtitle) == ""
+	if fullArt {
+		r.accentBar.Hide()
+		r.titleTxt.Hide()
+		r.subTxt.Hide()
+		r.coordTxt.Hide()
+		pad := float32(6)
+		r.artImg.Move(fyne.NewPos(pad, pad))
+		r.artImg.Resize(fyne.NewSize(max(float32(16), size.Width-pad*2), max(float32(16), size.Height-pad*2)))
+		r.artImg.Show()
+		return
+	}
+
+	r.titleTxt.Show()
+	r.coordTxt.Show()
 	titleSize := r.titleTxt.MinSize()
 	coordSize := r.coordTxt.MinSize()
 
+	if hasArt {
+		iconRatio := float32(0.36)
+		if r.tile.subtitle != "" {
+			iconRatio = 0.28
+		}
+		iconSize := min(float32(34), max(float32(20), size.Height*iconRatio))
+		r.artImg.Move(fyne.NewPos((size.Width-iconSize)/2, 13))
+		r.artImg.Resize(fyne.NewSize(iconSize, iconSize))
+		r.artImg.Show()
+
+		startY := 13 + iconSize + 3
+		if r.tile.subtitle != "" {
+			subSize := r.subTxt.MinSize()
+			r.titleTxt.Resize(fyne.NewSize(size.Width-12, titleSize.Height))
+			r.titleTxt.Move(fyne.NewPos(6, startY))
+			r.subTxt.Resize(fyne.NewSize(size.Width-12, subSize.Height))
+			r.subTxt.Move(fyne.NewPos(6, startY+titleSize.Height+2))
+			r.coordTxt.Resize(fyne.NewSize(size.Width-12, coordSize.Height))
+			r.coordTxt.Move(fyne.NewPos(6, startY+titleSize.Height+2+subSize.Height+2))
+			r.subTxt.Show()
+		} else {
+			r.subTxt.Hide()
+			r.titleTxt.Resize(fyne.NewSize(size.Width-12, titleSize.Height))
+			r.titleTxt.Move(fyne.NewPos(6, startY))
+			r.coordTxt.Resize(fyne.NewSize(size.Width-12, coordSize.Height))
+			r.coordTxt.Move(fyne.NewPos(6, startY+titleSize.Height+2))
+		}
+		return
+	}
+
+	r.artImg.Hide()
 	if r.tile.subtitle != "" {
 		subSize := r.subTxt.MinSize()
 		totalH := titleSize.Height + 3 + subSize.Height + 4 + coordSize.Height
@@ -203,6 +284,15 @@ func (r *deckTileRenderer) Refresh() {
 	}
 	r.coordTxt.Text = coordText
 
+	hasDecoded := r.tile.decodedImg != nil
+	if r.lastImageURI != r.tile.imageURI || r.hasArt != hasDecoded {
+		r.artImg.Image = r.tile.decodedImg
+		r.lastImageURI = r.tile.imageURI
+		r.hasArt = hasDecoded
+	}
+
+	fullArt := hasDecoded && strings.TrimSpace(r.tile.title) == "" && strings.TrimSpace(r.tile.subtitle) == ""
+
 	accentCol := ColorSlateBorder
 	if r.tile.accentHex != "" {
 		accentCol = parseHexColor(r.tile.accentHex, ColorSkyBlue)
@@ -210,7 +300,7 @@ func (r *deckTileRenderer) Refresh() {
 		accentCol = ColorSkyBlue
 	}
 	r.accentBar.FillColor = accentCol
-	if r.tile.assigned || r.tile.autoBack {
+	if !fullArt && (r.tile.assigned || r.tile.autoBack) {
 		r.accentBar.Show()
 	} else {
 		r.accentBar.Hide()
@@ -259,28 +349,31 @@ func (r *deckTileRenderer) Refresh() {
 	r.Layout(r.tile.Size())
 	r.bg.Refresh()
 	r.accentBar.Refresh()
+	r.artImg.Refresh()
 	r.titleTxt.Refresh()
 	r.subTxt.Refresh()
 	r.coordTxt.Refresh()
 }
 
 func (r *deckTileRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{r.bg, r.accentBar, r.titleTxt, r.subTxt, r.coordTxt}
+	return []fyne.CanvasObject{r.bg, r.accentBar, r.artImg, r.titleTxt, r.subTxt, r.coordTxt}
 }
 
 func (r *deckTileRenderer) Destroy() {}
 
 type dialFaceWidget struct {
 	widget.BaseWidget
-	index     int
-	title     string
-	value     string
-	accentHex string
-	assigned  bool
-	selected  bool
-	hovered   bool
-	onTapped  func(int)
-	onScroll  func(int, int)
+	index        int
+	title        string
+	value        string
+	accentHex    string
+	hasIndicator bool
+	indicatorPct float64
+	assigned     bool
+	selected     bool
+	hovered      bool
+	onTapped     func(int)
+	onScroll     func(int, int)
 }
 
 var (
@@ -305,6 +398,8 @@ func (d *dialFaceWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 		d.title = fmt.Sprintf("Dial %d", d.index+1)
 		d.value = "Empty"
 		d.accentHex = ""
+		d.hasIndicator = false
+		d.indicatorPct = 0
 		d.assigned = false
 	} else {
 		d.title = rendered.Visual.Title
@@ -317,11 +412,60 @@ func (d *dialFaceWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 		if d.value == "" {
 			d.value = "Ready"
 		}
+		d.hasIndicator = false
+		d.indicatorPct = 0
+		if rawInd, ok := rendered.Visual.Feedback["indicator"]; ok {
+			if pct, valid := parseDialIndicator(rawInd); valid {
+				d.hasIndicator = true
+				d.indicatorPct = pct
+			}
+		}
 		d.accentHex = rendered.Visual.Color
 		d.assigned = rendered.Config != nil
 	}
 	d.selected = selected
 	d.Refresh()
+}
+
+func parseDialIndicator(raw any) (float64, bool) {
+	if m, ok := raw.(map[string]any); ok {
+		if enabled, ok := m["enabled"].(bool); ok && !enabled {
+			return 0, false
+		}
+		raw = m["value"]
+	}
+	var val float64
+	switch v := raw.(type) {
+	case float64:
+		val = v
+	case float32:
+		val = float64(v)
+	case int:
+		val = float64(v)
+	case int64:
+		val = float64(v)
+	case json.Number:
+		parsed, err := v.Float64()
+		if err != nil {
+			return 0, false
+		}
+		val = parsed
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(v, "%")), 64)
+		if err != nil {
+			return 0, false
+		}
+		val = parsed
+	default:
+		return 0, false
+	}
+	if val < 0 {
+		val = 0
+	}
+	if val > 100 {
+		val = 100
+	}
+	return val, true
 }
 
 func (d *dialFaceWidget) Tapped(*fyne.PointEvent) {
@@ -373,12 +517,22 @@ func (d *dialFaceWidget) CreateRenderer() fyne.WidgetRenderer {
 	valTxt.TextStyle = fyne.TextStyle{Bold: true}
 	valTxt.Alignment = fyne.TextAlignCenter
 
+	indBg := canvas.NewRectangle(ColorObsidianDeep)
+	indBg.CornerRadius = 2
+	indBg.Hide()
+
+	indFill := canvas.NewRectangle(ColorSkyBlue)
+	indFill.CornerRadius = 2
+	indFill.Hide()
+
 	return &dialFaceRenderer{
 		face:     d,
 		bg:       bg,
 		ring:     ring,
 		titleTxt: titleTxt,
 		valTxt:   valTxt,
+		indBg:    indBg,
+		indFill:  indFill,
 	}
 }
 
@@ -388,6 +542,8 @@ type dialFaceRenderer struct {
 	ring     *canvas.Circle
 	titleTxt *canvas.Text
 	valTxt   *canvas.Text
+	indBg    *canvas.Rectangle
+	indFill  *canvas.Rectangle
 }
 
 func (r *dialFaceRenderer) Layout(size fyne.Size) {
@@ -395,16 +551,49 @@ func (r *dialFaceRenderer) Layout(size fyne.Size) {
 	r.bg.Resize(size)
 
 	ringSize := float32(30)
+	ringY := float32(6)
+	titleY := float32(40)
+	if r.face.hasIndicator {
+		ringSize = 24
+		ringY = 5
+		titleY = 32
+	}
 	r.ring.Resize(fyne.NewSize(ringSize, ringSize))
-	r.ring.Move(fyne.NewPos((size.Width-ringSize)/2, 6))
+	r.ring.Move(fyne.NewPos((size.Width-ringSize)/2, ringY))
 
 	titleSize := r.titleTxt.MinSize()
 	r.titleTxt.Resize(fyne.NewSize(size.Width-8, titleSize.Height))
-	r.titleTxt.Move(fyne.NewPos(4, 40))
+	r.titleTxt.Move(fyne.NewPos(4, titleY))
 
 	valSize := r.valTxt.MinSize()
 	r.valTxt.Resize(fyne.NewSize(size.Width-8, valSize.Height))
-	r.valTxt.Move(fyne.NewPos(4, 42+titleSize.Height))
+	r.valTxt.Move(fyne.NewPos(4, titleY+2+titleSize.Height))
+
+	if r.face.hasIndicator {
+		barW := max(float32(16), size.Width-20)
+		barY := size.Height - 9
+		r.indBg.Move(fyne.NewPos(10, barY))
+		r.indBg.Resize(fyne.NewSize(barW, 4))
+		r.indBg.Show()
+
+		fillW := float32(r.face.indicatorPct/100.0) * barW
+		if fillW < 0 {
+			fillW = 0
+		}
+		if fillW > barW {
+			fillW = barW
+		}
+		r.indFill.Move(fyne.NewPos(10, barY))
+		r.indFill.Resize(fyne.NewSize(fillW, 4))
+		if fillW > 0 {
+			r.indFill.Show()
+		} else {
+			r.indFill.Hide()
+		}
+	} else {
+		r.indBg.Hide()
+		r.indFill.Hide()
+	}
 }
 
 func (r *dialFaceRenderer) MinSize() fyne.Size {
@@ -422,6 +611,7 @@ func (r *dialFaceRenderer) Refresh() {
 		ringColor = ColorSkyBlue
 	}
 	r.ring.StrokeColor = ringColor
+	r.indFill.FillColor = ringColor
 
 	switch {
 	case r.face.selected:
@@ -446,14 +636,17 @@ func (r *dialFaceRenderer) Refresh() {
 		r.valTxt.Color = ColorMutedText
 	}
 
+	r.Layout(r.face.Size())
 	r.bg.Refresh()
 	r.ring.Refresh()
 	r.titleTxt.Refresh()
 	r.valTxt.Refresh()
+	r.indBg.Refresh()
+	r.indFill.Refresh()
 }
 
 func (r *dialFaceRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{r.bg, r.ring, r.titleTxt, r.valTxt}
+	return []fyne.CanvasObject{r.bg, r.ring, r.titleTxt, r.valTxt, r.indBg, r.indFill}
 }
 
 func (r *dialFaceRenderer) Destroy() {}

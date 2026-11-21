@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"github.com/mrpoundsign/PoundDeck/pkg/builtin/obs"
 	"github.com/mrpoundsign/PoundDeck/pkg/deck"
 	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundDeck/pkg/sdplugin"
 	"github.com/mrpoundsign/PoundDeck/pkg/secrets"
 )
 
@@ -571,5 +573,284 @@ func TestMainWindowOverwriteConfirmAndUndoRedo(t *testing.T) {
 	drainUI()
 	if dial0 := eng.Snapshot().DialSlots[0]; dial0.Config == nil || dial0.Config.ActionUUID != apps.ActionMedia {
 		t.Fatalf("expected Dismiss on occupied Dial 0 to preserve ActionMedia, got %+v", dial0.Config)
+	}
+}
+
+type openedPIRecord struct {
+	title string
+	url   string
+}
+
+type fakePIViewer struct {
+	mu          sync.Mutex
+	opened      []openedPIRecord
+	closedCount int
+}
+
+func (f *fakePIViewer) Open(title, targetURL string) error {
+	f.mu.Lock()
+	f.opened = append(f.opened, openedPIRecord{title: title, url: targetURL})
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakePIViewer) CloseAll() {
+	f.mu.Lock()
+	f.closedCount++
+	f.mu.Unlock()
+}
+
+type fakeVisualProvider struct {
+	mu   sync.Mutex
+	host plugin.HostAPI
+}
+
+func (f *fakeVisualProvider) Kind() plugin.ProviderKind { return plugin.ProviderBuiltin }
+func (f *fakeVisualProvider) Name() string              { return "Test Visual Provider" }
+func (f *fakeVisualProvider) Manifests() []plugin.Manifest {
+	return []plugin.Manifest{{
+		UUID:     "com.test.visual",
+		Name:     "Test Visual",
+		Version:  "1.0.0",
+		Provider: plugin.ProviderBuiltin,
+		Actions:  f.Actions(),
+	}}
+}
+func (f *fakeVisualProvider) Actions() []plugin.ActionDescriptor {
+	return []plugin.ActionDescriptor{
+		{
+			UUID:        "test.svg.tile",
+			PluginUUID:  "com.test.visual",
+			Name:        "SVG Tile",
+			Category:    "Visual Test",
+			Controllers: []deck.ControllerType{deck.ControllerKeypad},
+			Provider:    plugin.ProviderBuiltin,
+		},
+		{
+			UUID:        "test.dial.meter",
+			PluginUUID:  "com.test.visual",
+			Name:        "Dial Meter",
+			Category:    "Visual Test",
+			Controllers: []deck.ControllerType{deck.ControllerEncoder},
+			Provider:    plugin.ProviderBuiltin,
+		},
+	}
+}
+func (f *fakeVisualProvider) BindHost(host plugin.HostAPI) {
+	f.mu.Lock()
+	f.host = host
+	f.mu.Unlock()
+}
+func (f *fakeVisualProvider) Dispatch(context.Context, plugin.ActionEvent) error { return nil }
+func (f *fakeVisualProvider) Close() error                                       { return nil }
+
+func TestMainWindowSDPluginArtworkDialFeedbackAndPI(t *testing.T) {
+	drainUI()
+	testApp := test.NewApp()
+	t.Cleanup(func() {
+		drainUI()
+		testApp.Quit()
+	})
+	testApp.Settings().SetTheme(&StudioTheme{})
+
+	rootTmp := t.TempDir()
+	defaultPluginsDir := filepath.Join(rootTmp, "default_plugins")
+	extraPluginsDir := filepath.Join(rootTmp, "extra_plugins")
+	managedNodeDir := filepath.Join(rootTmp, "managed_node")
+	bundleDir := filepath.Join(extraPluginsDir, "com.example.demo.sdPlugin")
+	if err := os.MkdirAll(filepath.Join(bundleDir, "pi"), 0o755); err != nil {
+		t.Fatalf("MkdirAll pi: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(bundleDir, "bin"), 0o755); err != nil {
+		t.Fatalf("MkdirAll bin: %v", err)
+	}
+
+	manifest := `{
+		"UUID": "com.example.demo",
+		"Name": "Demo Plugin",
+		"Version": "1.2.3",
+		"Author": "Tester",
+		"SDKVersion": 2,
+		"CodePath": "bin/plugin.js",
+		"Nodejs": { "MinimumVersion": "999.0.0" },
+		"PropertyInspectorPath": "pi/index.html",
+		"Actions": [
+			{
+				"UUID": "com.example.demo.status",
+				"Name": "Demo Status",
+				"Controllers": ["Keypad", "Encoder"]
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(bundleDir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatalf("WriteFile manifest: %v", err)
+	}
+	piHTML := `<!DOCTYPE html><html><body>
+		<input id="endpoint" data-setting="endpoint" type="text" placeholder="http://127.0.0.1:9000">
+		<input id="autoPoll" data-setting="autoPoll" type="checkbox">
+	</body></html>`
+	if err := os.WriteFile(filepath.Join(bundleDir, "pi", "index.html"), []byte(piHTML), 0o600); err != nil {
+		t.Fatalf("WriteFile pi/index.html: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, "bin", "plugin.js"), []byte("// test stub\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile bin/plugin.js: %v", err)
+	}
+
+	reg := plugin.NewRegistry()
+	if err := reg.RegisterProvider(core.New()); err != nil {
+		t.Fatalf("RegisterProvider(core) error = %v", err)
+	}
+	visProv := &fakeVisualProvider{}
+	if err := reg.RegisterProvider(visProv); err != nil {
+		t.Fatalf("RegisterProvider(visProv) error = %v", err)
+	}
+	sdHost := sdplugin.NewProvider(sdplugin.Options{
+		DefaultPluginsDir: defaultPluginsDir,
+		ManagedNodeDir:    managedNodeDir,
+	})
+	if err := reg.RegisterProvider(sdHost); err != nil {
+		t.Fatalf("RegisterProvider(sdHost) error = %v", err)
+	}
+
+	eng, err := app.NewEngine(deck.NewMemoryStore(nil), reg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sdHost.Close()
+		_ = eng.Close()
+		drainUI()
+	})
+	if err := sdHost.Start(); err != nil {
+		t.Fatalf("sdHost.Start() error = %v", err)
+	}
+
+	piViewer := &fakePIViewer{}
+	mw := NewMainWindow(testApp, eng)
+	mw.SetSDPluginController(sdHost)
+	mw.SetPIViewer(piViewer)
+	drainUI()
+
+	if mw.catalogButtons["com.example.demo.status"] != nil {
+		t.Fatal("expected external action absent before adding extra search path")
+	}
+
+	if err := sdHost.SaveHostConfig(sdplugin.HostConfig{
+		ExtraPaths: []string{extraPluginsDir},
+	}); err != nil {
+		t.Fatalf("SaveHostConfig() error = %v", err)
+	}
+	if err := mw.ReloadExternalPlugins(); err != nil {
+		t.Fatalf("ReloadExternalPlugins() error = %v", err)
+	}
+	drainUI()
+
+	demoBtn := mw.catalogButtons["com.example.demo.status"]
+	if demoBtn == nil {
+		t.Fatal("expected reloaded Action Catalog to include com.example.demo.status")
+	}
+
+	// Assign external action to (0, 0): verify extracted HTML fields + full PI launch.
+	test.Tap(demoBtn)
+	drainUI()
+	if _, ok := mw.inspector.fields["endpoint"]; !ok {
+		t.Fatalf("expected extracted native HTML field \"endpoint\" in inspector, got %+v", mw.inspector.fields)
+	}
+	if _, ok := mw.inspector.fields["autoPoll"]; !ok {
+		t.Fatalf("expected extracted native HTML field \"autoPoll\" in inspector, got %+v", mw.inspector.fields)
+	}
+	if mw.inspector.openPIBtn == nil {
+		t.Fatal("expected Open Full Property Inspector button for .sdPlugin action")
+	}
+
+	test.Tap(mw.inspector.openPIBtn)
+	piViewer.mu.Lock()
+	openedCount := len(piViewer.opened)
+	var openedURL string
+	if openedCount > 0 {
+		openedURL = piViewer.opened[0].url
+	}
+	piViewer.mu.Unlock()
+	if openedCount != 1 {
+		t.Fatalf("expected 1 PI Open call, got %d", openedCount)
+	}
+	if !strings.HasPrefix(openedURL, "http://127.0.0.1:") || !strings.Contains(openedURL, "/pi/com.example.demo/pi/index.html?token=") {
+		t.Fatalf("unexpected Property Inspector URL: %q", openedURL)
+	}
+
+	// Settings dialog should open cleanly on the Plugins tab.
+	pluginsDlg := mw.ShowSettingsDialogTab(settingsTabPlugins)
+	drainUI()
+	pluginsDlg.Hide()
+	drainUI()
+
+	// Test SVG + <text> artwork + setTitle("") full-art rendering on slot (0, 1).
+	svgBtn := mw.catalogButtons["test.svg.tile"]
+	if svgBtn == nil {
+		t.Fatal("expected test.svg.tile in catalog")
+	}
+	mw.SelectSlot(deck.Coordinates{Row: 0, Col: 1})
+	test.Tap(svgBtn)
+	drainUI()
+	slot01 := eng.Snapshot().Slots["0,1"]
+	if slot01.Config == nil {
+		t.Fatal("expected slot (0,1) assigned")
+	}
+	emptyTitle := ""
+	svgURI := "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='144' height='144'><rect width='144' height='144' fill='%230a0a0c'/><text x='72' y='72' fill='%23ffffff'>REC</text></svg>"
+	visProv.host.UpdateVisual(slot01.Config.Context, plugin.VisualPatch{
+		Title:    &emptyTitle,
+		ImageURI: &svgURI,
+	})
+	drainUI()
+
+	tile01 := mw.surface.tiles["0,1"]
+	if tile01 == nil {
+		t.Fatal("expected tile widget for (0,1)")
+	}
+	if tile01.title != "" {
+		t.Fatalf("expected explicit empty title preserved, got %q", tile01.title)
+	}
+	if tile01.decodedImg == nil || tile01.decodedImg.Bounds().Dx() != 144 {
+		t.Fatalf("expected 144px decoded SVG image on tile (0,1), got %#v", tile01.decodedImg)
+	}
+
+	// Test Encoder dial setFeedback indicator bar on Dial 0.
+	dialBtn := mw.catalogButtons["test.dial.meter"]
+	if dialBtn == nil {
+		t.Fatal("expected test.dial.meter in catalog")
+	}
+	mw.SelectDial(0)
+	test.Tap(dialBtn)
+	drainUI()
+	dial0 := eng.Snapshot().DialSlots[0]
+	if dial0.Config == nil {
+		t.Fatal("expected dial 0 assigned")
+	}
+	dialVal := "75%"
+	visProv.host.UpdateVisual(dial0.Config.Context, plugin.VisualPatch{
+		Subtitle: &dialVal,
+		Feedback: map[string]any{
+			"value":     "75%",
+			"indicator": map[string]any{"value": 75},
+		},
+	})
+	drainUI()
+
+	face := mw.surface.dials[0].face
+	if face.value != "75%" {
+		t.Fatalf("dial value = %q, want %q", face.value, "75%")
+	}
+	if !face.hasIndicator || face.indicatorPct != 75 {
+		t.Fatalf("dial indicator = (%v, %v), want (true, 75)", face.hasIndicator, face.indicatorPct)
+	}
+
+	// Closing MainWindow must close any open Property Inspector windows.
+	mw.Window().Close()
+	piViewer.mu.Lock()
+	closedCount := piViewer.closedCount
+	piViewer.mu.Unlock()
+	if closedCount < 1 {
+		t.Fatalf("expected piViewer.CloseAll() invoked on window close, got closedCount=%d", closedCount)
 	}
 }

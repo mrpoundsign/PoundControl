@@ -33,6 +33,8 @@ type ActionDescriptor struct {
 	Tooltip        string                `json:"tooltip,omitempty"`
 	DefaultTitle   string                `json:"defaultTitle,omitempty"`
 	DefaultColor   string                `json:"defaultColor,omitempty"`
+	DefaultImage   string                `json:"defaultImage,omitempty"`
+	HideTitle      bool                  `json:"hideTitle,omitempty"`
 	Controllers    []deck.ControllerType `json:"controllers,omitempty"`
 	SettingsSchema []SettingField        `json:"settingsSchema,omitempty"`
 	Provider       ProviderKind          `json:"provider"`

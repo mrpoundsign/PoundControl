@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/mrpoundsign/PoundDeck/pkg/deck"
 )
 
 type registeredAction struct {
@@ -88,6 +90,67 @@ func (r *Registry) RegisterProvider(p Provider) error {
 	return nil
 }
 
+// RefreshProvider atomically replaces all action descriptors registered by p with its current manifests and actions.
+// If p is not yet registered, RefreshProvider registers it.
+func (r *Registry) RefreshProvider(p Provider) error {
+	if p == nil {
+		return errors.New("cannot refresh nil plugin provider")
+	}
+	manifests := p.Manifests()
+	for _, m := range manifests {
+		if err := m.Validate(); err != nil {
+			return err
+		}
+	}
+
+	actions := p.Actions()
+	seenNew := make(map[string]struct{}, len(actions))
+	for _, act := range actions {
+		uuid := strings.TrimSpace(act.UUID)
+		if uuid == "" {
+			return fmt.Errorf("provider %q returned action with empty UUID", p.Name())
+		}
+		if _, dup := seenNew[uuid]; dup {
+			return fmt.Errorf("provider %q returned duplicate action UUID %q", p.Name(), uuid)
+		}
+		seenNew[uuid] = struct{}{}
+	}
+
+	r.mu.Lock()
+	for _, act := range actions {
+		uuid := strings.TrimSpace(act.UUID)
+		if existing, exists := r.actions[uuid]; exists && existing.provider != p {
+			r.mu.Unlock()
+			return fmt.Errorf("duplicate action UUID %q", uuid)
+		}
+	}
+	for uuid, entry := range r.actions {
+		if entry.provider == p {
+			delete(r.actions, uuid)
+		}
+	}
+	for _, act := range actions {
+		cp := act
+		if cp.Provider == "" {
+			cp.Provider = p.Kind()
+		}
+		r.actions[cp.UUID] = registeredAction{
+			desc:     cp,
+			provider: p,
+		}
+	}
+	if !slices.Contains(r.providers, p) {
+		r.providers = append(r.providers, p)
+	}
+	host := r.host
+	r.mu.Unlock()
+
+	if host != nil {
+		p.BindHost(host)
+	}
+	return nil
+}
+
 // Action looks up an ActionDescriptor by its globally unique action UUID.
 func (r *Registry) Action(uuid string) (ActionDescriptor, bool) {
 	r.mu.RLock()
@@ -154,6 +217,28 @@ func (r *Registry) DynamicOptions(ctx context.Context, optionsKey string, curren
 		}
 	}
 	return nil
+}
+
+// PropertyInspectorSession returns an HTML Property Inspector session for actionUUID if its provider supports it.
+func (r *Registry) PropertyInspectorSession(
+	ctxID string,
+	actionUUID string,
+	controller deck.ControllerType,
+	coords deck.Coordinates,
+	dial int,
+	settings map[string]any,
+) (PropertyInspectorSession, bool) {
+	r.mu.RLock()
+	entry, ok := r.actions[actionUUID]
+	r.mu.RUnlock()
+	if !ok {
+		return PropertyInspectorSession{}, false
+	}
+	pip, hasPI := entry.provider.(PropertyInspectorProvider)
+	if !hasPI {
+		return PropertyInspectorSession{}, false
+	}
+	return pip.PropertyInspectorURL(ctxID, actionUUID, controller, coords, dial, settings)
 }
 
 // Close closes every registered provider and returns any joined close errors.

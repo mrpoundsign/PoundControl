@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"path/filepath"
 
 	fyneapp "fyne.io/fyne/v2/app"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/mrpoundsign/PoundDeck/pkg/builtin/obs"
 	"github.com/mrpoundsign/PoundDeck/pkg/deck"
 	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundDeck/pkg/sdplugin"
 	"github.com/mrpoundsign/PoundDeck/pkg/secrets"
 )
 
@@ -38,6 +40,13 @@ func main() {
 	if err := reg.RegisterProvider(apps.New(nil)); err != nil {
 		log.Fatalf("register built-in apps plugin: %v", err)
 	}
+	sdHost := sdplugin.NewProvider(sdplugin.Options{
+		DefaultPluginsDir: filepath.Join(filepath.Dir(cfgPath), "plugins"),
+		ManagedNodeDir:    filepath.Join(filepath.Dir(cfgPath), "runtimes", "node"),
+	})
+	if err := reg.RegisterProvider(sdHost); err != nil {
+		log.Fatalf("register sdplugin host: %v", err)
+	}
 
 	eng, err := app.NewEngine(store, reg)
 	if err != nil {
@@ -48,6 +57,19 @@ func main() {
 			log.Printf("close engine: %v", closeErr)
 		}
 	}()
+	defer func() {
+		if closeErr := sdHost.Close(); closeErr != nil {
+			log.Printf("close sdplugin host: %v", closeErr)
+		}
+	}()
+	if startErr := sdHost.Start(); startErr != nil {
+		log.Printf("start sdplugin host: %v", startErr)
+	} else {
+		if refErr := reg.RefreshProvider(sdHost); refErr != nil {
+			log.Printf("refresh sdplugin actions: %v", refErr)
+		}
+		eng.ReloadVisibleActions()
+	}
 
 	hkMgr := hotkey.NewManager(func(c deck.Coordinates) {
 		if pressErr := eng.PressKey(context.Background(), c); pressErr != nil {
@@ -73,6 +95,8 @@ func main() {
 	win.SetHotkeyCountProvider(hkMgr.ActiveCount)
 	win.SetHotkeySuspender(hkMgr.SetSuspended)
 	win.SetOBSController(obsProvider)
+	win.SetSDPluginController(sdHost)
+	win.SetPIViewer(ui.NewDefaultPIViewer())
 	obsProvider.StartFromGlobalSettings()
 
 	win.ShowAndRun()

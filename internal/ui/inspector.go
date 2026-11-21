@@ -36,11 +36,14 @@ var accentColorPresets = []colorPreset{
 
 // ActionInspector renders a schema-driven configuration form for the selected slot or dial.
 type ActionInspector struct {
-	win              fyne.Window
-	engine           *app.Engine
-	onStatus         func(string)
-	onSuspendHotkeys func(bool)
-	root             fyne.CanvasObject
+	win                   fyne.Window
+	engine                *app.Engine
+	onStatus              func(string)
+	onSuspendHotkeys      func(bool)
+	piViewer              PIViewer
+	sdCtrl                SDPluginController
+	onOpenPluginsSettings func()
+	root                  fyne.CanvasObject
 
 	slotLbl    *widget.Label
 	actionLbl  *widget.Label
@@ -53,6 +56,7 @@ type ActionInspector struct {
 	colorSelect        *widget.Select
 	hotkeyEntry        *widget.Entry
 	hotkeyCaptureBtn   *widget.Button
+	openPIBtn          *widget.Button
 	hotkeyFieldButtons map[string]*widget.Button
 	fields             map[string]inspectorFieldBinding
 	saveBtn            *widget.Button
@@ -129,6 +133,28 @@ func (ins *ActionInspector) Object() fyne.CanvasObject {
 // SetHotkeySuspender sets a callback used to pause OS global hotkeys while capturing a new shortcut.
 func (ins *ActionInspector) SetHotkeySuspender(fn func(bool)) {
 	ins.onSuspendHotkeys = fn
+}
+
+// SetPIViewer attaches a Property Inspector viewer used for interactive plugin HTML UIs.
+func (ins *ActionInspector) SetPIViewer(v PIViewer) {
+	ins.piViewer = v
+}
+
+// SetSDPluginController attaches an external .sdPlugin host controller for runtime status prompts.
+func (ins *ActionInspector) SetSDPluginController(ctrl SDPluginController) {
+	ins.sdCtrl = ctrl
+}
+
+// SetOnOpenPluginsSettings registers a callback invoked when the user clicks "Install Node.js in Settings".
+func (ins *ActionInspector) SetOnOpenPluginsSettings(fn func()) {
+	ins.onOpenPluginsSettings = fn
+}
+
+// InvalidateBinding clears the cached inspector binding so the next SetSelection rebuilds controls cleanly.
+func (ins *ActionInspector) InvalidateBinding() {
+	ins.boundContext = ""
+	ins.boundActionID = ""
+	ins.boundAutoBack = false
 }
 
 // SetSelection refreshes the inspector to reflect the currently selected slot or dial.
@@ -211,6 +237,7 @@ func (ins *ActionInspector) clearForm(title, message string, canTrigger bool) {
 	ins.colorSelect = nil
 	ins.hotkeyEntry = nil
 	ins.hotkeyCaptureBtn = nil
+	ins.openPIBtn = nil
 	hint := widget.NewLabel("No configurable properties for this slot.")
 	hint.Wrapping = fyne.TextWrapWord
 	ins.formBox.Objects = []fyne.CanvasObject{hint, layout.NewSpacer()}
@@ -232,6 +259,7 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 	clear(ins.fields)
 	clear(ins.hotkeyFieldButtons)
 	ins.hotkeyCaptureBtn = nil
+	ins.openPIBtn = nil
 	name := cfg.ActionUUID
 	meta := string(plugin.ProviderBuiltin)
 	var schema []plugin.SettingField
@@ -283,12 +311,58 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 		ins.hotkeyCaptureBtn = nil
 	}
 
+	if ins.sdCtrl != nil {
+		if reqMajor, needsNode := ins.sdCtrl.NeedsNodeForAction(cfg.ActionUUID); needsNode {
+			warnLbl := widget.NewLabel(fmt.Sprintf(
+				"Node.js %d+ runtime is required for this external plugin to run. You can install or configure Node.js in Settings -> Plugins.",
+				reqMajor,
+			))
+			warnLbl.Wrapping = fyne.TextWrapWord
+			warnLbl.Importance = widget.WarningImportance
+			installBtn := widget.NewButtonWithIcon("Install Node.js in Settings", theme.DownloadIcon(), func() {
+				if ins.onOpenPluginsSettings != nil {
+					ins.onOpenPluginsSettings()
+				}
+			})
+			installBtn.Importance = widget.HighImportance
+			items = append(items, widget.NewSeparator(), warnLbl, installBtn)
+		}
+	}
+
 	if len(schema) > 0 {
 		items = append(items, widget.NewSeparator())
 	}
 
 	for _, field := range schema {
 		items = append(items, ins.buildSchemaField(field, cfg.Settings)...)
+	}
+
+	if _, ok := ins.engine.PropertyInspectorSession(ins.selCtrl, ins.selCoords, ins.selDial); ok {
+		ins.openPIBtn = widget.NewButtonWithIcon("Open Full Property Inspector", theme.DocumentCreateIcon(), func() {
+			if ins.piViewer == nil {
+				if ins.onStatus != nil {
+					ins.onStatus("Property Inspector viewer is unavailable")
+				}
+				return
+			}
+			sess, ok := ins.engine.PropertyInspectorSession(ins.selCtrl, ins.selCoords, ins.selDial)
+			if !ok {
+				if ins.onStatus != nil {
+					ins.onStatus("Property Inspector session is no longer available")
+				}
+				return
+			}
+			if err := ins.piViewer.Open(sess.Title, sess.URL); err != nil {
+				if ins.onStatus != nil {
+					ins.onStatus(fmt.Sprintf("Open Property Inspector failed: %v", err))
+				}
+				return
+			}
+			if ins.onStatus != nil {
+				ins.onStatus("Opened Property Inspector: " + sess.Title)
+			}
+		})
+		items = append(items, widget.NewSeparator(), ins.openPIBtn)
 	}
 
 	ins.formBox.Objects = items

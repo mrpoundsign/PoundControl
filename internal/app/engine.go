@@ -74,6 +74,11 @@ type historyEntry struct {
 	folderStack []string
 }
 
+type liveSlotVisual struct {
+	vis      SlotVisual
+	hasTitle bool
+}
+
 // Engine coordinates deck configuration, persistence, navigation, plugin lifecycle, and live state updates.
 type Engine struct {
 	opMu     sync.Mutex
@@ -84,7 +89,7 @@ type Engine struct {
 
 	pageIdx     int
 	folderStack []string
-	visuals     map[string]SlotVisual
+	visuals     map[string]liveSlotVisual
 	logs        []string
 
 	undoStack  []historyEntry
@@ -117,7 +122,7 @@ func NewEngine(store deck.Store, reg *plugin.Registry) (*Engine, error) {
 		store:    store,
 		registry: reg,
 		cfg:      cfg,
-		visuals:  make(map[string]SlotVisual),
+		visuals:  make(map[string]liveSlotVisual),
 		subs:     make(map[uint64]func(Snapshot)),
 	}
 	reg.SetHost(&engineHost{eng: eng})
@@ -283,26 +288,34 @@ func (e *Engine) renderSlotLocked(slot *deck.SlotConfig) RenderedSlot {
 		Color: col,
 		State: cp.State,
 	}
-	if live, ok := e.visuals[cp.Context]; ok {
-		if live.Title != "" {
-			vis.Title = live.Title
+	live, hasLive := e.visuals[cp.Context]
+	if hasLive {
+		if live.hasTitle {
+			vis.Title = live.vis.Title
 		}
-		if live.Subtitle != "" {
-			vis.Subtitle = live.Subtitle
+		if live.vis.Subtitle != "" {
+			vis.Subtitle = live.vis.Subtitle
 		}
-		if live.Color != "" {
-			vis.Color = live.Color
+		if live.vis.Color != "" {
+			vis.Color = live.vis.Color
 		}
-		if live.ImageURI != "" {
-			vis.ImageURI = live.ImageURI
+		if live.vis.ImageURI != "" {
+			vis.ImageURI = live.vis.ImageURI
 		}
-		if len(live.Feedback) > 0 {
-			vis.Feedback = maps.Clone(live.Feedback)
+		if len(live.vis.Feedback) > 0 {
+			vis.Feedback = maps.Clone(live.vis.Feedback)
 		}
-		if live.Flash != "" {
-			vis.Flash = live.Flash
+		if live.vis.Flash != "" {
+			vis.Flash = live.vis.Flash
 		}
-		vis.State = live.State
+		vis.State = live.vis.State
+	}
+	if vis.ImageURI == "" && descPtr != nil && descPtr.DefaultImage != "" {
+		vis.ImageURI = descPtr.DefaultImage
+	}
+	if descPtr != nil && descPtr.HideTitle && (!hasLive || !live.hasTitle) && vis.ImageURI != "" &&
+		(cp.Title == descPtr.DefaultTitle || cp.Title == descPtr.Name) {
+		vis.Title = ""
 	}
 
 	return RenderedSlot{
@@ -1414,6 +1427,48 @@ func (e *Engine) DynamicOptions(ctx context.Context, optionsKey string, currentS
 	return e.registry.DynamicOptions(ctx, optionsKey, currentSettings)
 }
 
+// ReloadVisibleActions re-dispatches EventWillAppear for all visible slots and dials and notifies UI surfaces.
+func (e *Engine) ReloadVisibleActions() {
+	e.mu.RLock()
+	appear := e.visibleEventsLocked(plugin.EventWillAppear)
+	e.mu.RUnlock()
+
+	e.dispatchAll(context.Background(), appear)
+	e.notifySubscribers()
+}
+
+// PropertyInspectorSession returns an HTML/WebView Property Inspector session for the selected slot or dial, if supported.
+func (e *Engine) PropertyInspectorSession(ctrl deck.ControllerType, coords deck.Coordinates, dial int) (plugin.PropertyInspectorSession, bool) {
+	if e.registry == nil {
+		return plugin.PropertyInspectorSession{}, false
+	}
+	e.mu.RLock()
+	prof := e.activeProfileLocked()
+	slotsMap, dialsMap, _ := e.activeContainerLocked(prof)
+	var slot *deck.SlotConfig
+	if ctrl == deck.ControllerEncoder {
+		slot = dialsMap[dial]
+	} else {
+		slot = slotsMap[coords.SlotKey()]
+	}
+	var (
+		ctxID      string
+		actionUUID string
+		settings   map[string]any
+	)
+	if slot != nil {
+		ctxID = slot.Context
+		actionUUID = slot.ActionUUID
+		settings = cloneSettings(slot.Settings)
+	}
+	e.mu.RUnlock()
+
+	if actionUUID == "" {
+		return plugin.PropertyInspectorSession{}, false
+	}
+	return e.registry.PropertyInspectorSession(ctxID, actionUUID, ctrl, coords, dial, settings)
+}
+
 // GlobalSettings returns a cloned copy of persisted plugin-wide settings for pluginUUID.
 func (e *Engine) GlobalSettings(pluginUUID string) map[string]any {
 	e.mu.RLock()
@@ -1453,24 +1508,25 @@ func (e *Engine) updateVisual(ctxID string, patch plugin.VisualPatch) {
 	e.mu.Lock()
 	cur := e.visuals[ctxID]
 	if patch.Title != nil {
-		cur.Title = *patch.Title
+		cur.vis.Title = *patch.Title
+		cur.hasTitle = true
 	}
 	if patch.Subtitle != nil {
-		cur.Subtitle = *patch.Subtitle
+		cur.vis.Subtitle = *patch.Subtitle
 	}
 	if patch.Color != nil {
-		cur.Color = *patch.Color
+		cur.vis.Color = *patch.Color
 	}
 	if patch.ImageURI != nil {
-		cur.ImageURI = *patch.ImageURI
+		cur.vis.ImageURI = *patch.ImageURI
 	}
 	if patch.State != nil {
-		cur.State = *patch.State
+		cur.vis.State = *patch.State
 	}
 	if patch.Feedback != nil {
-		cur.Feedback = maps.Clone(patch.Feedback)
+		cur.vis.Feedback = maps.Clone(patch.Feedback)
 	}
-	cur.Flash = patch.Flash
+	cur.vis.Flash = patch.Flash
 	e.visuals[ctxID] = cur
 	e.mu.Unlock()
 
@@ -1495,6 +1551,7 @@ func (e *Engine) saveContextSettings(ctxID string, settings map[string]any) erro
 	}
 	var cfgCopy *deck.Config
 	if updated {
+		e.historyRev++
 		cfgCopy = e.cfg.Clone()
 	}
 	e.mu.Unlock()

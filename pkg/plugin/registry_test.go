@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/mrpoundsign/PoundDeck/pkg/deck"
 )
 
 type stubProvider struct {
@@ -36,6 +38,20 @@ func (s *stubProvider) DynamicOptions(_ context.Context, key string, _ map[strin
 		return []SelectOption{{Label: "Item A", Value: "a"}}
 	}
 	return nil
+}
+
+func (s *stubProvider) PropertyInspectorURL(
+	ctxID string,
+	actionUUID string,
+	_ deck.ControllerType,
+	_ deck.Coordinates,
+	_ int,
+	_ map[string]any,
+) (PropertyInspectorSession, bool) {
+	return PropertyInspectorSession{
+		Title: actionUUID,
+		URL:   "http://127.0.0.1:9999/pi/" + ctxID,
+	}, true
 }
 
 type stubHost struct{}
@@ -126,6 +142,22 @@ func TestRegistryRegistrationSortingDispatchAndClose(t *testing.T) {
 	}
 	if empty := reg.DynamicOptions(context.Background(), "other", nil); len(empty) != 0 {
 		t.Fatalf("expected empty DynamicOptions for unknown key, got %+v", empty)
+	}
+
+	// PropertyInspectorSession and RefreshProvider work cleanly.
+	if sess, ok := reg.PropertyInspectorSession("ctx-1", "com.example.z", deck.ControllerKeypad, deck.Coordinates{}, 0, nil); !ok || sess.URL != "http://127.0.0.1:9999/pi/ctx-1" {
+		t.Fatalf("unexpected PropertyInspectorSession: %+v, ok=%v", sess, ok)
+	}
+	p1.manifests[0].Actions = []ActionDescriptor{{UUID: "com.example.b", Name: "Beta", Category: "Beta"}}
+	p1.actions = p1.manifests[0].Actions
+	if err := reg.RefreshProvider(p1); err != nil {
+		t.Fatalf("RefreshProvider(p1) error = %v", err)
+	}
+	if _, ok := reg.Action("com.example.z"); ok {
+		t.Error("expected old action com.example.z removed after RefreshProvider")
+	}
+	if _, ok := reg.Action("com.example.b"); !ok {
+		t.Error("expected new action com.example.b present after RefreshProvider")
 	}
 
 	// Verify Close aggregates errors and marks providers closed.

@@ -20,6 +20,7 @@ import (
 	"github.com/mrpoundsign/PoundDeck/internal/version"
 	"github.com/mrpoundsign/PoundDeck/pkg/builtin/obs"
 	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
 )
 
 // dispatchUI marshals UI state updates onto the Fyne main thread.
@@ -44,11 +45,13 @@ type MainWindow struct {
 	win          fyne.Window
 	engine       *app.Engine
 	unsub        func()
-	obsCtrl      OBSController
-	obsUnsub     func()
-	popOut       *PopOutPad
-	cfgPath      string
-	hotkeyCount  func() int
+	obsCtrl     OBSController
+	obsUnsub    func()
+	sdCtrl      SDPluginController
+	piViewer    PIViewer
+	popOut      *PopOutPad
+	cfgPath     string
+	hotkeyCount func() int
 
 	selectedController deck.ControllerType
 	selectedSlot       deck.Coordinates
@@ -66,6 +69,7 @@ type MainWindow struct {
 	redoBtn        *widget.Button
 	obsBtn         *widget.Button
 	runModeCheck   *widget.Check
+	catalogList    *fyne.Container
 	catalogButtons map[string]*widget.Button
 	surface        *deckSurfaceView
 	deckTitle      *canvas.Text
@@ -92,6 +96,9 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 	}
 
 	mw.inspector = NewActionInspector(win, engine, mw.setStatus)
+	mw.inspector.SetOnOpenPluginsSettings(func() {
+		mw.ShowSettingsDialogTab(settingsTabPlugins)
+	})
 	mw.surface = newDeckSurfaceView(
 		mw.handleKeyTap,
 		mw.handleDialTap,
@@ -151,6 +158,9 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 		if mw.popOut != nil {
 			mw.popOut.Close()
 			mw.popOut = nil
+		}
+		if mw.piViewer != nil {
+			mw.piViewer.CloseAll()
 		}
 	})
 
@@ -253,8 +263,13 @@ func (mw *MainWindow) SetHotkeySuspender(fn func(bool)) {
 	}
 }
 
-// ShowSettingsDialog opens the tabbed PoundDeck Settings modal dialog.
+// ShowSettingsDialog opens the tabbed PoundDeck Settings modal dialog on the General tab.
 func (mw *MainWindow) ShowSettingsDialog() *dialog.CustomDialog {
+	return mw.ShowSettingsDialogTab(settingsTabGeneral)
+}
+
+// ShowSettingsDialogTab opens the tabbed PoundDeck Settings modal dialog pre-selected to tab.
+func (mw *MainWindow) ShowSettingsDialogTab(tab int) *dialog.CustomDialog {
 	hotkeys := 0
 	if mw.hotkeyCount != nil {
 		hotkeys = mw.hotkeyCount()
@@ -263,11 +278,53 @@ func (mw *MainWindow) ShowSettingsDialog() *dialog.CustomDialog {
 		mw.win,
 		mw.engine,
 		mw.obsCtrl,
+		mw.sdCtrl,
 		mw.cfgPath,
 		hotkeys,
+		tab,
 		func() { mw.OpenPopOutPad() },
+		mw.ReloadExternalPlugins,
 		mw.setStatus,
 	)
+}
+
+// SetSDPluginController attaches an external .sdPlugin host controller and refreshes inspector hints.
+func (mw *MainWindow) SetSDPluginController(ctrl SDPluginController) {
+	mw.sdCtrl = ctrl
+	if mw.inspector != nil {
+		mw.inspector.SetSDPluginController(ctrl)
+		mw.inspector.InvalidateBinding()
+	}
+	mw.applySnapshot(mw.engine.Snapshot())
+}
+
+// SetPIViewer attaches the Property Inspector viewer for interactive HTML plugin views.
+func (mw *MainWindow) SetPIViewer(v PIViewer) {
+	mw.piViewer = v
+	if mw.inspector != nil {
+		mw.inspector.SetPIViewer(v)
+	}
+}
+
+// ReloadExternalPlugins rescans .sdPlugin bundles, refreshes the unified action catalog, and updates visible tiles.
+func (mw *MainWindow) ReloadExternalPlugins() error {
+	if mw.sdCtrl != nil {
+		if err := mw.sdCtrl.Reload(); err != nil {
+			return err
+		}
+		if prov, ok := mw.sdCtrl.(plugin.Provider); ok {
+			if err := mw.engine.Registry().RefreshProvider(prov); err != nil {
+				return err
+			}
+		}
+	}
+	mw.engine.ReloadVisibleActions()
+	mw.RefreshActionCatalog()
+	if mw.inspector != nil {
+		mw.inspector.InvalidateBinding()
+	}
+	mw.applySnapshot(mw.engine.Snapshot())
+	return nil
 }
 
 // SetOBSController attaches an OBSController so the Studio header badge displays live OBS status
@@ -663,7 +720,28 @@ func (mw *MainWindow) buildActionCatalog() fyne.CanvasObject {
 	sub := widget.NewLabel("Click an action to assign to the selected slot")
 	sub.Wrapping = fyne.TextWrapWord
 
-	list := container.NewVBox()
+	mw.catalogList = container.NewVBox()
+	mw.RefreshActionCatalog()
+
+	panelBg := canvas.NewRectangle(ColorDarkCharcoal)
+	return container.NewStack(
+		panelBg,
+		container.NewBorder(
+			container.NewPadded(container.NewVBox(heading, sub, widget.NewSeparator())),
+			nil, nil, nil,
+			container.NewVScroll(container.NewPadded(mw.catalogList)),
+		),
+	)
+}
+
+// RefreshActionCatalog rebuilds the left-hand Action Catalog from currently registered plugin providers.
+func (mw *MainWindow) RefreshActionCatalog() {
+	if mw.catalogList == nil {
+		return
+	}
+	clear(mw.catalogButtons)
+
+	var items []fyne.CanvasObject
 	actions := mw.engine.Registry().Actions()
 
 	var currentCategory string
@@ -674,13 +752,13 @@ func (mw *MainWindow) buildActionCatalog() fyne.CanvasObject {
 		}
 		if cat != currentCategory {
 			if currentCategory != "" {
-				list.Add(widget.NewSeparator())
+				items = append(items, widget.NewSeparator())
 			}
 			currentCategory = cat
 			groupTitle := canvas.NewText(cat, ColorSkyBlue)
 			groupTitle.TextSize = 12
 			groupTitle.TextStyle = fyne.TextStyle{Bold: true}
-			list.Add(groupTitle)
+			items = append(items, groupTitle)
 		}
 
 		uuid := act.UUID
@@ -693,32 +771,24 @@ func (mw *MainWindow) buildActionCatalog() fyne.CanvasObject {
 		})
 		btn.Alignment = widget.ButtonAlignLeading
 		mw.catalogButtons[uuid] = btn
-		list.Add(btn)
+		items = append(items, btn)
 	}
 
 	// Future milestones roadmap preview.
-	list.Add(widget.NewSeparator())
+	items = append(items, widget.NewSeparator())
 	upcomingTitle := canvas.NewText("Upcoming Providers", ColorMutedText)
 	upcomingTitle.TextSize = 11
 	upcomingTitle.TextStyle = fyne.TextStyle{Bold: true}
-	list.Add(upcomingTitle)
+	items = append(items, upcomingTitle)
 	for _, note := range []string{
-		"Elgato .sdPlugin Host — M4",
 		"WebAssembly (wazero) — M5",
 	} {
 		lbl := widget.NewLabel("  • " + note)
-		list.Add(lbl)
+		items = append(items, lbl)
 	}
 
-	panelBg := canvas.NewRectangle(ColorDarkCharcoal)
-	return container.NewStack(
-		panelBg,
-		container.NewBorder(
-			container.NewPadded(container.NewVBox(heading, sub, widget.NewSeparator())),
-			nil, nil, nil,
-			container.NewVScroll(container.NewPadded(list)),
-		),
-	)
+	mw.catalogList.Objects = items
+	mw.catalogList.Refresh()
 }
 
 func (mw *MainWindow) buildDeckCenter() fyne.CanvasObject {
