@@ -374,9 +374,7 @@ func (p *Provider) handleCounter(host plugin.HostAPI, ev plugin.ActionEvent) err
 
 	flash := ""
 	switch ev.Type {
-	case plugin.EventWillAppear:
-		// Keep tracked value across re-renders unless first appearance.
-	case plugin.EventSettingsChanged:
+	case plugin.EventWillAppear, plugin.EventSettingsChanged:
 		if st.initial != initial {
 			st.value = initial
 			st.initial = initial

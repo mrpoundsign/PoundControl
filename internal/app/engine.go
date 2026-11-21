@@ -44,20 +44,34 @@ type ProfileSummary struct {
 
 // Snapshot is an immutable point-in-time view of the active deck state for UI and remote surfaces.
 type Snapshot struct {
-	Profiles          []ProfileSummary     `json:"profiles"`
-	ActiveProfileID   string               `json:"activeProfileId"`
-	ActiveProfileName string               `json:"activeProfileName"`
-	Grid              deck.GridSize        `json:"grid"`
-	Dials             int                  `json:"dials"`
-	PageIndex         int                  `json:"pageIndex"`
-	PageCount         int                  `json:"pageCount"`
-	PageName          string               `json:"pageName"`
-	FolderPath        []string             `json:"folderPath,omitempty"`
-	InFolder          bool                 `json:"inFolder"`
+	Profiles          []ProfileSummary        `json:"profiles"`
+	ActiveProfileID   string                  `json:"activeProfileId"`
+	ActiveProfileName string                  `json:"activeProfileName"`
+	Grid              deck.GridSize           `json:"grid"`
+	Dials             int                     `json:"dials"`
+	PageIndex         int                     `json:"pageIndex"`
+	PageCount         int                     `json:"pageCount"`
+	PageName          string                  `json:"pageName"`
+	FolderPath        []string                `json:"folderPath,omitempty"`
+	InFolder          bool                    `json:"inFolder"`
 	Slots             map[string]RenderedSlot `json:"slots"`
 	DialSlots         map[int]RenderedSlot    `json:"dialSlots"`
-	PluginCount       int                  `json:"pluginCount"`
-	ActionCount       int                  `json:"actionCount"`
+	PluginCount       int                     `json:"pluginCount"`
+	ActionCount       int                     `json:"actionCount"`
+	CanUndo           bool                    `json:"canUndo"`
+	CanRedo           bool                    `json:"canRedo"`
+	UndoLabel         string                  `json:"undoLabel,omitempty"`
+	RedoLabel         string                  `json:"redoLabel,omitempty"`
+	HistoryRevision   uint64                  `json:"historyRevision"`
+}
+
+const maxHistoryEntries = 50
+
+type historyEntry struct {
+	label       string
+	cfg         *deck.Config
+	pageIdx     int
+	folderStack []string
 }
 
 // Engine coordinates deck configuration, persistence, navigation, plugin lifecycle, and live state updates.
@@ -72,6 +86,10 @@ type Engine struct {
 	folderStack []string
 	visuals     map[string]SlotVisual
 	logs        []string
+
+	undoStack  []historyEntry
+	redoStack  []historyEntry
+	historyRev uint64
 
 	subs   map[uint64]func(Snapshot)
 	subSeq uint64
@@ -204,6 +222,14 @@ func (e *Engine) snapshotLocked() Snapshot {
 		}
 	}
 
+	var undoLabel, redoLabel string
+	if n := len(e.undoStack); n > 0 {
+		undoLabel = e.undoStack[n-1].label
+	}
+	if n := len(e.redoStack); n > 0 {
+		redoLabel = e.redoStack[n-1].label
+	}
+
 	return Snapshot{
 		Profiles:          summaries,
 		ActiveProfileID:   prof.ID,
@@ -219,6 +245,11 @@ func (e *Engine) snapshotLocked() Snapshot {
 		DialSlots:         renderedDials,
 		PluginCount:       len(e.registry.Providers()),
 		ActionCount:       len(e.registry.Actions()),
+		CanUndo:           len(e.undoStack) > 0,
+		CanRedo:           len(e.redoStack) > 0,
+		UndoLabel:         undoLabel,
+		RedoLabel:         redoLabel,
+		HistoryRevision:   e.historyRev,
 	}
 }
 
@@ -373,6 +404,68 @@ func (e *Engine) dispatchAll(ctx context.Context, events []plugin.ActionEvent) {
 	}
 }
 
+func (e *Engine) captureHistoryLocked(label string) historyEntry {
+	return historyEntry{
+		label:       label,
+		cfg:         e.cfg.Clone(),
+		pageIdx:     e.pageIdx,
+		folderStack: slices.Clone(e.folderStack),
+	}
+}
+
+func pushBoundedHistory(stack []historyEntry, entry historyEntry) []historyEntry {
+	stack = append(stack, entry)
+	if len(stack) > maxHistoryEntries {
+		stack = slices.Delete(stack, 0, len(stack)-maxHistoryEntries)
+	}
+	return stack
+}
+
+func (e *Engine) pushUndoLocked(entry historyEntry) {
+	e.undoStack = pushBoundedHistory(e.undoStack, entry)
+	e.redoStack = nil
+}
+
+func (e *Engine) restoreStateLocked(entry historyEntry) {
+	restored := entry.cfg.Clone()
+	restored.Normalize()
+	e.restoreNormalizedStateLocked(restored, entry)
+}
+
+func (e *Engine) restoreNormalizedStateLocked(restored *deck.Config, entry historyEntry) {
+	e.cfg = restored
+	prof := e.activeProfileLocked()
+	if len(prof.Pages) == 0 {
+		e.pageIdx = 0
+	} else {
+		e.pageIdx = min(max(entry.pageIdx, 0), len(prof.Pages)-1)
+	}
+	e.folderStack = nil
+	for _, fid := range entry.folderStack {
+		if prof.Folders != nil && prof.Folders[fid] != nil {
+			e.folderStack = append(e.folderStack, fid)
+		} else {
+			break
+		}
+	}
+	clear(e.visuals)
+}
+
+func (e *Engine) finishMutation(before historyEntry, cfgCopy *deck.Config, label string) error {
+	if err := e.store.Save(cfgCopy); err != nil {
+		e.mu.Lock()
+		e.restoreStateLocked(before)
+		e.mu.Unlock()
+		return err
+	}
+	e.mu.Lock()
+	before.label = label
+	e.pushUndoLocked(before)
+	e.historyRev++
+	e.mu.Unlock()
+	return nil
+}
+
 // CreateProfile creates and activates a new profile with a single initial page.
 func (e *Engine) CreateProfile(name string, grid deck.GridSize, dials int) (*deck.Profile, error) {
 	trimmed := strings.TrimSpace(name)
@@ -388,6 +481,7 @@ func (e *Engine) CreateProfile(name string, grid deck.GridSize, dials int) (*dec
 
 	e.opMu.Lock()
 	e.mu.Lock()
+	before := e.captureHistoryLocked("")
 	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 
 	prof := &deck.Profile{
@@ -414,7 +508,7 @@ func (e *Engine) CreateProfile(name string, grid deck.GridSize, dials int) (*dec
 	profCopy := prof.Clone()
 	e.mu.Unlock()
 
-	err := e.store.Save(cfgCopy)
+	err := e.finishMutation(before, cfgCopy, "Create profile")
 	e.opMu.Unlock()
 	if err != nil {
 		return nil, err
@@ -449,6 +543,7 @@ func (e *Engine) UpdateProfileGrid(profileID string, grid deck.GridSize, dials i
 		e.opMu.Unlock()
 		return fmt.Errorf("profile %q not found", profileID)
 	}
+	before := e.captureHistoryLocked("")
 	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 	target.Grid = grid
 	target.Dials = dials
@@ -456,7 +551,7 @@ func (e *Engine) UpdateProfileGrid(profileID string, grid deck.GridSize, dials i
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.store.Save(cfgCopy)
+	err := e.finishMutation(before, cfgCopy, "Resize grid")
 	e.opMu.Unlock()
 	if err != nil {
 		return err
@@ -491,6 +586,7 @@ func (e *Engine) DeleteProfile(profileID string) error {
 		return fmt.Errorf("profile %q not found", profileID)
 	}
 
+	before := e.captureHistoryLocked("")
 	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 	e.cfg.Profiles = slices.Delete(e.cfg.Profiles, idx, idx+1)
 	if e.cfg.ActiveProfileID == profileID {
@@ -502,7 +598,7 @@ func (e *Engine) DeleteProfile(profileID string) error {
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.store.Save(cfgCopy)
+	err := e.finishMutation(before, cfgCopy, "Delete profile")
 	e.opMu.Unlock()
 	if err != nil {
 		return err
@@ -566,6 +662,7 @@ func (e *Engine) AddPage(name string) (int, error) {
 	e.opMu.Lock()
 	e.mu.Lock()
 	prof := e.activeProfileLocked()
+	before := e.captureHistoryLocked("")
 	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 	pageName := strings.TrimSpace(name)
 	if pageName == "" {
@@ -584,7 +681,7 @@ func (e *Engine) AddPage(name string) (int, error) {
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.store.Save(cfgCopy)
+	err := e.finishMutation(before, cfgCopy, "Add page")
 	e.opMu.Unlock()
 	if err != nil {
 		return 0, err
@@ -612,6 +709,7 @@ func (e *Engine) DeletePage(pageIndex int) error {
 		return fmt.Errorf("page index %d out of range", pageIndex)
 	}
 
+	before := e.captureHistoryLocked("")
 	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 	prof.Pages = slices.Delete(prof.Pages, pageIndex, pageIndex+1)
 	if e.pageIdx >= len(prof.Pages) {
@@ -622,7 +720,7 @@ func (e *Engine) DeletePage(pageIndex int) error {
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.store.Save(cfgCopy)
+	err := e.finishMutation(before, cfgCopy, "Delete page")
 	e.opMu.Unlock()
 	if err != nil {
 		return err
@@ -800,6 +898,7 @@ func (e *Engine) AssignKeypadAction(c deck.Coordinates, actionUUID string) (*dec
 		return nil, fmt.Errorf("slot %s out of bounds for %dx%d grid", c.SlotKey(), prof.Grid.Cols, prof.Grid.Rows)
 	}
 	slotsMap, _, _ := e.activeContainerLocked(prof)
+	before := e.captureHistoryLocked("")
 	var oldSlot *deck.SlotConfig
 	if existing := slotsMap[c.SlotKey()]; existing != nil {
 		oldSlot = existing.Clone()
@@ -812,7 +911,7 @@ func (e *Engine) AssignKeypadAction(c deck.Coordinates, actionUUID string) (*dec
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.store.Save(cfgCopy)
+	err := e.finishMutation(before, cfgCopy, "Assign "+desc.Name)
 	e.opMu.Unlock()
 	if err != nil {
 		return nil, err
@@ -861,6 +960,7 @@ func (e *Engine) AssignDialAction(dialIndex int, actionUUID string) (*deck.SlotC
 		return nil, fmt.Errorf("dial index %d out of range [0, %d)", dialIndex, prof.Dials)
 	}
 	_, dialsMap, _ := e.activeContainerLocked(prof)
+	before := e.captureHistoryLocked("")
 	var oldSlot *deck.SlotConfig
 	if existing := dialsMap[dialIndex]; existing != nil {
 		oldSlot = existing.Clone()
@@ -873,7 +973,7 @@ func (e *Engine) AssignDialAction(dialIndex int, actionUUID string) (*deck.SlotC
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.store.Save(cfgCopy)
+	err := e.finishMutation(before, cfgCopy, "Assign "+desc.Name)
 	e.opMu.Unlock()
 	if err != nil {
 		return nil, err
@@ -905,6 +1005,22 @@ func (e *Engine) AssignDialAction(dialIndex int, actionUUID string) (*deck.SlotC
 
 // UpdateKeypadSlot persists title, color, and settings changes for the action at c.
 func (e *Engine) UpdateKeypadSlot(c deck.Coordinates, title, color string, settings map[string]any) error {
+	return e.updateKeypadSlotInternal(c, title, color, false, "", settings)
+}
+
+// UpdateKeypadSlotWithHotkey atomically persists title, color, global hotkey, and settings for keypad slot c.
+func (e *Engine) UpdateKeypadSlotWithHotkey(c deck.Coordinates, title, color, hotkeyStr string, settings map[string]any) error {
+	return e.updateKeypadSlotInternal(c, title, color, true, strings.TrimSpace(hotkeyStr), settings)
+}
+
+func (e *Engine) updateKeypadSlotInternal(
+	c deck.Coordinates,
+	title string,
+	color string,
+	setHotkey bool,
+	hotkeyStr string,
+	settings map[string]any,
+) error {
 	e.opMu.Lock()
 	e.mu.Lock()
 	prof := e.activeProfileLocked()
@@ -915,8 +1031,12 @@ func (e *Engine) UpdateKeypadSlot(c deck.Coordinates, title, color string, setti
 		e.opMu.Unlock()
 		return fmt.Errorf("no action assigned at slot %s", c.SlotKey())
 	}
+	before := e.captureHistoryLocked("")
 	slot.Title = title
 	slot.Color = color
+	if setHotkey {
+		slot.Hotkey = hotkeyStr
+	}
 	if settings != nil {
 		slot.Settings = cloneSettings(settings)
 	}
@@ -924,7 +1044,7 @@ func (e *Engine) UpdateKeypadSlot(c deck.Coordinates, title, color string, setti
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.store.Save(cfgCopy)
+	err := e.finishMutation(before, cfgCopy, "Edit slot")
 	e.opMu.Unlock()
 	if err != nil {
 		return err
@@ -955,6 +1075,7 @@ func (e *Engine) UpdateDialSlot(dialIndex int, title, color string, settings map
 		e.opMu.Unlock()
 		return fmt.Errorf("no action assigned at dial %d", dialIndex)
 	}
+	before := e.captureHistoryLocked("")
 	slot.Title = title
 	slot.Color = color
 	if settings != nil {
@@ -964,7 +1085,7 @@ func (e *Engine) UpdateDialSlot(dialIndex int, title, color string, settings map
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.store.Save(cfgCopy)
+	err := e.finishMutation(before, cfgCopy, "Edit dial")
 	e.opMu.Unlock()
 	if err != nil {
 		return err
@@ -1002,11 +1123,12 @@ func (e *Engine) SetKeypadHotkey(c deck.Coordinates, hotkeyStr string) error {
 		e.opMu.Unlock()
 		return nil
 	}
+	before := e.captureHistoryLocked("")
 	slot.Hotkey = trimmed
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.store.Save(cfgCopy)
+	err := e.finishMutation(before, cfgCopy, "Set hotkey")
 	e.opMu.Unlock()
 	if err != nil {
 		return err
@@ -1027,13 +1149,14 @@ func (e *Engine) ClearKeypadSlot(c deck.Coordinates) error {
 		e.opMu.Unlock()
 		return nil
 	}
+	before := e.captureHistoryLocked("")
 	oldSlot := existing.Clone()
 	delete(slotsMap, c.SlotKey())
 	delete(e.visuals, existing.Context)
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.store.Save(cfgCopy)
+	err := e.finishMutation(before, cfgCopy, "Clear slot")
 	e.opMu.Unlock()
 	if err != nil {
 		return err
@@ -1064,13 +1187,14 @@ func (e *Engine) ClearDialSlot(dialIndex int) error {
 		e.opMu.Unlock()
 		return nil
 	}
+	before := e.captureHistoryLocked("")
 	oldSlot := existing.Clone()
 	delete(dialsMap, dialIndex)
 	delete(e.visuals, existing.Context)
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.store.Save(cfgCopy)
+	err := e.finishMutation(before, cfgCopy, "Clear dial")
 	e.opMu.Unlock()
 	if err != nil {
 		return err
@@ -1087,6 +1211,65 @@ func (e *Engine) ClearDialSlot(dialIndex int) error {
 	})
 	e.notifySubscribers()
 	return nil
+}
+
+// Undo reverts the most recent user configuration change and persists the restored deck state.
+func (e *Engine) Undo() (string, error) {
+	return e.applyHistoryStep(false)
+}
+
+// Redo reapplies the most recently undone configuration change and persists the deck state.
+func (e *Engine) Redo() (string, error) {
+	return e.applyHistoryStep(true)
+}
+
+func (e *Engine) applyHistoryStep(isRedo bool) (string, error) {
+	e.opMu.Lock()
+	e.mu.Lock()
+	var stack []historyEntry
+	if isRedo {
+		stack = e.redoStack
+	} else {
+		stack = e.undoStack
+	}
+	if len(stack) == 0 {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return "", nil
+	}
+
+	topIdx := len(stack) - 1
+	target := stack[topIdx]
+	nextCfg := target.cfg.Clone()
+	nextCfg.Normalize()
+	e.mu.Unlock()
+
+	if err := e.store.Save(nextCfg); err != nil {
+		e.opMu.Unlock()
+		return "", err
+	}
+
+	e.mu.Lock()
+	currentSnapshot := e.captureHistoryLocked(target.label)
+	if isRedo {
+		e.redoStack = slices.Delete(e.redoStack, topIdx, topIdx+1)
+		e.undoStack = pushBoundedHistory(e.undoStack, currentSnapshot)
+	} else {
+		e.undoStack = slices.Delete(e.undoStack, topIdx, topIdx+1)
+		e.redoStack = pushBoundedHistory(e.redoStack, currentSnapshot)
+	}
+
+	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
+	e.restoreNormalizedStateLocked(nextCfg, target)
+	e.historyRev++
+	appear := e.visibleEventsLocked(plugin.EventWillAppear)
+	e.mu.Unlock()
+	e.opMu.Unlock()
+
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
+	e.notifySubscribers()
+	return target.label, nil
 }
 
 // PressKey triggers KeyDown for the slot at c, or navigates back when pressing AutoBack inside a folder.

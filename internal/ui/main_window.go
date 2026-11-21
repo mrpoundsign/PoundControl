@@ -11,6 +11,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -61,6 +62,8 @@ type MainWindow struct {
 	profileSelect  *widget.Select
 	pageLabel      *widget.Label
 	backBtn        *widget.Button
+	undoBtn        *widget.Button
+	redoBtn        *widget.Button
 	obsBtn         *widget.Button
 	runModeCheck   *widget.Check
 	catalogButtons map[string]*widget.Button
@@ -69,6 +72,8 @@ type MainWindow struct {
 	deckHint       *canvas.Text
 	inspector      *ActionInspector
 	statusBarLbl   *widget.Label
+	confirmDlg     *dialog.ConfirmDialog
+	shortcuts      fyne.ShortcutHandler
 }
 
 // NewMainWindow constructs and initializes the PoundDeck studio window wired to engine.
@@ -107,6 +112,25 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 
 	root := container.NewBorder(header, statusBar, nil, nil, splitMain)
 	win.SetContent(root)
+
+	mw.addCanvasShortcut(&fyne.ShortcutUndo{}, func(fyne.Shortcut) {
+		if len(mw.win.Canvas().Overlays().List()) == 0 {
+			mw.handleUndo()
+		}
+	})
+	mw.addCanvasShortcut(&fyne.ShortcutRedo{}, func(fyne.Shortcut) {
+		if len(mw.win.Canvas().Overlays().List()) == 0 {
+			mw.handleRedo()
+		}
+	})
+	mw.addCanvasShortcut(&desktop.CustomShortcut{
+		KeyName:  fyne.KeyZ,
+		Modifier: fyne.KeyModifierShortcutDefault | fyne.KeyModifierShift,
+	}, func(fyne.Shortcut) {
+		if len(mw.win.Canvas().Overlays().List()) == 0 {
+			mw.handleRedo()
+		}
+	})
 
 	mw.applySnapshot(engine.Snapshot())
 	mw.unsub = engine.Subscribe(func(snap app.Snapshot) {
@@ -287,12 +311,109 @@ func (mw *MainWindow) setStatus(msg string) {
 	mw.refreshStatusBar(mw.lastSnap)
 }
 
+func (mw *MainWindow) addCanvasShortcut(s fyne.Shortcut, fn func(fyne.Shortcut)) {
+	mw.win.Canvas().AddShortcut(s, fn)
+	mw.shortcuts.AddShortcut(s, fn)
+}
+
+func (mw *MainWindow) handleUndo() {
+	label, err := mw.engine.Undo()
+	if err != nil {
+		mw.setStatus("Undo failed: " + err.Error())
+		return
+	}
+	if label == "" {
+		mw.setStatus("Nothing to undo")
+		return
+	}
+	mw.setStatus("Undid: " + label)
+}
+
+func (mw *MainWindow) handleRedo() {
+	label, err := mw.engine.Redo()
+	if err != nil {
+		mw.setStatus("Redo failed: " + err.Error())
+		return
+	}
+	if label == "" {
+		mw.setStatus("Nothing to redo")
+		return
+	}
+	mw.setStatus("Redid: " + label)
+}
+
 func (mw *MainWindow) assignAction(actionUUID string) {
-	var err error
-	if mw.selectedController == deck.ControllerEncoder {
-		_, err = mw.engine.AssignDialAction(mw.selectedDial, actionUUID)
+	newDesc, hasDesc := mw.engine.Registry().Action(actionUUID)
+	if hasDesc && !newDesc.SupportsController(mw.selectedController) {
+		mw.performAssignAction(mw.selectedController, mw.selectedSlot, mw.selectedDial, actionUUID)
+		return
+	}
+
+	snap := mw.engine.Snapshot()
+	var (
+		occupied  bool
+		existing  app.RenderedSlot
+		targetLbl string
+	)
+	targetCtrl := mw.selectedController
+	targetCoords := mw.selectedSlot
+	targetDial := mw.selectedDial
+
+	if targetCtrl == deck.ControllerEncoder {
+		existing, occupied = snap.DialSlots[targetDial]
+		occupied = occupied && existing.Config != nil
+		targetLbl = fmt.Sprintf("Encoder Dial %d", targetDial+1)
 	} else {
-		_, err = mw.engine.AssignKeypadAction(mw.selectedSlot, actionUUID)
+		existing, occupied = snap.Slots[targetCoords.SlotKey()]
+		occupied = occupied && existing.Config != nil && !existing.AutoBack
+		targetLbl = fmt.Sprintf("Slot (%d, %d)", targetCoords.Row, targetCoords.Col)
+	}
+
+	if !occupied {
+		mw.performAssignAction(targetCtrl, targetCoords, targetDial, actionUUID)
+		return
+	}
+
+	curActionName := existing.Config.ActionUUID
+	if existing.Action != nil && existing.Action.Name != "" {
+		curActionName = existing.Action.Name
+	}
+	curDesc := curActionName
+	if curTitle := strings.TrimSpace(existing.Config.Title); curTitle != "" && !strings.EqualFold(curTitle, curActionName) {
+		curDesc = fmt.Sprintf("%q (%s)", curTitle, curActionName)
+	}
+
+	newActionName := actionUUID
+	if hasDesc && newDesc.Name != "" {
+		newActionName = newDesc.Name
+	}
+
+	msg := fmt.Sprintf(
+		"%s currently has %s configured.\n\nReplace it with %s?\n\nYou can still undo with Ctrl+Z or Undo.",
+		targetLbl, curDesc, newActionName,
+	)
+
+	dlg := dialog.NewConfirm("Replace Existing Action?", msg, func(confirmed bool) {
+		mw.confirmDlg = nil
+		if !confirmed {
+			mw.setStatus("Kept existing action")
+			return
+		}
+		mw.performAssignAction(targetCtrl, targetCoords, targetDial, actionUUID)
+	}, mw.win)
+	dlg.SetConfirmText("Replace")
+	dlg.SetDismissText("Cancel")
+	dlg.SetConfirmImportance(widget.DangerImportance)
+	mw.confirmDlg = dlg
+	dlg.Show()
+}
+
+func (mw *MainWindow) performAssignAction(ctrl deck.ControllerType, coords deck.Coordinates, dial int, actionUUID string) {
+	var err error
+	if ctrl == deck.ControllerEncoder {
+		_, err = mw.engine.AssignDialAction(dial, actionUUID)
+	} else {
+		_, err = mw.engine.AssignKeypadAction(coords, actionUUID)
 	}
 	if err != nil {
 		mw.setStatus(err.Error())
@@ -388,6 +509,21 @@ func (mw *MainWindow) applySnapshot(snap app.Snapshot) {
 		mw.deckTitle.Refresh()
 	}
 
+	if mw.undoBtn != nil {
+		if snap.CanUndo {
+			mw.undoBtn.Enable()
+		} else {
+			mw.undoBtn.Disable()
+		}
+	}
+	if mw.redoBtn != nil {
+		if snap.CanRedo {
+			mw.redoBtn.Enable()
+		} else {
+			mw.redoBtn.Disable()
+		}
+	}
+
 	mw.syncing = false
 
 	mw.surface.ApplySnapshot(snap, true, mw.selectedController, mw.selectedSlot, mw.selectedDial)
@@ -471,6 +607,11 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 		mw.SetRunMode(checked)
 	})
 
+	mw.undoBtn = widget.NewButtonWithIcon("", theme.ContentUndoIcon(), mw.handleUndo)
+	mw.undoBtn.Disable()
+	mw.redoBtn = widget.NewButtonWithIcon("", theme.ContentRedoIcon(), mw.handleRedo)
+	mw.redoBtn.Disable()
+
 	mw.obsBtn = widget.NewButton("OBS: Off", func() {
 		showOBSConnectionDialog(mw.win, mw.obsCtrl, mw.setStatus)
 	})
@@ -500,6 +641,8 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 		addPageBtn,
 		mw.backBtn,
 		layout.NewSpacer(),
+		mw.undoBtn,
+		mw.redoBtn,
 		mw.obsBtn,
 		mw.runModeCheck,
 		popOutBtn,

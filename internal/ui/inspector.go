@@ -60,14 +60,15 @@ type ActionInspector struct {
 	clearBtn           *widget.Button
 	lastCapture        *hotkeyCaptureSession
 
-	selCtrl       deck.ControllerType
-	selCoords     deck.Coordinates
-	selDial       int
-	boundContext  string
-	boundActionID string
-	boundAutoBack bool
-	curSettings   map[string]any
-	syncing       bool
+	selCtrl         deck.ControllerType
+	selCoords       deck.Coordinates
+	selDial         int
+	boundContext    string
+	boundActionID   string
+	boundAutoBack   bool
+	boundHistoryRev uint64
+	curSettings     map[string]any
+	syncing         bool
 }
 
 type inspectorFieldBinding struct {
@@ -154,11 +155,13 @@ func (ins *ActionInspector) SetSelection(snap app.Snapshot, ctrl deck.Controller
 
 	if rendered == nil {
 		if ins.boundContext == "" && ins.boundActionID == "" && !ins.boundAutoBack && len(ins.formBox.Objects) > 0 {
+			ins.boundHistoryRev = snap.HistoryRevision
 			return
 		}
 		ins.boundContext = ""
 		ins.boundActionID = ""
 		ins.boundAutoBack = false
+		ins.boundHistoryRev = snap.HistoryRevision
 		ins.curSettings = nil
 		ins.clearForm("Unassigned", "Select an action in the Action Catalog on the left to bind it to this slot.", false)
 		return
@@ -166,11 +169,13 @@ func (ins *ActionInspector) SetSelection(snap app.Snapshot, ctrl deck.Controller
 
 	if rendered.AutoBack {
 		if ins.boundAutoBack && ins.boundContext == "" {
+			ins.boundHistoryRev = snap.HistoryRevision
 			return
 		}
 		ins.boundContext = ""
 		ins.boundActionID = ""
 		ins.boundAutoBack = true
+		ins.boundHistoryRev = snap.HistoryRevision
 		ins.curSettings = nil
 		ins.clearForm("Auto Folder Back", "Automatic navigation button created inside folders when (0, 0) is empty.", false)
 		return
@@ -181,10 +186,14 @@ func (ins *ActionInspector) SetSelection(snap app.Snapshot, ctrl deck.Controller
 		return
 	}
 
-	sameBinding := ins.boundContext == cfg.Context && ins.boundActionID == cfg.ActionUUID && !ins.boundAutoBack
+	sameBinding := ins.boundContext == cfg.Context &&
+		ins.boundActionID == cfg.ActionUUID &&
+		!ins.boundAutoBack &&
+		ins.boundHistoryRev == snap.HistoryRevision
 	ins.boundContext = cfg.Context
 	ins.boundActionID = cfg.ActionUUID
 	ins.boundAutoBack = false
+	ins.boundHistoryRev = snap.HistoryRevision
 	ins.curSettings = cfg.Settings
 
 	if sameBinding {
@@ -478,10 +487,7 @@ func (ins *ActionInspector) handleSave() {
 	if ins.selCtrl == deck.ControllerEncoder {
 		err = ins.engine.UpdateDialSlot(ins.selDial, title, colHex, settings)
 	} else {
-		err = ins.engine.UpdateKeypadSlot(ins.selCoords, title, colHex, settings)
-		if err == nil {
-			err = ins.engine.SetKeypadHotkey(ins.selCoords, canonicalHotkey)
-		}
+		err = ins.engine.UpdateKeypadSlotWithHotkey(ins.selCoords, title, colHex, canonicalHotkey, settings)
 	}
 	if err != nil {
 		ins.reportStatus("Save failed: " + err.Error())

@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 	"golang.org/x/net/websocket"
@@ -429,4 +431,145 @@ func TestMainWindowAppsActionsHotkeyAndSettingsDialog(t *testing.T) {
 	}
 	dlg.Hide()
 	drainUI()
+}
+
+func TestMainWindowOverwriteConfirmAndUndoRedo(t *testing.T) {
+	eng, _, _, mw := newTestStudioWithApps(t)
+
+	if !mw.undoBtn.Disabled() || !mw.redoBtn.Disabled() {
+		t.Fatal("expected Undo and Redo header buttons initially disabled")
+	}
+
+	// 1) Assigning onto an empty keypad slot happens in 1 click with no confirmation dialog.
+	mw.SelectSlot(deck.Coordinates{Row: 0, Col: 0})
+	test.Tap(mw.catalogButtons[obs.ActionSwitchScene])
+	drainUI()
+	if mw.confirmDlg != nil {
+		t.Fatal("expected no overwrite confirmation dialog for empty slot")
+	}
+	if mw.undoBtn.Disabled() {
+		t.Fatal("expected Undo button enabled after assignment")
+	}
+
+	// Edit title, scene, and global hotkey and save atomically in 1 step.
+	mw.inspector.titleEntry.SetText("Intro Scene")
+	mw.inspector.hotkeyEntry.SetText("Ctrl+Shift+1")
+	mw.inspector.fields["sceneName"].widget.(*widget.SelectEntry).SetText("Intro")
+	test.Tap(mw.inspector.saveBtn)
+	drainUI()
+
+	slot0 := eng.Snapshot().Slots["0,0"]
+	if slot0.Config == nil || slot0.Config.Title != "Intro Scene" || slot0.Config.Hotkey != "Ctrl+Shift+1" || slot0.Config.Settings["sceneName"] != "Intro" {
+		t.Fatalf("unexpected saved slot state: %+v", slot0.Config)
+	}
+
+	// Single-step Undo reverts title, hotkey, and scene together and rebuilds inspector fields.
+	test.Tap(mw.undoBtn)
+	drainUI()
+	slot0 = eng.Snapshot().Slots["0,0"]
+	if slot0.Config == nil || slot0.Config.Title != "Scene" || slot0.Config.Hotkey != "" {
+		t.Fatalf("expected single-step undo of Edit slot, got %+v", slot0.Config)
+	}
+	if mw.inspector.titleEntry.Text != "Scene" || mw.inspector.hotkeyEntry.Text != "" {
+		t.Fatalf("expected inspector rebuilt after undo, got title=%q hotkey=%q",
+			mw.inspector.titleEntry.Text, mw.inspector.hotkeyEntry.Text)
+	}
+
+	// Redo restores customized slot.
+	triggerCanvasShortcut := func(s fyne.Shortcut) {
+		t.Helper()
+		mw.shortcuts.TypedShortcut(s)
+	}
+	triggerCanvasShortcut(&desktop.CustomShortcut{
+		KeyName:  fyne.KeyZ,
+		Modifier: fyne.KeyModifierShortcutDefault | fyne.KeyModifierShift,
+	})
+	drainUI()
+	if slot0 = eng.Snapshot().Slots["0,0"]; slot0.Config == nil || slot0.Config.Title != "Intro Scene" || slot0.Config.Hotkey != "Ctrl+Shift+1" {
+		t.Fatalf("expected Intro Scene restored via Ctrl+Shift+Z, got %+v", slot0.Config)
+	}
+
+	// 2) Clicking a different action on an occupied slot prompts confirmation; Dismiss keeps existing.
+	test.Tap(mw.catalogButtons[apps.ActionOpenURL])
+	if mw.confirmDlg == nil {
+		t.Fatal("expected overwrite confirmation dialog for occupied slot")
+	}
+	mw.confirmDlg.Dismiss()
+	drainUI()
+	if mw.confirmDlg != nil {
+		t.Fatal("expected confirmDlg cleared on Dismiss")
+	}
+	if slot0 = eng.Snapshot().Slots["0,0"]; slot0.Config == nil || slot0.Config.ActionUUID != obs.ActionSwitchScene || slot0.Config.Title != "Intro Scene" {
+		t.Fatalf("expected dismissed overwrite to preserve SwitchScene, got %+v", slot0.Config)
+	}
+
+	// Confirming replacement overwrites the slot, and Ctrl+Z + Redo work cleanly.
+	test.Tap(mw.catalogButtons[apps.ActionOpenURL])
+	if mw.confirmDlg == nil {
+		t.Fatal("expected overwrite confirmation dialog on second attempt")
+	}
+	mw.confirmDlg.Confirm()
+	drainUI()
+	if mw.confirmDlg != nil {
+		t.Fatal("expected confirmDlg cleared on Confirm")
+	}
+	if slot0 = eng.Snapshot().Slots["0,0"]; slot0.Config == nil || slot0.Config.ActionUUID != apps.ActionOpenURL {
+		t.Fatalf("expected OpenURL after Confirm, got %+v", slot0.Config)
+	}
+
+	triggerCanvasShortcut(&fyne.ShortcutUndo{})
+	drainUI()
+	slot0 = eng.Snapshot().Slots["0,0"]
+	if slot0.Config == nil || slot0.Config.ActionUUID != obs.ActionSwitchScene || slot0.Config.Title != "Intro Scene" || slot0.Config.Hotkey != "Ctrl+Shift+1" {
+		t.Fatalf("expected Ctrl+Z to restore Intro Scene, got %+v", slot0.Config)
+	}
+	if mw.inspector.titleEntry.Text != "Intro Scene" || mw.inspector.hotkeyEntry.Text != "Ctrl+Shift+1" {
+		t.Fatalf("expected inspector to display restored Intro Scene, got title=%q hotkey=%q",
+			mw.inspector.titleEntry.Text, mw.inspector.hotkeyEntry.Text)
+	}
+
+	test.Tap(mw.redoBtn)
+	drainUI()
+	if slot0 = eng.Snapshot().Slots["0,0"]; slot0.Config == nil || slot0.Config.ActionUUID != apps.ActionOpenURL {
+		t.Fatalf("expected Redo button to reapply OpenURL, got %+v", slot0.Config)
+	}
+
+	// 3) Clear button clears slot, and Undo restores it.
+	test.Tap(mw.inspector.clearBtn)
+	drainUI()
+	if _, exists := eng.Snapshot().Slots["0,0"]; exists {
+		t.Fatal("expected slot (0,0) cleared")
+	}
+	test.Tap(mw.undoBtn)
+	drainUI()
+	if slot0 = eng.Snapshot().Slots["0,0"]; slot0.Config == nil || slot0.Config.ActionUUID != apps.ActionOpenURL {
+		t.Fatalf("expected Undo of Clear to restore OpenURL, got %+v", slot0.Config)
+	}
+
+	// 4) Canvas Ctrl+Z must be ignored while a modal overlay (Settings dialog) is open.
+	settingsDlg := mw.ShowSettingsDialog()
+	triggerCanvasShortcut(&fyne.ShortcutUndo{})
+	drainUI()
+	if slot0 = eng.Snapshot().Slots["0,0"]; slot0.Config == nil || slot0.Config.ActionUUID != apps.ActionOpenURL {
+		t.Fatalf("expected Ctrl+Z ignored while modal overlay is open, got %+v", slot0.Config)
+	}
+	settingsDlg.Hide()
+	drainUI()
+
+	// 5) Occupied encoder dial prompts confirmation and preserves dial action on Dismiss.
+	mw.SelectDial(0)
+	test.Tap(mw.catalogButtons[apps.ActionMedia])
+	drainUI()
+	if mw.confirmDlg != nil {
+		t.Fatal("expected no prompt assigning to empty Dial 0")
+	}
+	test.Tap(mw.catalogButtons[core.ActionCounter])
+	if mw.confirmDlg == nil {
+		t.Fatal("expected overwrite confirmation prompt for occupied Dial 0")
+	}
+	mw.confirmDlg.Dismiss()
+	drainUI()
+	if dial0 := eng.Snapshot().DialSlots[0]; dial0.Config == nil || dial0.Config.ActionUUID != apps.ActionMedia {
+		t.Fatalf("expected Dismiss on occupied Dial 0 to preserve ActionMedia, got %+v", dial0.Config)
+	}
 }

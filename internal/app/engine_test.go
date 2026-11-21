@@ -197,3 +197,114 @@ func TestEngineCounterDialMultiActionAndFilePersistence(t *testing.T) {
 		t.Fatalf("reloaded GlobalSettings = %+v, want host=127.0.0.1", gs)
 	}
 }
+
+func TestEngineUndoRedoAssignEditClearAndPersistence(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "undo-config.json")
+	store := deck.NewFileStore(cfgPath)
+	eng := newTestEngine(t, store)
+
+	snap0 := eng.Snapshot()
+	if snap0.CanUndo || snap0.CanRedo || snap0.HistoryRevision != 0 {
+		t.Fatalf("unexpected initial history state: %+v", snap0)
+	}
+
+	coord := deck.Coordinates{Row: 0, Col: 0}
+	if _, err := eng.AssignKeypadAction(coord, core.ActionCounter); err != nil {
+		t.Fatalf("AssignKeypadAction(Counter) error = %v", err)
+	}
+	if err := eng.UpdateKeypadSlotWithHotkey(coord, "My Counter", "#22C55E", "Ctrl+Shift+C", map[string]any{
+		"initial": 10,
+		"step":    5,
+	}); err != nil {
+		t.Fatalf("UpdateKeypadSlotWithHotkey() error = %v", err)
+	}
+	if _, err := eng.AssignKeypadAction(coord, core.ActionDelay); err != nil {
+		t.Fatalf("AssignKeypadAction(Delay) error = %v", err)
+	}
+	if err := eng.ClearKeypadSlot(coord); err != nil {
+		t.Fatalf("ClearKeypadSlot() error = %v", err)
+	}
+
+	snap := eng.Snapshot()
+	if !snap.CanUndo || snap.CanRedo || snap.UndoLabel != "Clear slot" || snap.HistoryRevision != 4 {
+		t.Fatalf("unexpected history state after 4 mutations: canUndo=%v canRedo=%v label=%q rev=%d",
+			snap.CanUndo, snap.CanRedo, snap.UndoLabel, snap.HistoryRevision)
+	}
+
+	// 1) Undo clear -> ActionDelay restored.
+	label, err := eng.Undo()
+	if err != nil || label != "Clear slot" {
+		t.Fatalf("Undo 1 = (%q, %v), want Clear slot", label, err)
+	}
+	snap = eng.Snapshot()
+	if slot := snap.Slots[coord.SlotKey()]; slot.Config == nil || slot.Config.ActionUUID != core.ActionDelay {
+		t.Fatalf("expected ActionDelay after Undo 1, got %+v", slot.Config)
+	}
+	if !snap.CanRedo || snap.RedoLabel != "Clear slot" || snap.HistoryRevision != 5 {
+		t.Fatalf("unexpected redo state after Undo 1: %+v", snap)
+	}
+
+	// 2) Undo overwrite -> ActionCounter with edited title, hotkey, and settings restored.
+	label, err = eng.Undo()
+	if err != nil || label == "" {
+		t.Fatalf("Undo 2 = (%q, %v)", label, err)
+	}
+	snap = eng.Snapshot()
+	slot := snap.Slots[coord.SlotKey()]
+	if slot.Config == nil || slot.Config.ActionUUID != core.ActionCounter ||
+		slot.Config.Title != "My Counter" || slot.Config.Color != "#22C55E" ||
+		slot.Config.Hotkey != "Ctrl+Shift+C" || slot.Visual.Subtitle != "10" {
+		t.Fatalf("expected restored customized Counter after Undo 2, got cfg=%+v vis=%+v", slot.Config, slot.Visual)
+	}
+
+	// Verify disk persistence on FileStore reflects the undone state right away.
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("store.Load() error = %v", err)
+	}
+	persisted := loaded.Profiles[0].Pages[0].Slots[coord.SlotKey()]
+	if persisted == nil || persisted.ActionUUID != core.ActionCounter || persisted.Title != "My Counter" || persisted.Hotkey != "Ctrl+Shift+C" {
+		t.Fatalf("disk config after Undo mismatch: %+v", persisted)
+	}
+
+	// 3) Single-step Undo of Edit slot reverts title, color, hotkey, and settings together.
+	if _, err := eng.Undo(); err != nil {
+		t.Fatalf("Undo 3 error = %v", err)
+	}
+	snap = eng.Snapshot()
+	slot = snap.Slots[coord.SlotKey()]
+	if slot.Config == nil || slot.Config.Title != "Count" || slot.Config.Hotkey != "" || slot.Visual.Subtitle != "0" {
+		t.Fatalf("expected default Counter after Undo 3, got cfg=%+v vis=%+v", slot.Config, slot.Visual)
+	}
+
+	// 4) Undo initial Assign -> slot is empty, CanUndo is false.
+	if _, err := eng.Undo(); err != nil {
+		t.Fatalf("Undo 4 error = %v", err)
+	}
+	snap = eng.Snapshot()
+	if _, exists := snap.Slots[coord.SlotKey()]; exists || snap.CanUndo {
+		t.Fatalf("expected empty slot and CanUndo=false after Undo 4, exists=%v canUndo=%v", exists, snap.CanUndo)
+	}
+	if extraLabel, err := eng.Undo(); err != nil || extraLabel != "" {
+		t.Fatalf("empty Undo() = (%q, %v), want ('', nil)", extraLabel, err)
+	}
+
+	// Redo forward twice -> Counter restored with custom settings, then a new edit clears redo stack.
+	if _, err := eng.Redo(); err != nil {
+		t.Fatalf("Redo 1 error = %v", err)
+	}
+	if _, err := eng.Redo(); err != nil {
+		t.Fatalf("Redo 2 error = %v", err)
+	}
+	snap = eng.Snapshot()
+	if s := snap.Slots[coord.SlotKey()]; s.Config == nil || s.Config.Title != "My Counter" || !snap.CanRedo {
+		t.Fatalf("expected My Counter with CanRedo=true after Redo 2, got %+v canRedo=%v", s.Config, snap.CanRedo)
+	}
+
+	if err := eng.SetKeypadHotkey(coord, "Alt+F9"); err != nil {
+		t.Fatalf("SetKeypadHotkey() error = %v", err)
+	}
+	if eng.Snapshot().CanRedo {
+		t.Fatal("expected CanRedo=false after branching with a new mutation")
+	}
+}
