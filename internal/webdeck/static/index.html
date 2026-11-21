@@ -61,6 +61,7 @@
 
           <button id="pair-submit-btn" type="submit" class="primary-btn">Connect to Deck</button>
         </form>
+        <button id="native-scan-pair-btn" type="button" class="tool-btn" hidden>Scan QR Code</button>
       </section>
     </main>
 
@@ -99,9 +100,19 @@
         <label for="profile-select">Profile</label>
         <select id="profile-select" class="select-control" aria-label="Active Profile"></select>
       </div>
+      <div id="native-orient-wrap" class="deck-menu-field" hidden>
+        <label for="native-orient-select">Screen Orientation</label>
+        <select id="native-orient-select" class="select-control" aria-label="Screen Orientation">
+          <option value="auto">Auto</option>
+          <option value="landscape">Landscape</option>
+          <option value="portrait">Portrait</option>
+        </select>
+      </div>
       <div class="deck-menu-actions">
         <button id="fullscreen-btn" type="button" class="tool-btn" hidden>Fullscreen</button>
         <button id="wake-btn" type="button" class="tool-btn" aria-pressed="false" hidden>Keep Awake</button>
+        <button id="native-scan-btn" type="button" class="tool-btn" hidden>Scan New QR</button>
+        <button id="native-setup-btn" type="button" class="tool-btn" hidden>Change Server</button>
         <button id="logout-btn" type="button" class="tool-btn tool-btn-danger">Lock / Sign Out</button>
       </div>
     </aside>

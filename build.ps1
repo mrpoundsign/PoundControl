@@ -1,14 +1,15 @@
 # PoundDeck Build Script (PowerShell)
 # Usage:
-#   .\build.ps1                # Run lint, tests, and build Desktop Studio GUI
-#   .\build.ps1 -Target gui    # Build Desktop Studio GUI (with Zig CGo) -> build\bin\pounddeck.exe
-#   .\build.ps1 -Target test   # Run all unit & headless UI tests
-#   .\build.ps1 -Target lint   # Run go fix -diff & golangci-lint-v2
-#   .\build.ps1 -Target check  # Run goreleaser check
-#   .\build.ps1 -Target clean  # Clean build artifacts
+#   .\build.ps1                  # Run lint, tests, and build Desktop Studio GUI
+#   .\build.ps1 -Target gui      # Build Desktop Studio GUI (with Zig CGo) -> build\bin\pounddeck.exe
+#   .\build.ps1 -Target android  # Test & build Android Companion APK -> build\bin\pounddeck-android.apk
+#   .\build.ps1 -Target test     # Run all unit & headless UI tests
+#   .\build.ps1 -Target lint     # Run go fix -diff & golangci-lint-v2
+#   .\build.ps1 -Target check    # Run goreleaser check
+#   .\build.ps1 -Target clean    # Clean build artifacts
 
 param(
-    [ValidateSet("all", "gui", "test", "lint", "check", "clean")]
+    [ValidateSet("all", "gui", "android", "test", "lint", "check", "clean")]
     [string]$Target = "all"
 )
 
@@ -176,11 +177,82 @@ function Clean-Artifacts {
     Write-Host "[OK] Cleaned." -ForegroundColor Green
 }
 
+function Build-Android {
+    Write-Host "`n==> Testing & Building PoundDeck Android Companion APK..." -ForegroundColor Cyan
+    $androidDir = Join-Path $PSScriptRoot "mobile\android"
+    $gradlew = Join-Path $androidDir "gradlew.bat"
+    if (-not (Test-Path $gradlew)) {
+        Write-Error "Gradle wrapper not found at $gradlew."
+    }
+
+    $javaHome = $env:JAVA_HOME
+    if (-not $javaHome -or -not (Test-Path (Join-Path $javaHome "bin\java.exe"))) {
+        $jbr = "C:\Program Files\Android\Android Studio\jbr"
+        if (Test-Path (Join-Path $jbr "bin\java.exe")) {
+            $javaHome = $jbr
+        } else {
+            $javaHome = Get-ChildItem "C:\Program Files\Eclipse Adoptium\*", "C:\Program Files\Java\*", "C:\Program Files\Microsoft\jdk*" -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path (Join-Path $_.FullName "bin\java.exe") } |
+                Select-Object -First 1 -ExpandProperty FullName
+        }
+    }
+    if (-not $javaHome) {
+        Write-Error "JDK not found. Set JAVA_HOME or install Android Studio / JDK 17+."
+    }
+
+    $sdkHome = $env:ANDROID_HOME
+    if (-not $sdkHome -or -not (Test-Path $sdkHome)) {
+        if ($env:ANDROID_SDK_ROOT -and (Test-Path $env:ANDROID_SDK_ROOT)) {
+            $sdkHome = $env:ANDROID_SDK_ROOT
+        } elseif (Test-Path (Join-Path $env:LOCALAPPDATA "Android\Sdk")) {
+            $sdkHome = Join-Path $env:LOCALAPPDATA "Android\Sdk"
+        }
+    }
+    if (-not $sdkHome -or -not (Test-Path $sdkHome)) {
+        Write-Error "Android SDK not found. Set ANDROID_HOME or install Android SDK platform tools."
+    }
+
+    Write-Host "Using JAVA_HOME=$javaHome" -ForegroundColor DarkGray
+    Write-Host "Using ANDROID_HOME=$sdkHome" -ForegroundColor DarkGray
+
+    $prevJava = $env:JAVA_HOME
+    $prevAndroid = $env:ANDROID_HOME
+    $prevSdkRoot = $env:ANDROID_SDK_ROOT
+    try {
+        $env:JAVA_HOME = $javaHome
+        $env:ANDROID_HOME = $sdkHome
+        $env:ANDROID_SDK_ROOT = $sdkHome
+        Push-Location $androidDir
+        try {
+            & $gradlew testDebugUnitTest assembleDebug --no-daemon
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Android unit tests or APK build failed."
+            }
+        } finally {
+            Pop-Location
+        }
+    } finally {
+        $env:JAVA_HOME = $prevJava
+        $env:ANDROID_HOME = $prevAndroid
+        $env:ANDROID_SDK_ROOT = $prevSdkRoot
+    }
+
+    $apkSrc = Join-Path $androidDir "app\build\outputs\apk\debug\app-debug.apk"
+    if (-not (Test-Path $apkSrc)) {
+        Write-Error "Expected APK not found at $apkSrc."
+    }
+    if (-not (Test-Path $BinDir)) { New-Item -ItemType Directory -Path $BinDir | Out-Null }
+    $apkOut = Join-Path $BinDir "pounddeck-android.apk"
+    Copy-Item -Path $apkSrc -Destination $apkOut -Force
+    Write-Host "[OK] Successfully built $apkOut" -ForegroundColor Green
+}
+
 switch ($Target) {
-    "all"   { Run-Lint; Run-Tests; Build-GUI }
-    "gui"   { Build-GUI }
-    "test"  { Run-Tests }
-    "lint"  { Run-Lint }
-    "check" { Run-Check }
-    "clean" { Clean-Artifacts }
+    "all"     { Run-Lint; Run-Tests; Build-GUI }
+    "gui"     { Build-GUI }
+    "android" { Build-Android }
+    "test"    { Run-Tests }
+    "lint"    { Run-Lint }
+    "check"   { Run-Check }
+    "clean"   { Clean-Artifacts }
 }

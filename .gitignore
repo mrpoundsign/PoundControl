@@ -17,3 +17,8 @@ planning/
 cmd/installer/payload/*
 !cmd/installer/payload/placeholder.txt
 *.syso
+mobile/android/.gradle/
+mobile/android/app/build/
+mobile/android/local.properties
+*.keystore
+*.jks

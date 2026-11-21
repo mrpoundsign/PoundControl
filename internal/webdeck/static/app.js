@@ -2,8 +2,13 @@
   'use strict';
 
   const HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
-  const supportsWakeLock = Boolean(window.isSecureContext && 'wakeLock' in navigator);
+  const nativeBridge =
+    window.PoundDeckNative && typeof window.PoundDeckNative.isNativeApp === 'function'
+      ? window.PoundDeckNative
+      : null;
+  const supportsWakeLock = Boolean(!nativeBridge && window.isSecureContext && 'wakeLock' in navigator);
   const supportsFullscreen = Boolean(
+    !nativeBridge &&
     document.fullscreenEnabled &&
     document.documentElement &&
     typeof document.documentElement.requestFullscreen === 'function'
@@ -15,6 +20,11 @@
     connBadge: document.getElementById('conn-badge'),
     connLabel: document.getElementById('conn-label'),
     profileSelect: document.getElementById('profile-select'),
+    nativeOrientWrap: document.getElementById('native-orient-wrap'),
+    nativeOrientSelect: document.getElementById('native-orient-select'),
+    nativeScanBtn: document.getElementById('native-scan-btn'),
+    nativeSetupBtn: document.getElementById('native-setup-btn'),
+    nativeScanPairBtn: document.getElementById('native-scan-pair-btn'),
     backFolderBtn: document.getElementById('back-folder-btn'),
     menuBtn: document.getElementById('menu-btn'),
     menuCloseBtn: document.getElementById('menu-close-btn'),
@@ -555,6 +565,33 @@
       showPairView('');
     }
   });
+
+  if (nativeBridge) {
+    els.nativeOrientWrap.hidden = false;
+    els.nativeScanBtn.hidden = false;
+    els.nativeSetupBtn.hidden = false;
+    els.nativeScanPairBtn.hidden = false;
+    try {
+      els.nativeOrientSelect.value = nativeBridge.getOrientation() || 'auto';
+    } catch {
+      els.nativeOrientSelect.value = 'auto';
+    }
+    els.nativeOrientSelect.addEventListener('change', () => {
+      nativeBridge.setOrientation(els.nativeOrientSelect.value);
+      setMenuOpen(false);
+    });
+    els.nativeScanBtn.addEventListener('click', () => {
+      setMenuOpen(false);
+      nativeBridge.openScanner();
+    });
+    els.nativeSetupBtn.addEventListener('click', () => {
+      setMenuOpen(false);
+      nativeBridge.openSetup();
+    });
+    els.nativeScanPairBtn.addEventListener('click', () => {
+      nativeBridge.openScanner();
+    });
+  }
 
   async function init() {
     setStatusBadge('connecting', 'Checking...');
