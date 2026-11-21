@@ -30,6 +30,7 @@ func showSettingsDialog(
 	engine *app.Engine,
 	obsCtrl OBSController,
 	sdCtrl SDPluginController,
+	webCtrl WebDeckController,
 	cfgPath string,
 	activeHotkeys int,
 	initialTab int,
@@ -71,14 +72,8 @@ func showSettingsDialog(
 	// Plugins Tab
 	pluginsTab, pluginsCleanup := buildPluginsSettingsTab(win, engine, sdCtrl, onReloadPlugins, onStatus)
 
-	// Web Deck Tab (Milestone 6 preview)
-	webLbl := widget.NewLabel(
-		"LAN Web / Mobile / Tablet Touch Deck arrives in Milestone 6.\n\n" +
-			"It will expose the same live virtual buttons and encoder dials over an authenticated local " +
-			"HTTP/WebSocket server with QR pairing so phones and tablets can control PoundDeck over Wi-Fi.",
-	)
-	webLbl.Wrapping = fyne.TextWrapWord
-	webTab := container.NewPadded(webLbl)
+	// Web Deck Tab
+	webTab, webCleanup := buildWebDeckSettingsTab(webCtrl, onStatus)
 
 	tabs := container.NewAppTabs(
 		container.NewTabItem("General", container.NewPadded(generalTab)),
@@ -91,13 +86,16 @@ func showSettingsDialog(
 	}
 
 	dlg := dialog.NewCustom("PoundDeck Settings", "Close", tabs, win)
-	dlg.Resize(fyne.NewSize(660, 520))
+	dlg.Resize(fyne.NewSize(660, 560))
 	dlg.SetOnClosed(func() {
 		if obsCleanup != nil {
 			obsCleanup()
 		}
 		if pluginsCleanup != nil {
 			pluginsCleanup()
+		}
+		if webCleanup != nil {
+			webCleanup()
 		}
 	})
 	dlg.Show()

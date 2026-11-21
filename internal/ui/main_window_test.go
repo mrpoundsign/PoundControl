@@ -21,6 +21,7 @@ import (
 	"golang.org/x/net/websocket"
 
 	"github.com/mrpoundsign/PoundDeck/internal/app"
+	"github.com/mrpoundsign/PoundDeck/internal/webdeck"
 	"github.com/mrpoundsign/PoundDeck/pkg/builtin/apps"
 	"github.com/mrpoundsign/PoundDeck/pkg/builtin/core"
 	"github.com/mrpoundsign/PoundDeck/pkg/builtin/obs"
@@ -852,5 +853,84 @@ func TestMainWindowSDPluginArtworkDialFeedbackAndPI(t *testing.T) {
 	piViewer.mu.Unlock()
 	if closedCount < 1 {
 		t.Fatalf("expected piViewer.CloseAll() invoked on window close, got closedCount=%d", closedCount)
+	}
+}
+
+func TestMainWindowWebDeckSettingsAndHeaderBadge(t *testing.T) {
+	eng, _, mw := newTestStudio(t)
+	webSrv := webdeck.NewServer(eng)
+	t.Cleanup(func() {
+		_ = webSrv.Close()
+		drainUI()
+	})
+
+	mw.SetWebDeckController(webSrv)
+	drainUI()
+
+	if !mw.webBtn.Visible() || mw.webBtn.Text != "Web Deck: Off" {
+		t.Fatalf("expected visible \"Web Deck: Off\" header badge, got visible=%v text=%q", mw.webBtn.Visible(), mw.webBtn.Text)
+	}
+
+	if err := webSrv.SaveConfig(webdeck.Config{
+		Enabled:  true,
+		Port:     0,
+		BindMode: webdeck.BindLocalhost,
+	}); err != nil {
+		t.Fatalf("webSrv.SaveConfig() error = %v", err)
+	}
+	drainUI()
+
+	st := webSrv.Status()
+	wantBadge := "Web Deck: :" + strconv.Itoa(st.Port)
+	if mw.webBtn.Text != wantBadge {
+		t.Fatalf("header badge = %q, want %q", mw.webBtn.Text, wantBadge)
+	}
+
+	dlg := mw.ShowSettingsDialogTab(settingsTabWeb)
+	drainUI()
+
+	qrImg, err := webSrv.QRImage(180)
+	if err != nil || qrImg.Bounds().Dx() != 180 {
+		t.Fatalf("QRImage(180) = (%#v, %v), want 180x180", qrImg, err)
+	}
+
+	nextCfg, err := webSrv.RegeneratePairing(true)
+	if err != nil || len(nextCfg.PIN) != 6 {
+		t.Fatalf("RegeneratePairing() = (%+v, %v), want valid 6-digit PIN", nextCfg, err)
+	}
+	drainUI()
+
+	if err := webSrv.Stop(); err != nil {
+		t.Fatalf("webSrv.Stop() error = %v", err)
+	}
+	drainUI()
+	if mw.webBtn.Text != "Web Deck: Off" {
+		t.Fatalf("expected badge back to \"Web Deck: Off\" after Stop, got %q", mw.webBtn.Text)
+	}
+
+	dlg.Hide()
+	drainUI()
+
+	// Verify buildGridDimensionControls supports 5x2 presets, custom dimensions, and bounds validation.
+	presetSel, colsEnt, rowsEnt, _, resolveGrid := buildGridDimensionControls(deck.DefaultGrid(), 2)
+	presetSel.SetSelected("5×2 (Phone)")
+	if colsEnt.Text != "5" || rowsEnt.Text != "2" {
+		t.Fatalf("expected 5×2 preset to set entries 5x2, got %sx%s", colsEnt.Text, rowsEnt.Text)
+	}
+	colsEnt.SetText("7")
+	rowsEnt.SetText("2")
+	if presetSel.Selected != customGridPresetLabel {
+		t.Fatalf("expected custom dimensions to select %q, got %q", customGridPresetLabel, presetSel.Selected)
+	}
+	if grid, dials, err := resolveGrid(); err != nil || grid != (deck.GridSize{Cols: 7, Rows: 2}) || dials != 2 {
+		t.Fatalf("resolveGrid(7x2) = (%+v, %d, %v), want 7x2 / 2 / nil", grid, dials, err)
+	}
+	colsEnt.SetText("0")
+	if _, _, err := resolveGrid(); err == nil {
+		t.Fatal("expected resolveGrid(0x2) validation error")
+	}
+	colsEnt.SetText("20")
+	if _, _, err := resolveGrid(); err == nil {
+		t.Fatal("expected resolveGrid(20x2) validation error")
 	}
 }

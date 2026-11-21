@@ -112,6 +112,45 @@ func (c *Cache) GetOrDecode(uri string, size int) (image.Image, error) {
 	return img, nil
 }
 
+// ResolveImageFile resolves a local filesystem path, file:// URI, or Stream Deck asset stem
+// into a concrete file path on disk along with its MIME content type.
+func ResolveImageFile(uri string) (resolvedPath, contentType string, ok bool) {
+	trimmed := strings.TrimSpace(uri)
+	if trimmed == "" || strings.HasPrefix(strings.ToLower(trimmed), "data:") {
+		return "", "", false
+	}
+
+	filePath := trimmed
+	if strings.HasPrefix(strings.ToLower(trimmed), "file://") {
+		if parsed, err := url.Parse(trimmed); err == nil {
+			filePath = parsed.Path
+			if len(filePath) >= 3 && filePath[0] == '/' && filePath[2] == ':' {
+				filePath = filePath[1:]
+			}
+			filePath = filepath.FromSlash(filePath)
+		}
+	}
+
+	resolved, found := resolveImageFile(filePath)
+	if !found {
+		return "", "", false
+	}
+	return resolved, contentTypeForExt(filepath.Ext(resolved)), true
+}
+
+func contentTypeForExt(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".svg":
+		return "image/svg+xml"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	default:
+		return "application/octet-stream"
+	}
+}
+
 // DecodeImage decodes a data URI or local image path (PNG, JPEG, or SVG with <text> labels)
 // into an image suitable for rendering on a virtual deck tile of side length size.
 func DecodeImage(uri string, size int) (image.Image, error) {
@@ -127,26 +166,15 @@ func DecodeImage(uri string, size int) (image.Image, error) {
 		return decodeDataURI(trimmed, size)
 	}
 
-	filePath := trimmed
-	if strings.HasPrefix(strings.ToLower(trimmed), "file://") {
-		if parsed, err := url.Parse(trimmed); err == nil {
-			filePath = parsed.Path
-			if len(filePath) >= 3 && filePath[0] == '/' && filePath[2] == ':' {
-				filePath = filePath[1:]
-			}
-			filePath = filepath.FromSlash(filePath)
-		}
-	}
-
-	resolved, ok := resolveImageFile(filePath)
+	resolved, contentType, ok := ResolveImageFile(trimmed)
 	if !ok {
-		return nil, fmt.Errorf("image file not found: %s", filePath)
+		return nil, fmt.Errorf("image file not found: %s", trimmed)
 	}
 	raw, err := os.ReadFile(resolved)
 	if err != nil {
 		return nil, fmt.Errorf("read image file %s: %w", resolved, err)
 	}
-	if strings.EqualFold(filepath.Ext(resolved), ".svg") || looksLikeSVG(raw) {
+	if contentType == "image/svg+xml" || looksLikeSVG(raw) {
 		return renderSVG(raw, size)
 	}
 	img, _, err := image.Decode(bytes.NewReader(raw))

@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0A0A0C">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>PoundDeck Touch Deck</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" href="/icon.png">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body data-view="pair">
+  <div class="app-shell">
+    <header id="pair-header" class="pair-header" aria-label="Pairing header">
+      <div class="brand-group">
+        <img class="brand-icon" src="/icon.png" alt="" width="28" height="28">
+        <div class="brand-titles">
+          <h1>PoundDeck</h1>
+          <span id="pair-conn-badge" class="status-pill" data-state="offline" role="status" aria-live="polite">Checking...</span>
+        </div>
+      </div>
+    </header>
+
+    <main id="pair-view" class="pair-view">
+      <section class="pair-card" aria-labelledby="pair-heading">
+        <h2 id="pair-heading">Pair Touch Deck</h2>
+        <p class="pair-help">Enter the 6-digit PIN shown in PoundDeck Settings &rarr; Web Deck, or scan the pairing QR code from your desktop studio.</p>
+
+        <form id="pair-form" class="pair-form">
+          <label class="sr-only" for="pin-input">6-digit pairing PIN</label>
+          <input
+            id="pin-input"
+            class="pin-input"
+            type="text"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            pattern="[0-9]{6}"
+            maxlength="6"
+            placeholder="000000"
+            aria-label="6-digit pairing PIN"
+          >
+          <div id="pair-error" class="pair-error" role="alert" hidden></div>
+
+          <div class="keypad-digits" role="group" aria-label="PIN numeric keypad">
+            <button type="button" class="digit-btn" data-digit="1">1</button>
+            <button type="button" class="digit-btn" data-digit="2">2</button>
+            <button type="button" class="digit-btn" data-digit="3">3</button>
+            <button type="button" class="digit-btn" data-digit="4">4</button>
+            <button type="button" class="digit-btn" data-digit="5">5</button>
+            <button type="button" class="digit-btn" data-digit="6">6</button>
+            <button type="button" class="digit-btn" data-digit="7">7</button>
+            <button type="button" class="digit-btn" data-digit="8">8</button>
+            <button type="button" class="digit-btn" data-digit="9">9</button>
+            <button type="button" class="digit-btn digit-muted" id="pin-clear-btn">Clear</button>
+            <button type="button" class="digit-btn" data-digit="0">0</button>
+            <button type="button" class="digit-btn digit-muted" id="pin-back-btn" aria-label="Backspace">&larr;</button>
+          </div>
+
+          <button id="pair-submit-btn" type="submit" class="primary-btn">Connect to Deck</button>
+        </form>
+      </section>
+    </main>
+
+    <main id="deck-view" class="deck-view" hidden>
+      <div class="deck-bar" aria-label="Deck status and menu">
+        <div class="deck-bar-start">
+          <button id="back-folder-btn" type="button" class="pill-btn pill-btn-accent" hidden>&larr; Back</button>
+        </div>
+        <div class="deck-bar-end">
+          <span id="conn-badge" class="status-pill compact-pill" data-state="offline" role="status" aria-live="polite">
+            <span class="conn-dot" aria-hidden="true"></span>
+            <span id="conn-label">Offline</span>
+          </span>
+          <button id="menu-btn" type="button" class="pill-btn icon-only-btn" aria-expanded="false" aria-controls="deck-menu" aria-label="Deck options menu">
+            <span aria-hidden="true">&#9776;</span>
+          </button>
+        </div>
+      </div>
+
+      <section class="deck-stage" aria-label="Virtual keypad">
+        <div id="key-grid" class="key-grid"></div>
+      </section>
+
+      <section id="dial-stage" class="dial-stage" aria-label="Encoder dials" hidden>
+        <div id="dial-strip" class="dial-strip"></div>
+      </section>
+    </main>
+
+    <aside id="deck-menu" class="deck-menu" role="dialog" aria-label="Deck options" hidden>
+      <div class="deck-menu-head">
+        <strong>Deck Options</strong>
+        <button id="menu-close-btn" type="button" class="pill-btn icon-only-btn" aria-label="Close menu">&times;</button>
+      </div>
+      <div id="folder-banner" class="folder-banner" hidden></div>
+      <div class="deck-menu-field">
+        <label for="profile-select">Profile</label>
+        <select id="profile-select" class="select-control" aria-label="Active Profile"></select>
+      </div>
+      <div class="deck-menu-actions">
+        <button id="fullscreen-btn" type="button" class="tool-btn" hidden>Fullscreen</button>
+        <button id="wake-btn" type="button" class="tool-btn" aria-pressed="false" hidden>Keep Awake</button>
+        <button id="logout-btn" type="button" class="tool-btn tool-btn-danger">Lock / Sign Out</button>
+      </div>
+    </aside>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

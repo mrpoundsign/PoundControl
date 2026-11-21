@@ -12,6 +12,7 @@ import (
 	"github.com/mrpoundsign/PoundDeck/internal/hotkey"
 	"github.com/mrpoundsign/PoundDeck/internal/ui"
 	"github.com/mrpoundsign/PoundDeck/internal/version"
+	"github.com/mrpoundsign/PoundDeck/internal/webdeck"
 	"github.com/mrpoundsign/PoundDeck/pkg/builtin/apps"
 	"github.com/mrpoundsign/PoundDeck/pkg/builtin/core"
 	"github.com/mrpoundsign/PoundDeck/pkg/builtin/obs"
@@ -97,6 +98,18 @@ func main() {
 	win.SetOBSController(obsProvider)
 	win.SetSDPluginController(sdHost)
 	win.SetPIViewer(ui.NewDefaultPIViewer())
+
+	webSrv := webdeck.NewServer(eng)
+	defer func() {
+		if closeErr := webSrv.Close(); closeErr != nil {
+			log.Printf("close web deck server: %v", closeErr)
+		}
+	}()
+	win.SetWebDeckController(webSrv)
+	if webErr := webSrv.StartFromConfig(); webErr != nil {
+		log.Printf("start web deck server: %v", webErr)
+	}
+
 	obsProvider.StartFromGlobalSettings()
 
 	win.ShowAndRun()

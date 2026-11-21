@@ -18,6 +18,7 @@ import (
 
 	"github.com/mrpoundsign/PoundDeck/internal/app"
 	"github.com/mrpoundsign/PoundDeck/internal/version"
+	"github.com/mrpoundsign/PoundDeck/internal/webdeck"
 	"github.com/mrpoundsign/PoundDeck/pkg/builtin/obs"
 	"github.com/mrpoundsign/PoundDeck/pkg/deck"
 	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
@@ -31,9 +32,12 @@ type gridPreset struct {
 	grid  deck.GridSize
 }
 
+const customGridPresetLabel = "Custom"
+
 var studioGridPresets = []gridPreset{
 	{label: "3×2 (Mini)", grid: deck.GridSize{Cols: 3, Rows: 2}},
 	{label: "4×2 (Compact)", grid: deck.GridSize{Cols: 4, Rows: 2}},
+	{label: "5×2 (Phone)", grid: deck.GridSize{Cols: 5, Rows: 2}},
 	{label: "5×3 (Standard)", grid: deck.GridSize{Cols: 5, Rows: 3}},
 	{label: "6×4 (XL)", grid: deck.GridSize{Cols: 6, Rows: 4}},
 	{label: "8×4 (XL+)", grid: deck.GridSize{Cols: 8, Rows: 4}},
@@ -48,6 +52,8 @@ type MainWindow struct {
 	obsCtrl     OBSController
 	obsUnsub    func()
 	sdCtrl      SDPluginController
+	webCtrl     WebDeckController
+	webUnsub    func()
 	piViewer    PIViewer
 	popOut      *PopOutPad
 	cfgPath     string
@@ -68,6 +74,7 @@ type MainWindow struct {
 	undoBtn        *widget.Button
 	redoBtn        *widget.Button
 	obsBtn         *widget.Button
+	webBtn         *widget.Button
 	runModeCheck   *widget.Check
 	catalogList    *fyne.Container
 	catalogButtons map[string]*widget.Button
@@ -150,6 +157,10 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 		if mw.obsUnsub != nil {
 			mw.obsUnsub()
 			mw.obsUnsub = nil
+		}
+		if mw.webUnsub != nil {
+			mw.webUnsub()
+			mw.webUnsub = nil
 		}
 		if mw.unsub != nil {
 			mw.unsub()
@@ -279,6 +290,7 @@ func (mw *MainWindow) ShowSettingsDialogTab(tab int) *dialog.CustomDialog {
 		mw.engine,
 		mw.obsCtrl,
 		mw.sdCtrl,
+		mw.webCtrl,
 		mw.cfgPath,
 		hotkeys,
 		tab,
@@ -361,6 +373,41 @@ func (mw *MainWindow) applyOBSStatus(st obs.ClientStatus) {
 		mw.obsBtn.Importance = widget.MediumImportance
 	}
 	mw.obsBtn.Refresh()
+}
+
+// SetWebDeckController attaches a WebDeckController so the Studio header badge displays live LAN touch deck
+// status and clicking it opens Settings directly on the Web Deck tab.
+func (mw *MainWindow) SetWebDeckController(ctrl WebDeckController) {
+	if mw.webUnsub != nil {
+		mw.webUnsub()
+		mw.webUnsub = nil
+	}
+	mw.webCtrl = ctrl
+	if ctrl == nil {
+		mw.webBtn.Hide()
+		return
+	}
+
+	mw.webBtn.Show()
+	mw.applyWebDeckStatus(ctrl.Status())
+	mw.webUnsub = ctrl.SubscribeStatus(func(st webdeck.Status) {
+		dispatchUI(func() {
+			mw.applyWebDeckStatus(st)
+		})
+	})
+}
+
+func (mw *MainWindow) applyWebDeckStatus(st webdeck.Status) {
+	if mw.webBtn == nil {
+		return
+	}
+	mw.webBtn.SetText(webDeckBadgeLabel(st))
+	if st.Running {
+		mw.webBtn.Importance = widget.HighImportance
+	} else {
+		mw.webBtn.Importance = widget.MediumImportance
+	}
+	mw.webBtn.Refresh()
 }
 
 func (mw *MainWindow) setStatus(msg string) {
@@ -674,6 +721,11 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 	})
 	mw.obsBtn.Hide()
 
+	mw.webBtn = widget.NewButton("Web Deck: Off", func() {
+		mw.ShowSettingsDialogTab(settingsTabWeb)
+	})
+	mw.webBtn.Hide()
+
 	popOutBtn := widget.NewButton("Pop-Out Pad", func() {
 		mw.OpenPopOutPad()
 	})
@@ -701,6 +753,7 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 		mw.undoBtn,
 		mw.redoBtn,
 		mw.obsBtn,
+		mw.webBtn,
 		mw.runModeCheck,
 		popOutBtn,
 		settingsBtn,
@@ -829,23 +882,115 @@ func (mw *MainWindow) buildStatusBar() fyne.CanvasObject {
 	)
 }
 
+func buildGridDimensionControls(initial deck.GridSize, initialDials int) (
+	presetSelect *widget.Select,
+	colsEntry *widget.Entry,
+	rowsEntry *widget.Entry,
+	dialsSelect *widget.Select,
+	resolve func() (deck.GridSize, int, error),
+) {
+	if initial.Validate() != nil {
+		initial = deck.DefaultGrid()
+	}
+
+	presetLabels := make([]string, 0, len(studioGridPresets)+1)
+	matchedPreset := customGridPresetLabel
+	for _, p := range studioGridPresets {
+		presetLabels = append(presetLabels, p.label)
+		if p.grid == initial {
+			matchedPreset = p.label
+		}
+	}
+	presetLabels = append(presetLabels, customGridPresetLabel)
+
+	colsEntry = widget.NewEntry()
+	colsEntry.SetPlaceHolder("1–16")
+	colsEntry.SetText(strconv.Itoa(initial.Cols))
+
+	rowsEntry = widget.NewEntry()
+	rowsEntry.SetPlaceHolder("1–16")
+	rowsEntry.SetText(strconv.Itoa(initial.Rows))
+
+	syncing := false
+	presetSelect = widget.NewSelect(presetLabels, func(choice string) {
+		if syncing {
+			return
+		}
+		for _, p := range studioGridPresets {
+			if p.label == choice {
+				syncing = true
+				colsEntry.SetText(strconv.Itoa(p.grid.Cols))
+				rowsEntry.SetText(strconv.Itoa(p.grid.Rows))
+				syncing = false
+				return
+			}
+		}
+	})
+	presetSelect.SetSelected(matchedPreset)
+
+	syncPresetFromEntries := func(_ string) {
+		if syncing {
+			return
+		}
+		cols, cErr := strconv.Atoi(strings.TrimSpace(colsEntry.Text))
+		rows, rErr := strconv.Atoi(strings.TrimSpace(rowsEntry.Text))
+		target := customGridPresetLabel
+		if cErr == nil && rErr == nil {
+			for _, p := range studioGridPresets {
+				if p.grid.Cols == cols && p.grid.Rows == rows {
+					target = p.label
+					break
+				}
+			}
+		}
+		if presetSelect.Selected != target {
+			syncing = true
+			presetSelect.SetSelected(target)
+			syncing = false
+		}
+	}
+	colsEntry.OnChanged = syncPresetFromEntries
+	rowsEntry.OnChanged = syncPresetFromEntries
+
+	dialOptions := []string{"0", "1", "2", "3", "4", "5", "6", "7", "8"}
+	dialsSelect = widget.NewSelect(dialOptions, nil)
+	dialStr := strconv.Itoa(max(0, min(8, initialDials)))
+	dialsSelect.SetSelected(dialStr)
+
+	resolve = func() (deck.GridSize, int, error) {
+		cols, err := strconv.Atoi(strings.TrimSpace(colsEntry.Text))
+		if err != nil {
+			return deck.GridSize{}, 0, fmt.Errorf("invalid columns value %q", colsEntry.Text)
+		}
+		rows, err := strconv.Atoi(strings.TrimSpace(rowsEntry.Text))
+		if err != nil {
+			return deck.GridSize{}, 0, fmt.Errorf("invalid rows value %q", rowsEntry.Text)
+		}
+		grid := deck.GridSize{Cols: cols, Rows: rows}
+		if err := grid.Validate(); err != nil {
+			return deck.GridSize{}, 0, err
+		}
+		dials, err := strconv.Atoi(dialsSelect.Selected)
+		if err != nil {
+			dials = initialDials
+		}
+		return grid, dials, nil
+	}
+
+	return presetSelect, colsEntry, rowsEntry, dialsSelect, resolve
+}
+
 func (mw *MainWindow) showCreateProfileDialog() {
 	nameEntry := widget.NewEntry()
-	nameEntry.SetPlaceHolder("e.g. Streaming / Editing")
+	nameEntry.SetPlaceHolder("e.g. Phone 5×2 / Streaming")
 
-	presetLabels := make([]string, len(studioGridPresets))
-	for i, p := range studioGridPresets {
-		presetLabels[i] = p.label
-	}
-	gridSelect := widget.NewSelect(presetLabels, nil)
-	gridSelect.SetSelected(studioGridPresets[2].label)
-
-	dialsSelect := widget.NewSelect([]string{"0", "2", "4", "6", "8"}, nil)
-	dialsSelect.SetSelected("4")
+	presetSelect, colsEntry, rowsEntry, dialsSelect, resolveGrid := buildGridDimensionControls(deck.DefaultGrid(), 4)
 
 	items := []*widget.FormItem{
 		widget.NewFormItem("Name", nameEntry),
-		widget.NewFormItem("Grid Size", gridSelect),
+		widget.NewFormItem("Preset", presetSelect),
+		widget.NewFormItem("Columns", colsEntry),
+		widget.NewFormItem("Rows", rowsEntry),
 		widget.NewFormItem("Encoder Dials", dialsSelect),
 	}
 
@@ -853,13 +998,10 @@ func (mw *MainWindow) showCreateProfileDialog() {
 		if !confirmed {
 			return
 		}
-		grid := deck.DefaultGrid()
-		if idx := gridSelect.SelectedIndex(); idx >= 0 && idx < len(studioGridPresets) {
-			grid = studioGridPresets[idx].grid
-		}
-		dials, err := strconv.Atoi(dialsSelect.Selected)
+		grid, dials, err := resolveGrid()
 		if err != nil {
-			dials = 4
+			mw.setStatus("Invalid grid configuration: " + err.Error())
+			return
 		}
 		if _, err := mw.engine.CreateProfile(nameEntry.Text, grid, dials); err != nil {
 			mw.setStatus("Create profile failed: " + err.Error())
@@ -867,28 +1009,18 @@ func (mw *MainWindow) showCreateProfileDialog() {
 		}
 		mw.setStatus("Created profile " + strings.TrimSpace(nameEntry.Text))
 	}, mw.win)
-	dlg.Resize(fyne.NewSize(380, 220))
+	dlg.Resize(fyne.NewSize(400, 290))
 	dlg.Show()
 }
 
 func (mw *MainWindow) showGridDialog() {
 	snap := mw.engine.Snapshot()
-	presetLabels := make([]string, len(studioGridPresets))
-	currentLabel := studioGridPresets[2].label
-	for i, p := range studioGridPresets {
-		presetLabels[i] = p.label
-		if p.grid == snap.Grid {
-			currentLabel = p.label
-		}
-	}
-	gridSelect := widget.NewSelect(presetLabels, nil)
-	gridSelect.SetSelected(currentLabel)
-
-	dialsSelect := widget.NewSelect([]string{"0", "2", "4", "6", "8"}, nil)
-	dialsSelect.SetSelected(strconv.Itoa(snap.Dials))
+	presetSelect, colsEntry, rowsEntry, dialsSelect, resolveGrid := buildGridDimensionControls(snap.Grid, snap.Dials)
 
 	items := []*widget.FormItem{
-		widget.NewFormItem("Grid Size", gridSelect),
+		widget.NewFormItem("Preset", presetSelect),
+		widget.NewFormItem("Columns", colsEntry),
+		widget.NewFormItem("Rows", rowsEntry),
 		widget.NewFormItem("Encoder Dials", dialsSelect),
 	}
 
@@ -896,13 +1028,10 @@ func (mw *MainWindow) showGridDialog() {
 		if !confirmed {
 			return
 		}
-		grid := snap.Grid
-		if idx := gridSelect.SelectedIndex(); idx >= 0 && idx < len(studioGridPresets) {
-			grid = studioGridPresets[idx].grid
-		}
-		dials, err := strconv.Atoi(dialsSelect.Selected)
+		grid, dials, err := resolveGrid()
 		if err != nil {
-			dials = snap.Dials
+			mw.setStatus("Invalid grid configuration: " + err.Error())
+			return
 		}
 		if err := mw.engine.UpdateProfileGrid(snap.ActiveProfileID, grid, dials); err != nil {
 			mw.setStatus("Resize grid failed: " + err.Error())
@@ -910,6 +1039,6 @@ func (mw *MainWindow) showGridDialog() {
 		}
 		mw.setStatus(fmt.Sprintf("Grid updated to %dx%d (%d dials)", grid.Cols, grid.Rows, dials))
 	}, mw.win)
-	dlg.Resize(fyne.NewSize(360, 190))
+	dlg.Resize(fyne.NewSize(380, 260))
 	dlg.Show()
 }

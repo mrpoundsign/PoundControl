@@ -105,6 +105,11 @@ func TestDecodeBase64AndBundleStemLookup(t *testing.T) {
 	if stemImg.Bounds().Dx() != 16 {
 		t.Fatalf("expected @2x.png (width 16) preferred for stem lookup, got width %d", stemImg.Bounds().Dx())
 	}
+
+	resolvedPath, mimeType, ok := ResolveImageFile(filepath.Join(imgsDir, "mode"))
+	if !ok || mimeType != "image/png" || filepath.Base(resolvedPath) != "mode@2x.png" {
+		t.Fatalf("ResolveImageFile() = (%q, %q, %v), want mode@2x.png / image/png / true", resolvedPath, mimeType, ok)
+	}
 }
 
 func TestCacheHitAndBoundedEviction(t *testing.T) {
