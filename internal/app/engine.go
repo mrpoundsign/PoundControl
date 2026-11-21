@@ -983,6 +983,38 @@ func (e *Engine) UpdateDialSlot(dialIndex int, title, color string, settings map
 	return nil
 }
 
+// SetKeypadHotkey persists a global hotkey trigger expression on keypad slot c.
+func (e *Engine) SetKeypadHotkey(c deck.Coordinates, hotkeyStr string) error {
+	trimmed := strings.TrimSpace(hotkeyStr)
+
+	e.opMu.Lock()
+	e.mu.Lock()
+	prof := e.activeProfileLocked()
+	slotsMap, _, _ := e.activeContainerLocked(prof)
+	slot := slotsMap[c.SlotKey()]
+	if slot == nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return fmt.Errorf("no action assigned at slot %s", c.SlotKey())
+	}
+	if slot.Hotkey == trimmed {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return nil
+	}
+	slot.Hotkey = trimmed
+	cfgCopy := e.cfg.Clone()
+	e.mu.Unlock()
+
+	err := e.store.Save(cfgCopy)
+	e.opMu.Unlock()
+	if err != nil {
+		return err
+	}
+	e.notifySubscribers()
+	return nil
+}
+
 // ClearKeypadSlot removes any action bound to keypad slot c.
 func (e *Engine) ClearKeypadSlot(c deck.Coordinates) error {
 	e.opMu.Lock()

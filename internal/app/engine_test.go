@@ -126,6 +126,9 @@ func TestEngineCounterDialMultiActionAndFilePersistence(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpdateKeypadSlot(Counter) error = %v", err)
 	}
+	if err := eng.SetKeypadHotkey(deck.Coordinates{Row: 0, Col: 0}, "Ctrl+Shift+F1"); err != nil {
+		t.Fatalf("SetKeypadHotkey() error = %v", err)
+	}
 	if _, err := eng.AssignDialAction(0, core.ActionCounter); err != nil {
 		t.Fatalf("AssignDialAction(Counter) error = %v", err)
 	}
@@ -187,7 +190,7 @@ func TestEngineCounterDialMultiActionAndFilePersistence(t *testing.T) {
 		t.Fatalf("reloaded PageCount = %d, want 2", snap2.PageCount)
 	}
 	slot0 := snap2.Slots["0,0"]
-	if slot0.Config == nil || slot0.Config.Title != "Kills" || slot0.Visual.Subtitle != "1" {
+	if slot0.Config == nil || slot0.Config.Title != "Kills" || slot0.Visual.Subtitle != "1" || slot0.Config.Hotkey != "Ctrl+Shift+F1" {
 		t.Fatalf("unexpected reloaded slot 0,0: %+v", slot0)
 	}
 	if gs := eng2.GlobalSettings("com.example.obs"); gs["host"] != "127.0.0.1" {

@@ -13,6 +13,7 @@ const (
 	FieldBool      FieldType = "bool"
 	FieldSelect    FieldType = "select"
 	FieldColor     FieldType = "color"
+	FieldHotkey    FieldType = "hotkey"
 )
 
 // SelectOption defines one labeled choice for a FieldSelect or live OptionsKey setting.

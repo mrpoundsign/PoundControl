@@ -38,6 +38,7 @@ type deckTileWidget struct {
 	coords    deck.Coordinates
 	title     string
 	subtitle  string
+	hotkey    string
 	accentHex string
 	flash     string
 	assigned  bool
@@ -74,6 +75,7 @@ func (t *deckTileWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 	if rendered == nil {
 		t.title = "Empty"
 		t.subtitle = ""
+		t.hotkey = ""
 		t.accentHex = ""
 		t.flash = ""
 		t.assigned = false
@@ -81,6 +83,11 @@ func (t *deckTileWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 	} else {
 		t.title = rendered.Visual.Title
 		t.subtitle = rendered.Visual.Subtitle
+		if rendered.Config != nil {
+			t.hotkey = rendered.Config.Hotkey
+		} else {
+			t.hotkey = ""
+		}
 		t.accentHex = rendered.Visual.Color
 		t.flash = rendered.Visual.Flash
 		t.assigned = rendered.Config != nil
@@ -190,7 +197,11 @@ func (r *deckTileRenderer) MinSize() fyne.Size {
 func (r *deckTileRenderer) Refresh() {
 	r.titleTxt.Text = r.tile.title
 	r.subTxt.Text = r.tile.subtitle
-	r.coordTxt.Text = fmt.Sprintf("(%d, %d)", r.tile.coords.Row, r.tile.coords.Col)
+	coordText := fmt.Sprintf("(%d, %d)", r.tile.coords.Row, r.tile.coords.Col)
+	if r.tile.hotkey != "" {
+		coordText += " • " + r.tile.hotkey
+	}
+	r.coordTxt.Text = coordText
 
 	accentCol := ColorSlateBorder
 	if r.tile.accentHex != "" {

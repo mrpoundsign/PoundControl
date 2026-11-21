@@ -39,13 +39,15 @@ var studioGridPresets = []gridPreset{
 
 // MainWindow hosts the PoundDeck desktop studio and interactive virtual macro deck.
 type MainWindow struct {
-	app      fyne.App
-	win      fyne.Window
-	engine   *app.Engine
-	unsub    func()
-	obsCtrl  OBSController
-	obsUnsub func()
-	popOut   *PopOutPad
+	app          fyne.App
+	win          fyne.Window
+	engine       *app.Engine
+	unsub        func()
+	obsCtrl      OBSController
+	obsUnsub     func()
+	popOut       *PopOutPad
+	cfgPath      string
+	hotkeyCount  func() int
 
 	selectedController deck.ControllerType
 	selectedSlot       deck.Coordinates
@@ -61,8 +63,6 @@ type MainWindow struct {
 	backBtn        *widget.Button
 	obsBtn         *widget.Button
 	runModeCheck   *widget.Check
-	pluginsBadge   *canvas.Text
-	webBadge       *canvas.Text
 	catalogButtons map[string]*widget.Button
 	surface        *deckSurfaceView
 	deckTitle      *canvas.Text
@@ -86,7 +86,7 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 		catalogButtons:     make(map[string]*widget.Button),
 	}
 
-	mw.inspector = NewActionInspector(engine, mw.setStatus)
+	mw.inspector = NewActionInspector(win, engine, mw.setStatus)
 	mw.surface = newDeckSurfaceView(
 		mw.handleKeyTap,
 		mw.handleDialTap,
@@ -210,6 +210,40 @@ func (mw *MainWindow) OpenPopOutPad() *PopOutPad {
 	})
 	mw.popOut.Show()
 	return mw.popOut
+}
+
+// SetConfigPath records the config file path displayed in the General settings tab.
+func (mw *MainWindow) SetConfigPath(path string) {
+	mw.cfgPath = path
+}
+
+// SetHotkeyCountProvider sets a callback returning active OS global hotkey registrations.
+func (mw *MainWindow) SetHotkeyCountProvider(fn func() int) {
+	mw.hotkeyCount = fn
+}
+
+// SetHotkeySuspender sets a callback invoked to suspend or resume global OS hotkeys while capturing shortcuts.
+func (mw *MainWindow) SetHotkeySuspender(fn func(bool)) {
+	if mw.inspector != nil {
+		mw.inspector.SetHotkeySuspender(fn)
+	}
+}
+
+// ShowSettingsDialog opens the tabbed PoundDeck Settings modal dialog.
+func (mw *MainWindow) ShowSettingsDialog() *dialog.CustomDialog {
+	hotkeys := 0
+	if mw.hotkeyCount != nil {
+		hotkeys = mw.hotkeyCount()
+	}
+	return showSettingsDialog(
+		mw.win,
+		mw.engine,
+		mw.obsCtrl,
+		mw.cfgPath,
+		hotkeys,
+		func() { mw.OpenPopOutPad() },
+		mw.setStatus,
+	)
 }
 
 // SetOBSController attaches an OBSController so the Studio header badge displays live OBS status
@@ -353,10 +387,6 @@ func (mw *MainWindow) applySnapshot(snap app.Snapshot) {
 		mw.deckTitle.Text = fmt.Sprintf("Virtual Deck (%dx%d)", snap.Grid.Cols, snap.Grid.Rows)
 		mw.deckTitle.Refresh()
 	}
-	if mw.pluginsBadge != nil {
-		mw.pluginsBadge.Text = fmt.Sprintf("Plugins: %d (%d actions)", snap.PluginCount, snap.ActionCount)
-		mw.pluginsBadge.Refresh()
-	}
 
 	mw.syncing = false
 
@@ -451,10 +481,9 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 	})
 	popOutBtn.Importance = widget.HighImportance
 
-	mw.pluginsBadge = canvas.NewText("Plugins: 0", ColorSecondarySlate)
-	mw.pluginsBadge.TextSize = 11
-	mw.webBadge = canvas.NewText("Web Deck: Off", ColorMutedText)
-	mw.webBadge.TextSize = 11
+	settingsBtn := widget.NewButtonWithIcon("Settings", theme.SettingsIcon(), func() {
+		mw.ShowSettingsDialog()
+	})
 
 	row := container.NewHBox(
 		title,
@@ -474,10 +503,7 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 		mw.obsBtn,
 		mw.runModeCheck,
 		popOutBtn,
-		widget.NewSeparator(),
-		mw.pluginsBadge,
-		widget.NewSeparator(),
-		mw.webBadge,
+		settingsBtn,
 	)
 
 	bg := canvas.NewRectangle(ColorHeaderSurface)
@@ -534,7 +560,6 @@ func (mw *MainWindow) buildActionCatalog() fyne.CanvasObject {
 	upcomingTitle.TextStyle = fyne.TextStyle{Bold: true}
 	list.Add(upcomingTitle)
 	for _, note := range []string{
-		"App & Macro Control — M3",
 		"Elgato .sdPlugin Host — M4",
 		"WebAssembly (wazero) — M5",
 	} {

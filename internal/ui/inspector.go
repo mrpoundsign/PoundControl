@@ -14,6 +14,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/mrpoundsign/PoundDeck/internal/app"
+	"github.com/mrpoundsign/PoundDeck/internal/hotkey"
 	"github.com/mrpoundsign/PoundDeck/pkg/deck"
 	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
 )
@@ -35,9 +36,11 @@ var accentColorPresets = []colorPreset{
 
 // ActionInspector renders a schema-driven configuration form for the selected slot or dial.
 type ActionInspector struct {
-	engine   *app.Engine
-	onStatus func(string)
-	root     fyne.CanvasObject
+	win              fyne.Window
+	engine           *app.Engine
+	onStatus         func(string)
+	onSuspendHotkeys func(bool)
+	root             fyne.CanvasObject
 
 	slotLbl    *widget.Label
 	actionLbl  *widget.Label
@@ -46,12 +49,16 @@ type ActionInspector struct {
 	formBox    *fyne.Container
 	actionsRow *fyne.Container
 
-	titleEntry  *widget.Entry
-	colorSelect *widget.Select
-	fields      map[string]inspectorFieldBinding
-	saveBtn     *widget.Button
-	triggerBtn  *widget.Button
-	clearBtn    *widget.Button
+	titleEntry         *widget.Entry
+	colorSelect        *widget.Select
+	hotkeyEntry        *widget.Entry
+	hotkeyCaptureBtn   *widget.Button
+	hotkeyFieldButtons map[string]*widget.Button
+	fields             map[string]inspectorFieldBinding
+	saveBtn            *widget.Button
+	triggerBtn         *widget.Button
+	clearBtn           *widget.Button
+	lastCapture        *hotkeyCaptureSession
 
 	selCtrl       deck.ControllerType
 	selCoords     deck.Coordinates
@@ -70,11 +77,13 @@ type inspectorFieldBinding struct {
 }
 
 // NewActionInspector constructs an inspector panel bound to engine.
-func NewActionInspector(engine *app.Engine, onStatus func(string)) *ActionInspector {
+func NewActionInspector(win fyne.Window, engine *app.Engine, onStatus func(string)) *ActionInspector {
 	ins := &ActionInspector{
-		engine:   engine,
-		onStatus: onStatus,
-		fields:   make(map[string]inspectorFieldBinding),
+		win:                win,
+		engine:             engine,
+		onStatus:           onStatus,
+		hotkeyFieldButtons: make(map[string]*widget.Button),
+		fields:             make(map[string]inspectorFieldBinding),
 	}
 
 	heading := widget.NewLabelWithStyle("Action Inspector", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
@@ -114,6 +123,11 @@ func NewActionInspector(engine *app.Engine, onStatus func(string)) *ActionInspec
 // Object returns the root Fyne canvas object for layout embedding.
 func (ins *ActionInspector) Object() fyne.CanvasObject {
 	return ins.root
+}
+
+// SetHotkeySuspender sets a callback used to pause OS global hotkeys while capturing a new shortcut.
+func (ins *ActionInspector) SetHotkeySuspender(fn func(bool)) {
+	ins.onSuspendHotkeys = fn
 }
 
 // SetSelection refreshes the inspector to reflect the currently selected slot or dial.
@@ -183,8 +197,11 @@ func (ins *ActionInspector) clearForm(title, message string, canTrigger bool) {
 	ins.actionLbl.SetText(title)
 	ins.metaLbl.SetText(message)
 	clear(ins.fields)
+	clear(ins.hotkeyFieldButtons)
 	ins.titleEntry = nil
 	ins.colorSelect = nil
+	ins.hotkeyEntry = nil
+	ins.hotkeyCaptureBtn = nil
 	hint := widget.NewLabel("No configurable properties for this slot.")
 	hint.Wrapping = fyne.TextWrapWord
 	ins.formBox.Objects = []fyne.CanvasObject{hint, layout.NewSpacer()}
@@ -204,6 +221,8 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 	defer func() { ins.syncing = false }()
 
 	clear(ins.fields)
+	clear(ins.hotkeyFieldButtons)
+	ins.hotkeyCaptureBtn = nil
 	name := cfg.ActionUUID
 	meta := string(plugin.ProviderBuiltin)
 	var schema []plugin.SettingField
@@ -239,6 +258,20 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 		ins.titleEntry,
 		widget.NewLabel("Accent Color"),
 		ins.colorSelect,
+	}
+
+	if ins.selCtrl == deck.ControllerKeypad {
+		ins.hotkeyEntry = widget.NewEntry()
+		ins.hotkeyEntry.SetPlaceHolder("e.g. Ctrl+Shift+F1 or F13 (global)")
+		ins.hotkeyEntry.SetText(cfg.Hotkey)
+		ins.hotkeyCaptureBtn = widget.NewButton("Capture", func() {
+			ins.openHotkeyCapture("Capture Global Hotkey", ins.hotkeyEntry, captureModeGlobal)
+		})
+		hotkeyRow := container.NewBorder(nil, nil, nil, ins.hotkeyCaptureBtn, ins.hotkeyEntry)
+		items = append(items, widget.NewLabel("Global Hotkey"), hotkeyRow)
+	} else {
+		ins.hotkeyEntry = nil
+		ins.hotkeyCaptureBtn = nil
 	}
 
 	if len(schema) > 0 {
@@ -328,6 +361,19 @@ func (ins *ActionInspector) buildSchemaField(field plugin.SettingField, settings
 		ins.fields[field.Key] = inspectorFieldBinding{schema: field, widget: entry}
 		out = append(out, widget.NewLabel(field.Label), entry)
 
+	case plugin.FieldHotkey:
+		entry := widget.NewEntry()
+		entry.SetPlaceHolder(field.Placeholder)
+		if val != nil {
+			entry.SetText(fmt.Sprint(val))
+		}
+		capBtn := widget.NewButton("Capture", func() {
+			ins.openHotkeyCapture("Capture "+field.Label, entry, captureModeChord)
+		})
+		ins.hotkeyFieldButtons[field.Key] = capBtn
+		ins.fields[field.Key] = inspectorFieldBinding{schema: field, widget: entry}
+		out = append(out, widget.NewLabel(field.Label), container.NewBorder(nil, nil, nil, capBtn, entry))
+
 	default: // FieldText, FieldNumber, FieldColor
 		entry := widget.NewEntry()
 		entry.SetPlaceHolder(field.Placeholder)
@@ -414,11 +460,28 @@ func (ins *ActionInspector) handleSave() {
 	colHex := ins.selectedColorHex()
 	settings := ins.collectSettings()
 
+	canonicalHotkey := ""
+	if ins.selCtrl == deck.ControllerKeypad && ins.hotkeyEntry != nil {
+		rawHK := strings.TrimSpace(ins.hotkeyEntry.Text)
+		if rawHK != "" {
+			spec, hkErr := hotkey.Parse(rawHK)
+			if hkErr != nil {
+				ins.reportStatus("Invalid hotkey: " + hkErr.Error())
+				return
+			}
+			canonicalHotkey = spec.String()
+			ins.hotkeyEntry.SetText(canonicalHotkey)
+		}
+	}
+
 	var err error
 	if ins.selCtrl == deck.ControllerEncoder {
 		err = ins.engine.UpdateDialSlot(ins.selDial, title, colHex, settings)
 	} else {
 		err = ins.engine.UpdateKeypadSlot(ins.selCoords, title, colHex, settings)
+		if err == nil {
+			err = ins.engine.SetKeypadHotkey(ins.selCoords, canonicalHotkey)
+		}
 	}
 	if err != nil {
 		ins.reportStatus("Save failed: " + err.Error())
@@ -462,6 +525,27 @@ func (ins *ActionInspector) reportStatus(msg string) {
 	if ins.onStatus != nil {
 		ins.onStatus(msg)
 	}
+}
+
+func (ins *ActionInspector) openHotkeyCapture(title string, target *widget.Entry, mode hotkeyCaptureMode) {
+	if ins.win == nil || target == nil {
+		return
+	}
+	ins.lastCapture = openHotkeyCaptureDialog(
+		ins.win,
+		title,
+		target.Text,
+		mode,
+		ins.onSuspendHotkeys,
+		func(captured string) {
+			target.SetText(captured)
+			if captured == "" {
+				ins.reportStatus("Cleared shortcut — click Save to apply")
+				return
+			}
+			ins.reportStatus("Captured " + captured + " — click Save to apply")
+		},
+	)
 }
 
 func toBoolValue(v any) bool {

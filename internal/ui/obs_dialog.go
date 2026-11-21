@@ -62,9 +62,11 @@ func obsStatusDescription(st obs.ClientStatus) string {
 	}
 }
 
-func showOBSConnectionDialog(win fyne.Window, obsCtrl OBSController, onStatus func(string)) {
+func buildOBSConnectionContent(obsCtrl OBSController, onStatus func(string)) (fyne.CanvasObject, func()) {
 	if obsCtrl == nil {
-		return
+		msg := widget.NewLabel("OBS Studio controller is not attached.")
+		msg.Wrapping = fyne.TextWrapWord
+		return container.NewPadded(msg), func() {}
 	}
 
 	cfg := obsCtrl.ConnectionConfig()
@@ -180,9 +182,16 @@ func showOBSConnectionDialog(win fyne.Window, obsCtrl OBSController, onStatus fu
 		statusLbl,
 		container.NewGridWithColumns(2, connectBtn, disconnectBtn),
 	)
+	return content, unsub
+}
 
+func showOBSConnectionDialog(win fyne.Window, obsCtrl OBSController, onStatus func(string)) {
+	if obsCtrl == nil {
+		return
+	}
+	content, cleanup := buildOBSConnectionContent(obsCtrl, onStatus)
 	dlg := dialog.NewCustom("OBS Studio (WebSocket v5)", "Close", content, win)
 	dlg.Resize(fyne.NewSize(430, 340))
-	dlg.SetOnClosed(unsub)
+	dlg.SetOnClosed(cleanup)
 	dlg.Show()
 }

@@ -18,12 +18,35 @@ import (
 	"golang.org/x/net/websocket"
 
 	"github.com/mrpoundsign/PoundDeck/internal/app"
+	"github.com/mrpoundsign/PoundDeck/pkg/builtin/apps"
 	"github.com/mrpoundsign/PoundDeck/pkg/builtin/core"
 	"github.com/mrpoundsign/PoundDeck/pkg/builtin/obs"
 	"github.com/mrpoundsign/PoundDeck/pkg/deck"
 	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
 	"github.com/mrpoundsign/PoundDeck/pkg/secrets"
 )
+
+type fakeAppsDriver struct {
+	mu     sync.Mutex
+	medias []apps.MediaCommand
+	chords []apps.Chord
+}
+
+func (f *fakeAppsDriver) Exec(context.Context, apps.ExecRequest) error { return nil }
+func (f *fakeAppsDriver) OpenURL(context.Context, string) error        { return nil }
+func (f *fakeAppsDriver) TypeText(context.Context, string) error       { return nil }
+func (f *fakeAppsDriver) SendHotkey(_ context.Context, ch apps.Chord) error {
+	f.mu.Lock()
+	f.chords = append(f.chords, ch)
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeAppsDriver) SendMedia(_ context.Context, cmd apps.MediaCommand) error {
+	f.mu.Lock()
+	f.medias = append(f.medias, cmd)
+	f.mu.Unlock()
+	return nil
+}
 
 var uiQueue = make(chan func(), 4096)
 
@@ -44,6 +67,11 @@ func drainUI() {
 }
 
 func newTestStudio(t *testing.T) (*app.Engine, *obs.Provider, *MainWindow) {
+	eng, obsProv, _, mw := newTestStudioWithApps(t)
+	return eng, obsProv, mw
+}
+
+func newTestStudioWithApps(t *testing.T) (*app.Engine, *obs.Provider, *fakeAppsDriver, *MainWindow) {
 	t.Helper()
 	drainUI()
 	testApp := test.NewApp()
@@ -61,6 +89,10 @@ func newTestStudio(t *testing.T) (*app.Engine, *obs.Provider, *MainWindow) {
 	if err := reg.RegisterProvider(obsProv); err != nil {
 		t.Fatalf("RegisterProvider(obs) error = %v", err)
 	}
+	appsDrv := &fakeAppsDriver{}
+	if err := reg.RegisterProvider(apps.New(appsDrv)); err != nil {
+		t.Fatalf("RegisterProvider(apps) error = %v", err)
+	}
 	eng, err := app.NewEngine(deck.NewMemoryStore(nil), reg)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
@@ -71,7 +103,7 @@ func newTestStudio(t *testing.T) (*app.Engine, *obs.Provider, *MainWindow) {
 	})
 
 	mw := NewMainWindow(testApp, eng)
-	return eng, obsProv, mw
+	return eng, obsProv, appsDrv, mw
 }
 
 func TestMainWindowInitSelectionAndAssignCounter(t *testing.T) {
@@ -338,4 +370,63 @@ func TestMainWindowOBSIntegrationAndConnectionBadge(t *testing.T) {
 	if gotScene != "BRB" {
 		t.Errorf("mock OBS programScene = %q, want BRB", gotScene)
 	}
+}
+
+func TestMainWindowAppsActionsHotkeyAndSettingsDialog(t *testing.T) {
+	eng, obsProv, appsDrv, mw := newTestStudioWithApps(t)
+	mw.SetConfigPath("/tmp/test-config.json")
+	mw.SetHotkeyCountProvider(func() int { return 1 })
+	mw.SetOBSController(obsProv)
+	drainUI()
+
+	hotkeyBtn, ok := mw.catalogButtons[apps.ActionHotkey]
+	if !ok {
+		t.Fatal("expected Send Hotkey button in Action Catalog")
+	}
+	mw.SelectSlot(deck.Coordinates{Row: 0, Col: 0})
+	test.Tap(hotkeyBtn)
+	drainUI()
+
+	if mw.inspector.hotkeyEntry == nil {
+		t.Fatal("expected Global Hotkey entry in Keypad inspector")
+	}
+	chordBinding, ok := mw.inspector.fields["chord"]
+	if !ok {
+		t.Fatal("expected chord field in inspector")
+	}
+	chordBinding.widget.(*widget.Entry).SetText("Ctrl+Shift+M")
+	mw.inspector.hotkeyEntry.SetText("ctrl+shift+f1")
+	test.Tap(mw.inspector.saveBtn)
+	drainUI()
+
+	slot0 := eng.Snapshot().Slots["0,0"]
+	if slot0.Config == nil || slot0.Config.Hotkey != "Ctrl+Shift+F1" {
+		t.Fatalf("expected canonical Global Hotkey Ctrl+Shift+F1 saved on slot, got %+v", slot0.Config)
+	}
+	tile0 := mw.surface.tiles[(deck.Coordinates{Row: 0, Col: 0}).SlotKey()]
+	if tile0.hotkey != "Ctrl+Shift+F1" {
+		t.Errorf("expected tile0.hotkey = Ctrl+Shift+F1, got %q", tile0.hotkey)
+	}
+
+	// Assign Media & System Volume to Dial 0 and rotate (+1).
+	mw.SelectDial(0)
+	test.Tap(mw.catalogButtons[apps.ActionMedia])
+	drainUI()
+	test.Tap(mw.surface.dials[0].plusBtn)
+	drainUI()
+
+	appsDrv.mu.Lock()
+	medias := append([]apps.MediaCommand(nil), appsDrv.medias...)
+	appsDrv.mu.Unlock()
+	if len(medias) != 1 || medias[0] != apps.MediaVolumeUp {
+		t.Fatalf("expected MediaVolumeUp from Dial 0 +, got %v", medias)
+	}
+
+	// Open and close unified tabbed Settings dialog cleanly.
+	dlg := mw.ShowSettingsDialog()
+	if dlg == nil {
+		t.Fatal("expected non-nil Settings dialog")
+	}
+	dlg.Hide()
+	drainUI()
 }
