@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# PoundDeck Build Script (Bash)
+# PoundControl Build Script (Bash)
 # Usage:
 #   ./build.sh           # Run lint, tests, and build Desktop Studio GUI
-#   ./build.sh gui       # Build native Desktop Studio GUI into build/bin/pounddeck
-#   ./build.sh gui-win   # Cross-compile Windows Desktop Studio GUI via MinGW into build/bin/pounddeck.exe
+#   ./build.sh gui       # Build native Desktop Studio GUI into build/bin/poundcontrol
+#   ./build.sh gui-win   # Cross-compile Windows Desktop Studio GUI via MinGW into build/bin/poundcontrol.exe
 #   ./build.sh wasm      # Build example WebAssembly plugins (WASI reactor) into build/bin/*.wasm
 #   ./build.sh test      # Run unit & headless UI tests
 #   ./build.sh lint      # Run go fix -diff & golangci-lint-v2
@@ -73,27 +73,27 @@ generate_winres_syso() {
 }
 
 build_gui() {
-    echo "==> Building pounddeck Desktop Studio GUI..."
+    echo "==> Building poundcontrol Desktop Studio GUI..."
     local VER_LDFLAG=""
     if [ -n "${VERSION:-}" ]; then
-        VER_LDFLAG=" -X github.com/mrpoundsign/PoundDeck/internal/version.Version=${VERSION#v}"
+        VER_LDFLAG=" -X github.com/mrpoundsign/PoundControl/internal/version.Version=${VERSION#v}"
     fi
-    CGO_ENABLED=1 go build -trimpath -ldflags="-s -w${VER_LDFLAG}" -o "$BIN_DIR/pounddeck" ./cmd/pounddeck
-    echo "✓ Successfully built $BIN_DIR/pounddeck"
+    CGO_ENABLED=1 go build -trimpath -ldflags="-s -w${VER_LDFLAG}" -o "$BIN_DIR/poundcontrol" ./cmd/poundcontrol
+    echo "✓ Successfully built $BIN_DIR/poundcontrol"
 }
 
 build_gui_win() {
-    echo "==> Building pounddeck Desktop Studio GUI for Windows (via MinGW)..."
-    local SYSO_PREFIX="$ROOT_DIR/cmd/pounddeck/rsrc"
+    echo "==> Building poundcontrol Desktop Studio GUI for Windows (via MinGW)..."
+    local SYSO_PREFIX="$ROOT_DIR/cmd/poundcontrol/rsrc"
     trap 'rm -f "${SYSO_PREFIX}_windows_amd64.syso"' RETURN
-    generate_winres_syso "$SYSO_PREFIX" "PoundDeck" "PoundDeck Macro & Stream Deck Studio" "pounddeck.exe"
+    generate_winres_syso "$SYSO_PREFIX" "PoundControl" "PoundControl Macro & Stream Deck Studio" "poundcontrol.exe"
     local VER_LDFLAG=""
     if [ -n "${VERSION:-}" ]; then
-        VER_LDFLAG=" -X github.com/mrpoundsign/PoundDeck/internal/version.Version=${VERSION#v}"
+        VER_LDFLAG=" -X github.com/mrpoundsign/PoundControl/internal/version.Version=${VERSION#v}"
     fi
     CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
-        go build -trimpath -ldflags="-H windowsgui -s -w${VER_LDFLAG}" -o "$BIN_DIR/pounddeck.exe" ./cmd/pounddeck
-    echo "✓ Successfully built $BIN_DIR/pounddeck.exe"
+        go build -trimpath -ldflags="-H windowsgui -s -w${VER_LDFLAG}" -o "$BIN_DIR/poundcontrol.exe" ./cmd/poundcontrol
+    echo "✓ Successfully built $BIN_DIR/poundcontrol.exe"
 }
 
 build_wasm() {
@@ -110,7 +110,7 @@ run_tests() {
 
 clean_artifacts() {
     echo "==> Cleaning build artifacts..."
-    rm -rf "$BUILD_DIR" pounddeck pounddeck.exe dist/
+    rm -rf "$BUILD_DIR" poundcontrol poundcontrol.exe dist/
     mkdir -p "$BIN_DIR"
     echo "✓ Cleaned."
 }

@@ -1,4 +1,4 @@
-module github.com/mrpoundsign/PoundDeck
+module github.com/mrpoundsign/PoundControl
 
 go 1.27.4
 

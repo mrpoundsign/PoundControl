@@ -9,14 +9,14 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
 )
 
-// ProviderKind identifies how a plugin is hosted and executed by PoundDeck.
+// ProviderKind identifies how a plugin is hosted and executed by PoundControl.
 type ProviderKind string
 
 const (
-	// ProviderBuiltin denotes an in-process native Go plugin compiled with PoundDeck.
+	// ProviderBuiltin denotes an in-process native Go plugin compiled with PoundControl.
 	ProviderBuiltin ProviderKind = "builtin"
 	// ProviderStreamDeck denotes an external Elgato SDK v2/v3 .sdPlugin process connected via WebSocket.
 	ProviderStreamDeck ProviderKind = "sdplugin"
@@ -88,7 +88,7 @@ func (m Manifest) Validate() error {
 	return nil
 }
 
-// Provider supplies and executes actions from one plugin backend in the PoundDeck registry.
+// Provider supplies and executes actions from one plugin backend in the PoundControl registry.
 type Provider interface {
 	Kind() ProviderKind
 	Name() string

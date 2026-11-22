@@ -13,12 +13,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
-// HostPluginUUID identifies PoundDeck's .sdPlugin host configuration in PluginSettings.
-const HostPluginUUID = "com.github.mrpoundsign.pounddeck.sdplugin"
+// HostPluginUUID identifies PoundControl's .sdPlugin host configuration in PluginSettings.
+const HostPluginUUID = "com.github.mrpoundsign.poundcontrol.sdplugin"
 
 // NodejsConfig declares the Node.js runtime requirements in an Elgato manifest.json.
 type NodejsConfig struct {
@@ -144,7 +144,7 @@ type LoadedBundle struct {
 	ActionPI     map[string]string // actionUUID -> clean relative PI path
 }
 
-// LoadBundle reads manifest.json (and optional pounddeck.schema.json) from bundleDir.
+// LoadBundle reads manifest.json (and optional poundcontrol.schema.json) from bundleDir.
 func LoadBundle(bundleDir string) (*LoadedBundle, error) {
 	absDir, err := filepath.Abs(strings.TrimSpace(bundleDir))
 	if err != nil {
@@ -194,9 +194,9 @@ func LoadBundle(bundleDir string) (*LoadedBundle, error) {
 		return nil, fmt.Errorf("plugin %q entrypoint %q not found: %w", m.UUID, codeRel, err)
 	}
 
-	customSchema, err := loadSidecarSchema(filepath.Join(absDir, "pounddeck.schema.json"))
+	customSchema, err := loadSidecarSchema(filepath.Join(absDir, "poundcontrol.schema.json"))
 	if err != nil {
-		return nil, fmt.Errorf("plugin %q pounddeck.schema.json: %w", m.UUID, err)
+		return nil, fmt.Errorf("plugin %q poundcontrol.schema.json: %w", m.UUID, err)
 	}
 
 	htmlCache := make(map[string][]byte)
@@ -297,7 +297,7 @@ func LoadBundle(bundleDir string) (*LoadedBundle, error) {
 	}, nil
 }
 
-// ToPluginManifest converts this bundle into PoundDeck's unified plugin.Manifest.
+// ToPluginManifest converts this bundle into PoundControl's unified plugin.Manifest.
 func (b *LoadedBundle) ToPluginManifest() plugin.Manifest {
 	return plugin.Manifest{
 		UUID:        b.UUID,

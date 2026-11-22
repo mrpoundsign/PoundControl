@@ -3,8 +3,8 @@ package ui
 import (
 	"context"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/sdplugin"
-	"github.com/mrpoundsign/PoundDeck/pkg/wasmplugin"
+	"github.com/mrpoundsign/PoundControl/pkg/sdplugin"
+	"github.com/mrpoundsign/PoundControl/pkg/wasmplugin"
 )
 
 // PIViewer displays interactive HTML Property Inspector pages for external plugins.

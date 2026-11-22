@@ -16,8 +16,8 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/tile"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/tile"
 )
 
 func srgbChannelLuminance(c uint8) float64 {

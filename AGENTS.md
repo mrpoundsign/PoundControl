@@ -1,4 +1,4 @@
-# PoundDeck — Agent & Project Knowledge Base (AGENTS.md)
+# PoundControl — Agent & Project Knowledge Base (AGENTS.md)
 
 ## 1. User Preferences & Working Rules
 
@@ -11,7 +11,7 @@
 >    - `go fix -diff ./...` (must report 0 diff)
 >    - `golangci-lint-v2 run ./...` (must report 0 issues)
 >    - `go test -count=1 -v ./cmd/... ./internal/... ./pkg/...` (all unit & UI tests must pass)
-> 5. **User tests GUI before committing**: Always stop and let the user manually test the GUI binary (`build/bin/pounddeck.exe` or `build/bin/pounddeck`) before any changes are committed to git. Never launch GUI binaries interactively in agent subshells.
+> 5. **User tests GUI before committing**: Always stop and let the user manually test the GUI binary (`build/bin/poundcontrol.exe` or `build/bin/poundcontrol`) before any changes are committed to git. Never launch GUI binaries interactively in agent subshells.
 > 6. **Prioritize Built-in Agent Tools Over Shelling Out**: Always use built-in tools (`read_file`, `write_file`, `edit_file`) for inspecting and editing files. Only shell out via `run_command` when strictly necessary (e.g., git operations, building/running tests, linting, or `gh` CLI).
 > 7. **In-Place Build Outputs Only (`build/bin/`)**: Keep compiled binaries, installers, and runtime artifacts strictly inside `build/bin/` (gitignored). Never copy build outputs outside the repository.
 > 8. **Planning Repository Independence**: `planning/` is its own local-only git repository (`main`, no remote) ignored by the root `.gitignore`. Planning commits happen independently inside `planning/` referencing ticket/milestone IDs.
@@ -24,9 +24,9 @@
 
 ## 2. Project Overview & Mission
 
-**PoundDeck** is a cross-platform (Windows, Linux, macOS), open-source programmable macro & stream deck application written in **Go** using **Fyne v2**. It pairs a **Fyne Virtual Desktop Deck** (with global hotkeys and a pop-out pad) and a **LAN Web / Mobile / Tablet Touch Deck** with a unified three-pillar plugin architecture:
+**PoundControl** is a cross-platform (Windows, Linux, macOS), open-source programmable macro & stream deck application written in **Go** using **Fyne v2**. It pairs a **Fyne Virtual Desktop Deck** (with global hotkeys and a pop-out pad) and a **LAN Web / Mobile / Tablet Touch Deck** with a unified three-pillar plugin architecture:
 
-- **Primary Repository**: `github.com/mrpoundsign/PoundDeck`
+- **Primary Repository**: `github.com/mrpoundsign/PoundControl`
 - **License**: MIT License
 - **Visual Identity**: Obsidian Slate (`#0A0A0C`), Chrome White (`#FFFFFF`), and Electric Sky Blue (`#38BDF8`).
 - **Core Stack**:
@@ -40,12 +40,12 @@
 ## 3. Architecture & Codebase Map
 
 ```text
-PoundDeck/
+PoundControl/
 ├── assets/               # Application icon (SVG/PNG) & embedded Go resources
 ├── build/
 │   └── bin/              # Local compiled binaries only (gitignored)
 ├── cmd/
-│   ├── pounddeck/        # Main Fyne Desktop Studio & Virtual Deck entry point
+│   ├── poundcontrol/        # Main Fyne Desktop Studio & Virtual Deck entry point
 │   └── installer/        # Guided setup installer (appinstaller, Milestone 6)
 ├── internal/
 │   ├── app/              # App controller, atomic config store, wiring
@@ -75,13 +75,13 @@ PoundDeck/
    - All UI mutations triggered from background goroutines, tickers, WebSocket callbacks, or async loaders **must** be dispatched onto the main Fyne thread via `dispatchUI(...)` (`fyne.Do(...)`). Never mutate widget state directly off-thread.
 2. **Cross-Platform Builds**:
    - **Windows PowerShell**:
-     - `.\build.ps1` (lint + test + GUI build to `build\bin\pounddeck.exe`)
+     - `.\build.ps1` (lint + test + GUI build to `build\bin\poundcontrol.exe`)
      - `.\build.ps1 -Target lint` (`go fix -diff ./...` + `golangci-lint-v2 run ./...`)
      - `.\build.ps1 -Target test` (`go test -count=1 -v ./cmd/... ./internal/... ./pkg/...`)
-     - `.\build.ps1 -Target gui` (Zig CGo + `go-winres` -> `build\bin\pounddeck.exe`)
+     - `.\build.ps1 -Target gui` (Zig CGo + `go-winres` -> `build\bin\poundcontrol.exe`)
      - `.\build.ps1 -Target check` (`goreleaser check`)
    - **Linux / macOS / WSL Bash**:
-     - `./build.sh` (lint + test + native GUI build to `build/bin/pounddeck`)
-     - `./build.sh gui-win` (MinGW cross-compile -> `build/bin/pounddeck.exe`)
+     - `./build.sh` (lint + test + native GUI build to `build/bin/poundcontrol`)
+     - `./build.sh gui-win` (MinGW cross-compile -> `build/bin/poundcontrol.exe`)
 3. **Config & Test Isolation**:
    - Any persistent configuration or plugin data store must accept an explicit base directory or store interface so unit tests strictly use `t.TempDir()` or memory stores.

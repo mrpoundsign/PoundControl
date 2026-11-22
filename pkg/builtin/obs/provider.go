@@ -12,14 +12,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
-	"github.com/mrpoundsign/PoundDeck/pkg/secrets"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/secrets"
 )
 
 const (
 	// PluginUUID identifies the built-in OBS Studio WebSocket v5 plugin.
-	PluginUUID = "com.github.mrpoundsign.pounddeck.obs"
+	PluginUUID = "com.github.mrpoundsign.poundcontrol.obs"
 	// SecretKeyPassword is the secrets.Store key holding the OBS WebSocket password.
 	SecretKeyPassword = "obs.websocket.password"
 
@@ -405,7 +405,7 @@ func buildManifest() plugin.Manifest {
 		UUID:        PluginUUID,
 		Name:        "OBS Studio (WebSocket v5)",
 		Version:     "0.1.0",
-		Author:      "PoundDeck",
+		Author:      "PoundControl",
 		Description: "Control OBS Studio scenes, sources, audio, stream/record, and replay buffer via WebSocket v5.",
 		Provider:    plugin.ProviderBuiltin,
 		Actions:     actions,

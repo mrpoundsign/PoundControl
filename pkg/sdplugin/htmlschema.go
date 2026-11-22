@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/net/html"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
 // ExtractHTMLSchema parses a Stream Deck HTML Property Inspector document and extracts

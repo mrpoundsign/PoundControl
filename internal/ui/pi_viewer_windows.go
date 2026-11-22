@@ -12,7 +12,7 @@ import (
 
 	webview2 "github.com/jchv/go-webview2"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/builtin/apps"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/apps"
 )
 
 type windowsPIViewer struct {
@@ -117,9 +117,9 @@ func (v *windowsPIViewer) CloseAll() {
 
 func piWebViewDataDir() string {
 	if cacheDir, err := os.UserCacheDir(); err == nil && cacheDir != "" {
-		dir := filepath.Join(cacheDir, "PoundDeck", "WebView2")
+		dir := filepath.Join(cacheDir, "PoundControl", "WebView2")
 		_ = os.MkdirAll(dir, 0o755)
 		return dir
 	}
-	return filepath.Join(os.TempDir(), "pounddeck-webview2")
+	return filepath.Join(os.TempDir(), "poundcontrol-webview2")
 }

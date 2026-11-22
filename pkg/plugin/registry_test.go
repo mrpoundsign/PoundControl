@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
 )
 
 type stubProvider struct {

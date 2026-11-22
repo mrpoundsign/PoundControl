@@ -10,8 +10,8 @@ import (
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/builtin/apps"
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/apps"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
 )
 
 func TestCanonicalKeyFromFyne(t *testing.T) {

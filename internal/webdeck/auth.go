@@ -18,8 +18,8 @@ import (
 
 	"filippo.io/edwards25519"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/secrets"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/secrets"
 )
 
 const (
@@ -60,7 +60,7 @@ func DefaultHostName() string {
 	host, err := os.Hostname()
 	host = strings.TrimSpace(host)
 	if err != nil || host == "" {
-		return "PoundDeck Studio"
+		return "PoundControl Studio"
 	}
 	return host
 }
@@ -121,7 +121,7 @@ func randomNonZeroScalar() (*edwards25519.Scalar, error) {
 }
 
 func deriveSpake2ScalarW(pin, windowID string) (*edwards25519.Scalar, error) {
-	salt := []byte("pounddeck-spake2-v1:" + windowID)
+	salt := []byte("poundcontrol-spake2-v1:" + windowID)
 	raw, err := hkdf.Key(sha256.New, []byte(pin), salt, "w", 64)
 	if err != nil {
 		return nil, fmt.Errorf("derive SPAKE2 w: %w", err)
@@ -157,7 +157,7 @@ func appendLengthPrefixed(dst, elem []byte) []byte {
 }
 
 func buildSpake2Transcript(windowID string, clientPub, hostPub, pA, pB, kBytes, wBytes []byte) []byte {
-	ctx := []byte("pounddeck-pair-v1:" + windowID)
+	ctx := []byte("poundcontrol-pair-v1:" + windowID)
 	total := 7*8 + len(ctx) + len(clientPub) + len(hostPub) + len(pA) + len(pB) + len(kBytes) + len(wBytes)
 	tt := make([]byte, 0, total)
 	tt = appendLengthPrefixed(tt, ctx)
@@ -193,7 +193,7 @@ func finishSpake2Material(windowID string, clientPub, hostPub, pA, pB, kBytes []
 	copy(kcA, kc[0:32])
 	copy(kcB, kc[32:64])
 
-	sasBytes, err := hkdf.Key(sha256.New, ke, nil, "PoundDeck-SAS-v1", 4)
+	sasBytes, err := hkdf.Key(sha256.New, ke, nil, "PoundControl-SAS-v1", 4)
 	if err != nil {
 		return spake2Material{}, fmt.Errorf("derive SAS code: %w", err)
 	}
@@ -304,14 +304,14 @@ func spake2ClientFinish(st spake2ClientState, clientPub, hostPub, pB []byte) (sp
 }
 
 func pairHostSigPayload(hashTT []byte) []byte {
-	msg := make([]byte, 0, len("pounddeck-pair-host-v1")+len(hashTT))
-	msg = append(msg, "pounddeck-pair-host-v1"...)
+	msg := make([]byte, 0, len("poundcontrol-pair-host-v1")+len(hashTT))
+	msg = append(msg, "poundcontrol-pair-host-v1"...)
 	return append(msg, hashTT...)
 }
 
 func pairClientSigPayload(hashTT []byte) []byte {
-	msg := make([]byte, 0, len("pounddeck-pair-client-v1")+len(hashTT))
-	msg = append(msg, "pounddeck-pair-client-v1"...)
+	msg := make([]byte, 0, len("poundcontrol-pair-client-v1")+len(hashTT))
+	msg = append(msg, "poundcontrol-pair-client-v1"...)
 	return append(msg, hashTT...)
 }
 
@@ -332,7 +332,7 @@ func pairStatusRespMAC(kcB []byte, attemptID, status, deviceID string) []byte {
 }
 
 func buildWSTranscript1(hostID, deviceID string, hostPub, clientPub, serverNonce, clientNonce, clientEphPub []byte) []byte {
-	domain := []byte("pounddeck-ws-v2")
+	domain := []byte("poundcontrol-ws-v2")
 	total := len(domain) + 16 + len(hostID) + len(deviceID) + len(hostPub) + len(clientPub) + len(serverNonce) + len(clientNonce) + len(clientEphPub)
 	buf := make([]byte, 0, total)
 	buf = append(buf, domain...)
@@ -354,7 +354,7 @@ func buildWSTranscript2(t1, serverEphPub []byte) []byte {
 
 func deriveWSSessionKeys(sharedSecret, t2 []byte) (clientMacKey, serverMacKey, assetMacKey []byte, err error) {
 	salt := sha256.Sum256(t2)
-	okm, err := hkdf.Key(sha256.New, sharedSecret, salt[:], "pounddeck-ws-keys-v2", 96)
+	okm, err := hkdf.Key(sha256.New, sharedSecret, salt[:], "poundcontrol-ws-keys-v2", 96)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("derive WebSocket session keys: %w", err)
 	}

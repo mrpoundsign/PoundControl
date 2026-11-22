@@ -3,12 +3,12 @@ plugins {
 }
 
 android {
-    namespace = "com.mrpoundsign.pounddeck"
+    namespace = "com.mrpoundsign.poundcontrol"
     compileSdk = 37
     buildToolsVersion = "36.0.0"
 
     defaultConfig {
-        applicationId = "com.mrpoundsign.pounddeck"
+        applicationId = "com.mrpoundsign.poundcontrol"
         minSdk = 26
         targetSdk = 36
         versionCode = 1

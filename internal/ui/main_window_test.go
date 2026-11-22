@@ -26,16 +26,16 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"golang.org/x/net/websocket"
 
-	"github.com/mrpoundsign/PoundDeck/internal/app"
-	"github.com/mrpoundsign/PoundDeck/internal/webdeck"
-	"github.com/mrpoundsign/PoundDeck/pkg/builtin/apps"
-	"github.com/mrpoundsign/PoundDeck/pkg/builtin/core"
-	"github.com/mrpoundsign/PoundDeck/pkg/builtin/obs"
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
-	"github.com/mrpoundsign/PoundDeck/pkg/sdplugin"
-	"github.com/mrpoundsign/PoundDeck/pkg/secrets"
-	"github.com/mrpoundsign/PoundDeck/pkg/wasmplugin"
+	"github.com/mrpoundsign/PoundControl/internal/app"
+	"github.com/mrpoundsign/PoundControl/internal/webdeck"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/apps"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/core"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/obs"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/sdplugin"
+	"github.com/mrpoundsign/PoundControl/pkg/secrets"
+	"github.com/mrpoundsign/PoundControl/pkg/wasmplugin"
 )
 
 type fakeAppsDriver struct {
@@ -1022,7 +1022,7 @@ func TestMainWindowWasmPluginReloadAndSettings(t *testing.T) {
 	mw.SetWasmPluginController(wasmHost)
 	drainUI()
 
-	if mw.catalogButtons["com.pounddeck.examples.pomodoro"] != nil {
+	if mw.catalogButtons["com.poundcontrol.examples.pomodoro"] != nil {
 		t.Fatal("expected pomodoro wasm action absent before adding extra search path")
 	}
 
@@ -1036,9 +1036,9 @@ func TestMainWindowWasmPluginReloadAndSettings(t *testing.T) {
 	}
 	drainUI()
 
-	pomoBtn := mw.catalogButtons["com.pounddeck.examples.pomodoro"]
+	pomoBtn := mw.catalogButtons["com.poundcontrol.examples.pomodoro"]
 	if pomoBtn == nil {
-		t.Fatal("expected reloaded Action Catalog to include com.pounddeck.examples.pomodoro")
+		t.Fatal("expected reloaded Action Catalog to include com.poundcontrol.examples.pomodoro")
 	}
 
 	test.Tap(pomoBtn)

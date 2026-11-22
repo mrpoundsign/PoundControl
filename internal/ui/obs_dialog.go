@@ -12,7 +12,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/builtin/obs"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/obs"
 )
 
 // OBSController defines the OBS connection and status operations exposed to the Studio UI.

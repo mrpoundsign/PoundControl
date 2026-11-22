@@ -3,7 +3,7 @@ package hotkey
 import (
 	"testing"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
 )
 
 type fakeBackend struct {

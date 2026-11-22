@@ -19,13 +19,13 @@ import (
 
 	"golang.org/x/net/websocket"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
 const (
 	// PluginUUID identifies the built-in App & System Control plugin.
-	PluginUUID = "com.github.mrpoundsign.pounddeck.apps"
+	PluginUUID = "com.github.mrpoundsign.poundcontrol.apps"
 
 	ActionExec      = PluginUUID + ".exec"
 	ActionOpenURL   = PluginUUID + ".open_url"
@@ -301,7 +301,7 @@ func buildManifest() plugin.Manifest {
 		UUID:        PluginUUID,
 		Name:        "App & System Control",
 		Version:     "0.1.0",
-		Author:      "PoundDeck",
+		Author:      "PoundControl",
 		Description: "Launch apps/scripts, open URLs, call HTTP/WebSocket webhooks, send hotkeys/text, and control media.",
 		Provider:    plugin.ProviderBuiltin,
 		Actions:     actions,

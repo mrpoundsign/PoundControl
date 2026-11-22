@@ -14,8 +14,8 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/mrpoundsign/PoundDeck/internal/hotkey"
-	"github.com/mrpoundsign/PoundDeck/pkg/builtin/apps"
+	"github.com/mrpoundsign/PoundControl/internal/hotkey"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/apps"
 )
 
 type hotkeyCaptureMode int

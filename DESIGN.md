@@ -1,11 +1,11 @@
-# PoundDeck — Design Document
+# PoundControl — Design Document
 **Cross-Platform Macro Deck, OBS Controller & Extensible Plugin Studio (Go & Fyne)**
 
 ---
 
 ## 1. Executive Summary
 
-**PoundDeck** is an open-source, cross-platform (Windows, Linux, macOS) programmable macro and stream deck written in **Go** with **Fyne v2**. It combines a **Fyne Virtual Desktop Deck** (with a distraction-free pop-out pad and global hotkeys) and a **LAN Web / Mobile / Tablet Touch Deck** over a unified three-pillar plugin architecture:
+**PoundControl** is an open-source, cross-platform (Windows, Linux, macOS) programmable macro and stream deck written in **Go** with **Fyne v2**. It combines a **Fyne Virtual Desktop Deck** (with a distraction-free pop-out pad and global hotkeys) and a **LAN Web / Mobile / Tablet Touch Deck** over a unified three-pillar plugin architecture:
 
 1. **Built-in Native Go Plugins**: Zero-latency native actions for **Core Navigation** (pages, folders, profiles, multi-actions), **OBS Studio** (WebSocket v5), and **App & System Control** (app/script launcher, open URL, HTTP/WS webhooks, hotkeys/macros, media keys).
 2. **Elgato Stream Deck SDK v2/v3 (`.sdPlugin`) Host**: Runs standard external Stream Deck plugins (Node.js and compiled binaries, including Go plugins and TownCrier's `.sdPlugin`) with a WebView2 / browser Property Inspector bridge.
@@ -15,7 +15,7 @@
 
 ## 2. Visual Identity & Color System
 
-PoundDeck shares the **Obsidian, Chrome Slate & Electric Sky Blue** visual identity established across InkAnim and TownCrier.
+PoundControl shares the **Obsidian, Chrome Slate & Electric Sky Blue** visual identity established across InkAnim and TownCrier.
 
 | Token | Hex / RGBA | Role / Usage |
 | :--- | :--- | :--- |
@@ -45,7 +45,7 @@ Every surface (Desktop Virtual Pad, Pop-Out Pad, LAN Web/Tablet Touch Deck) conn
 
 ```text
 +-----------------------------------------------------------------------------------+
-|                                PoundDeck Application                              |
+|                                PoundControl Application                              |
 |                                                                                   |
 |   +--------------------------+     +------------------------------------------+   |
 |   |   Surfaces (Input/UI)    |     |        Core Deck Engine (pkg/deck)       |   |
@@ -75,7 +75,7 @@ Every surface (Desktop Virtual Pad, Pop-Out Pad, LAN Web/Tablet Touch Deck) conn
 
 ```text
 +---------------------------------------------------------------------------------------------------+
-|  PoundDeck v0.1.0   [ Profile: Default v ]  [ Page 1 / 1 ]          Web Deck: Off | Plugins: 0    |
+|  PoundControl v0.1.0   [ Profile: Default v ]  [ Page 1 / 1 ]          Web Deck: Off | Plugins: 0    |
 +------------------------+-----------------------------------------------+--------------------------+
 | Action Catalog         | Virtual Deck (5x3)                            | Action Inspector         |
 |                        |                                               |                          |
@@ -100,11 +100,11 @@ Every surface (Desktop Virtual Pad, Pop-Out Pad, LAN Web/Tablet Touch Deck) conn
 ## 4. Repository Structure
 
 ```text
-PoundDeck/
+PoundControl/
 ├── assets/               # Application icon (icon.svg, icon.png) and embedded Go resources
 ├── build/bin/            # Compiled binaries only (gitignored)
 ├── cmd/
-│   ├── pounddeck/        # Main Fyne Desktop Studio entry point
+│   ├── poundcontrol/        # Main Fyne Desktop Studio entry point
 │   └── installer/        # Guided Setup Installer (Milestone 6)
 ├── internal/
 │   ├── app/              # Application controller, atomic config store, wiring

@@ -27,11 +27,11 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 	"golang.org/x/net/websocket"
 
-	"github.com/mrpoundsign/PoundDeck/assets"
-	"github.com/mrpoundsign/PoundDeck/internal/app"
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/secrets"
-	"github.com/mrpoundsign/PoundDeck/pkg/tile"
+	"github.com/mrpoundsign/PoundControl/assets"
+	"github.com/mrpoundsign/PoundControl/internal/app"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/secrets"
+	"github.com/mrpoundsign/PoundControl/pkg/tile"
 )
 
 //go:embed static/*
@@ -1095,7 +1095,7 @@ func (s *Server) handlePairStart(w http.ResponseWriter, r *http.Request) {
 		s.closePairingWindowLocked()
 		s.mu.Unlock()
 		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "Pairing is closed on PoundDeck desktop. Click Pair New Device first.",
+			"error": "Pairing is closed on PoundControl desktop. Click Pair New Device first.",
 		})
 		return
 	}

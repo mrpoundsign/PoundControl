@@ -18,12 +18,12 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/mrpoundsign/PoundDeck/internal/app"
-	"github.com/mrpoundsign/PoundDeck/internal/version"
-	"github.com/mrpoundsign/PoundDeck/internal/webdeck"
-	"github.com/mrpoundsign/PoundDeck/pkg/builtin/obs"
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/internal/app"
+	"github.com/mrpoundsign/PoundControl/internal/version"
+	"github.com/mrpoundsign/PoundControl/internal/webdeck"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/obs"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
 // dispatchUI marshals UI state updates onto the Fyne main thread.
@@ -55,7 +55,7 @@ const (
 	clipCopy
 )
 
-// MainWindow hosts the PoundDeck desktop studio and interactive virtual macro deck.
+// MainWindow hosts the PoundControl desktop studio and interactive virtual macro deck.
 type MainWindow struct {
 	app          fyne.App
 	win          fyne.Window
@@ -134,7 +134,7 @@ type MainWindow struct {
 	hoverPageTimer   *time.Timer
 }
 
-// NewMainWindow constructs and initializes the PoundDeck studio window wired to engine.
+// NewMainWindow constructs and initializes the PoundControl studio window wired to engine.
 func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 	win := a.NewWindow(version.AppName)
 	win.Resize(fyne.NewSize(1240, 760))
@@ -383,12 +383,12 @@ func (mw *MainWindow) SetHotkeySuspender(fn func(bool)) {
 	}
 }
 
-// ShowSettingsDialog opens the tabbed PoundDeck Settings modal dialog on the General tab.
+// ShowSettingsDialog opens the tabbed PoundControl Settings modal dialog on the General tab.
 func (mw *MainWindow) ShowSettingsDialog() *dialog.CustomDialog {
 	return mw.ShowSettingsDialogTab(settingsTabGeneral)
 }
 
-// ShowSettingsDialogTab opens the tabbed PoundDeck Settings modal dialog pre-selected to tab.
+// ShowSettingsDialogTab opens the tabbed PoundControl Settings modal dialog pre-selected to tab.
 func (mw *MainWindow) ShowSettingsDialogTab(tab int) *dialog.CustomDialog {
 	hotkeys := 0
 	if mw.hotkeyCount != nil {
@@ -1754,7 +1754,7 @@ func (mw *MainWindow) handleKeySecondaryTap(c deck.Coordinates, absPos fyne.Posi
 		items = append(items, movePageItem)
 
 		var selfFolderID string
-		if rendered.Config.ActionUUID == "com.github.mrpoundsign.pounddeck.core.folder.open" {
+		if rendered.Config.ActionUUID == "com.github.mrpoundsign.poundcontrol.core.folder.open" {
 			if fid, ok := rendered.Config.Settings["folderId"].(string); ok && strings.TrimSpace(fid) != "" {
 				selfFolderID = strings.TrimSpace(fid)
 			} else {

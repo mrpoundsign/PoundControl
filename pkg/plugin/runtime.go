@@ -3,7 +3,7 @@ package plugin
 import (
 	"context"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
 )
 
 // EventType names a lifecycle or user-input event dispatched to a plugin action instance.

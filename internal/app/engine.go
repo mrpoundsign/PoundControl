@@ -1,4 +1,4 @@
-// Package app implements the PoundDeck application controller and live deck execution engine.
+// Package app implements the PoundControl application controller and live deck execution engine.
 package app
 
 import (
@@ -12,8 +12,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
 // SlotVisual represents the live rendered appearance of a keypad slot or encoder dial.
@@ -81,7 +81,7 @@ type Snapshot struct {
 
 const (
 	maxHistoryEntries    = 50
-	actionFolderOpenUUID = "com.github.mrpoundsign.pounddeck.core.folder.open"
+	actionFolderOpenUUID = "com.github.mrpoundsign.poundcontrol.core.folder.open"
 )
 
 type historyEntry struct {

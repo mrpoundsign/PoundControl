@@ -1,4 +1,4 @@
-// Package ui implements the Fyne desktop studio interface and Obsidian Slate theme for PoundDeck.
+// Package ui implements the Fyne desktop studio interface and Obsidian Slate theme for PoundControl.
 package ui
 
 import (
@@ -8,7 +8,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 )
 
-// Obsidian Slate & Electric Sky Blue palette tokens shared across the PoundDeck UI.
+// Obsidian Slate & Electric Sky Blue palette tokens shared across the PoundControl UI.
 var (
 	ColorObsidianDeep   = color.RGBA{R: 2, G: 2, B: 3, A: 255}
 	ColorObsidianSlate  = color.RGBA{R: 10, G: 10, B: 12, A: 255}
@@ -27,7 +27,7 @@ var (
 	ColorError          = color.RGBA{R: 239, G: 68, B: 68, A: 255}
 )
 
-// StudioTheme implements PoundDeck's dark Obsidian Slate, Chrome White, and Electric Sky Blue theme.
+// StudioTheme implements PoundControl's dark Obsidian Slate, Chrome White, and Electric Sky Blue theme.
 type StudioTheme struct{}
 
 var _ fyne.Theme = (*StudioTheme)(nil)
@@ -84,7 +84,7 @@ func (m *StudioTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
 	return theme.DefaultTheme().Icon(name)
 }
 
-// Size returns typography and layout metrics tuned for the PoundDeck Studio workstation.
+// Size returns typography and layout metrics tuned for the PoundControl Studio workstation.
 func (m *StudioTheme) Size(name fyne.ThemeSizeName) float32 {
 	switch name {
 	case theme.SizeNameSeparatorThickness:

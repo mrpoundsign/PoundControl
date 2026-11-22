@@ -12,8 +12,8 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/mrpoundsign/PoundDeck/internal/app"
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/internal/app"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
 )
 
 // PopOutPad presents a distraction-free, always-live Virtual Deck window synchronized with the Engine.
@@ -31,7 +31,7 @@ type PopOutPad struct {
 
 // NewPopOutPad constructs a floating Run Mode deck pad attached to engine.
 func NewPopOutPad(a fyne.App, engine *app.Engine, onClosed func()) *PopOutPad {
-	win := a.NewWindow("PoundDeck Pad")
+	win := a.NewWindow("PoundControl Pad")
 	win.Resize(fyne.NewSize(560, 460))
 
 	pad := &PopOutPad{

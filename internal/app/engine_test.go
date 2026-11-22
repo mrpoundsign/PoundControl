@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/builtin/core"
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/core"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
 func newTestEngine(t *testing.T, store deck.Store) *Engine {

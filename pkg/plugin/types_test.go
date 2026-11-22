@@ -5,19 +5,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
 )
 
 func TestManifestValidate(t *testing.T) {
 	valid := Manifest{
-		UUID:     "com.github.mrpoundsign.pounddeck.obs",
+		UUID:     "com.github.mrpoundsign.poundcontrol.obs",
 		Name:     "OBS Studio",
 		Version:  "0.1.0",
 		Provider: ProviderBuiltin,
 		Actions: []ActionDescriptor{
 			{
-				UUID:        "com.github.mrpoundsign.pounddeck.obs.scene",
-				PluginUUID:  "com.github.mrpoundsign.pounddeck.obs",
+				UUID:        "com.github.mrpoundsign.poundcontrol.obs.scene",
+				PluginUUID:  "com.github.mrpoundsign.poundcontrol.obs",
 				Name:        "Switch Scene",
 				Category:    "OBS Studio",
 				Controllers: []deck.ControllerType{deck.ControllerKeypad},

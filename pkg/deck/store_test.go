@@ -57,7 +57,7 @@ func TestFileStoreAtomicSaveAndLoad(t *testing.T) {
 	initial.Profiles[0].Name = "Studio"
 	initial.Profiles[0].Pages[0].Slots["1,2"] = &SlotConfig{
 		Context:    NewUUID(),
-		ActionUUID: "com.github.mrpoundsign.pounddeck.core.counter",
+		ActionUUID: "com.github.mrpoundsign.poundcontrol.core.counter",
 		Title:      "Clicks",
 		Settings:   map[string]any{"initial": float64(5)},
 	}
@@ -67,7 +67,7 @@ func TestFileStoreAtomicSaveAndLoad(t *testing.T) {
 
 	// Second save exercises atomic replacement on existing destination file.
 	initial.Profiles[0].Pages[0].Slots["1,2"].Title = "Clicks Updated"
-	initial.PluginSettings["com.github.mrpoundsign.pounddeck.obs"] = map[string]any{
+	initial.PluginSettings["com.github.mrpoundsign.poundcontrol.obs"] = map[string]any{
 		"host": "127.0.0.1",
 		"port": float64(4455),
 	}
@@ -86,7 +86,7 @@ func TestFileStoreAtomicSaveAndLoad(t *testing.T) {
 	if gotSlot == nil || gotSlot.Title != "Clicks Updated" {
 		t.Fatalf("unexpected reloaded slot: %+v", gotSlot)
 	}
-	obsCfg := reloaded.PluginSettings["com.github.mrpoundsign.pounddeck.obs"]
+	obsCfg := reloaded.PluginSettings["com.github.mrpoundsign.poundcontrol.obs"]
 	if obsCfg["host"] != "127.0.0.1" {
 		t.Fatalf("unexpected reloaded PluginSettings: %+v", obsCfg)
 	}

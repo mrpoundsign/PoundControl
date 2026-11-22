@@ -1,6 +1,6 @@
-/* PoundDeck Pure-JS Cryptographic Module (HTTP-compatible, zero external dependencies)
+/* PoundControl Pure-JS Cryptographic Module (HTTP-compatible, zero external dependencies)
  * Implements SHA-256, SHA-512, HMAC-SHA256, HKDF-SHA256, Ed25519, X25519, RFC 9382 SPAKE2,
- * and PoundDeck WebSocket mutual-auth / per-frame MAC helpers.
+ * and PoundControl WebSocket mutual-auth / per-frame MAC helpers.
  */
 (function (root, factory) {
   'use strict';
@@ -8,7 +8,7 @@
   if (typeof module === 'object' && module.exports) {
     module.exports = api;
   } else {
-    root.PoundDeckCrypto = api;
+    root.PoundControlCrypto = api;
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
@@ -680,7 +680,7 @@
   }
 
   function deriveSpake2W(pin, windowId) {
-    const salt = utf8Bytes('pounddeck-spake2-v1:' + windowId);
+    const salt = utf8Bytes('poundcontrol-spake2-v1:' + windowId);
     const raw = hkdfSha256(utf8Bytes(pin), salt, 'w', 64);
     return mod(bytesToBigIntLE(raw), L);
   }
@@ -717,7 +717,7 @@
       const wBytes = bigIntToBytesLE(state.w, 32);
 
       const chunks = [];
-      appendLengthPrefixed(chunks, utf8Bytes('pounddeck-pair-v1:' + state.windowId));
+      appendLengthPrefixed(chunks, utf8Bytes('poundcontrol-pair-v1:' + state.windowId));
       appendLengthPrefixed(chunks, clientPub);
       appendLengthPrefixed(chunks, hostPub);
       appendLengthPrefixed(chunks, state.pA);
@@ -735,7 +735,7 @@
       const cA = hmacSha256(kcA, transcript);
       const cB = hmacSha256(kcB, transcript);
 
-      const sasBytes = hkdfSha256(ke, null, 'PoundDeck-SAS-v1', 4);
+      const sasBytes = hkdfSha256(ke, null, 'PoundControl-SAS-v1', 4);
       const dv = new DataView(sasBytes.buffer, sasBytes.byteOffset, 4);
       const sasInt = (dv.getUint32(0, false) & 0x7fffffff) % 1000000;
       const sas = String(Math.floor(sasInt / 1000)).padStart(3, '0') + '-' + String(sasInt % 1000).padStart(3, '0');
@@ -744,11 +744,11 @@
     },
 
     hostSigPayload(hashTT) {
-      return concatBytes(utf8Bytes('pounddeck-pair-host-v1'), hashTT);
+      return concatBytes(utf8Bytes('poundcontrol-pair-host-v1'), hashTT);
     },
 
     clientSigPayload(hashTT) {
-      return concatBytes(utf8Bytes('pounddeck-pair-client-v1'), hashTT);
+      return concatBytes(utf8Bytes('poundcontrol-pair-client-v1'), hashTT);
     },
 
     pairConfirmMAC(kcA, attemptId, confirm) {
@@ -767,7 +767,7 @@
   // ---- WebSocket Mutual Auth & Frame Authentication ----
   const wsAuth = {
     buildTranscript1(hostId, deviceId, hostPub, clientPub, serverNonce, clientNonce, clientEphPub) {
-      const chunks = [utf8Bytes('pounddeck-ws-v2')];
+      const chunks = [utf8Bytes('poundcontrol-ws-v2')];
       appendLengthPrefixed(chunks, utf8Bytes(hostId));
       appendLengthPrefixed(chunks, utf8Bytes(deviceId));
       chunks.push(hostPub, clientPub, serverNonce, clientNonce, clientEphPub);
@@ -780,7 +780,7 @@
 
     deriveSessionKeys(sharedSecret, t2) {
       const salt = sha256(t2);
-      const okm = hkdfSha256(sharedSecret, salt, 'pounddeck-ws-keys-v2', 96);
+      const okm = hkdfSha256(sharedSecret, salt, 'poundcontrol-ws-keys-v2', 96);
       return {
         clientMacKey: okm.slice(0, 32),
         serverMacKey: okm.slice(32, 64),

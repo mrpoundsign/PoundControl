@@ -2,7 +2,7 @@
 
 package hotkey
 
-import "github.com/mrpoundsign/PoundDeck/pkg/deck"
+import "github.com/mrpoundsign/PoundControl/pkg/deck"
 
 type noopBackend struct{}
 

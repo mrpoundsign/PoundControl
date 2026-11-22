@@ -6,16 +6,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
 const (
 	// HostPluginUUID is the Engine GlobalSettings namespace storing WebAssembly plugin search paths.
-	HostPluginUUID = "com.github.mrpoundsign.pounddeck.wasm"
+	HostPluginUUID = "com.github.mrpoundsign.poundcontrol.wasm"
 
-	// HostModuleName is the Wasm import module name exported to plugins by PoundDeck.
-	HostModuleName = "pounddeck"
+	// HostModuleName is the Wasm import module name exported to plugins by PoundControl.
+	HostModuleName = "poundcontrol"
 
 	maxMemoryPages       = 512 // 32 MiB linear memory cap per plugin module
 	defaultCallTimeout   = 5 * time.Second
@@ -27,7 +27,7 @@ const (
 	maxGuestPayloadBytes = 4 * 1024 * 1024
 )
 
-// GuestManifest is the JSON manifest returned by a Wasm plugin's pd_manifest export.
+// GuestManifest is the JSON manifest returned by a Wasm plugin's pc_manifest export.
 type GuestManifest struct {
 	UUID        string           `json:"uuid"`
 	Name        string           `json:"name"`
@@ -57,7 +57,7 @@ type GuestAction struct {
 	SettingsSchema []plugin.SettingField `json:"settingsSchema,omitempty"`
 }
 
-// GuestHTTPRequest is passed as JSON from a Wasm plugin to pd_http_request.
+// GuestHTTPRequest is passed as JSON from a Wasm plugin to pc_http_request.
 type GuestHTTPRequest struct {
 	Method    string            `json:"method,omitempty"`
 	URL       string            `json:"url"`
@@ -66,7 +66,7 @@ type GuestHTTPRequest struct {
 	TimeoutMs int               `json:"timeoutMs,omitempty"`
 }
 
-// GuestHTTPResponse is returned as JSON from pd_http_request back into guest memory.
+// GuestHTTPResponse is returned as JSON from pc_http_request back into guest memory.
 type GuestHTTPResponse struct {
 	Status  int               `json:"status"`
 	Headers map[string]string `json:"headers,omitempty"`
@@ -74,7 +74,7 @@ type GuestHTTPResponse struct {
 	Error   string            `json:"error,omitempty"`
 }
 
-// GuestTimerEvent is dispatched to a Wasm plugin's pd_on_timer export when a host interval fires.
+// GuestTimerEvent is dispatched to a Wasm plugin's pc_on_timer export when a host interval fires.
 type GuestTimerEvent struct {
 	TimerID string `json:"timerId"`
 	Context string `json:"context"`

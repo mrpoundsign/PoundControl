@@ -190,7 +190,7 @@ func (p *Profile) Clone() *Profile {
 	}
 }
 
-// Config is the top-level persisted PoundDeck configuration document.
+// Config is the top-level persisted PoundControl configuration document.
 type Config struct {
 	SchemaVersion   int                       `json:"schemaVersion"`
 	ActiveProfileID string                    `json:"activeProfileId"`

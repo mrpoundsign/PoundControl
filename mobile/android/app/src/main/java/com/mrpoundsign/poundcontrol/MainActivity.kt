@@ -1,4 +1,4 @@
-package com.mrpoundsign.pounddeck
+package com.mrpoundsign.poundcontrol
 
 import android.annotation.SuppressLint
 import android.content.Intent
@@ -39,11 +39,11 @@ import androidx.core.view.WindowInsetsControllerCompat
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        private const val PREFS_NAME = "pounddeck_prefs"
-        private const val AUTH_PREFS_NAME = "pounddeck_auth"
+        private const val PREFS_NAME = "poundcontrol_prefs"
+        private const val AUTH_PREFS_NAME = "poundcontrol_auth"
         private const val KEY_BASE_URL = "last_base_url"
         private const val KEY_ORIENTATION = "orientation_mode"
-        private const val USER_AGENT_SUFFIX = "PoundDeckAndroid/1.0"
+        private const val USER_AGENT_SUFFIX = "PoundControlAndroid/1.0"
     }
 
     private lateinit var webView: WebView
@@ -76,7 +76,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Keep Android display active whenever PoundDeck Companion is open (works over HTTP LAN).
+        // Keep Android display active whenever PoundControl Companion is open (works over HTTP LAN).
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes = window.attributes.apply {
@@ -169,7 +169,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         CookieManager.getInstance().flush()
-        webView.removeJavascriptInterface("PoundDeckNative")
+        webView.removeJavascriptInterface("PoundControlNative")
         webView.destroy()
         super.onDestroy()
     }
@@ -200,7 +200,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         wv.webChromeClient = WebChromeClient()
-        wv.addJavascriptInterface(NativeBridge(), "PoundDeckNative")
+        wv.addJavascriptInterface(NativeBridge(), "PoundControlNative")
 
         wv.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -232,7 +232,7 @@ class MainActivity : AppCompatActivity() {
             ) {
                 if (request.isForMainFrame) {
                     mainFrameFailed = true
-                    showOfflineScreen("Could not reach ${lastRequestedUrl ?: "PoundDeck"} (${error.description})")
+                    showOfflineScreen("Could not reach ${lastRequestedUrl ?: "PoundControl"} (${error.description})")
                 }
             }
         }
@@ -263,13 +263,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         val logo = ImageView(this).apply {
-            setImageResource(R.drawable.pounddeck_logo)
-            contentDescription = "PoundDeck"
+            setImageResource(R.drawable.poundcontrol_logo)
+            contentDescription = "PoundControl"
         }
         card.addView(logo, LinearLayout.LayoutParams(dp(64), dp(64)))
 
         val title = TextView(this).apply {
-            text = "PoundDeck Companion"
+            text = "PoundControl Companion"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
             typeface = Typeface.DEFAULT_BOLD
@@ -279,7 +279,7 @@ class MainActivity : AppCompatActivity() {
         card.addView(title)
 
         val subtitle = TextView(this).apply {
-            text = "Scan the QR code in PoundDeck Settings -> Web Deck, or enter your PC LAN address."
+            text = "Scan the QR code in PoundControl Settings -> Web Deck, or enter your PC LAN address."
             setTextColor(Color.parseColor("#94A3B8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             gravity = Gravity.CENTER
@@ -393,7 +393,7 @@ class MainActivity : AppCompatActivity() {
         overlay.addView(title)
 
         offlineDetailText = TextView(this).apply {
-            text = "Make sure PoundDeck is running on your PC with Web Deck enabled on the same Wi-Fi network."
+            text = "Make sure PoundControl is running on your PC with Web Deck enabled on the same Wi-Fi network."
             setTextColor(Color.parseColor("#94A3B8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             gravity = Gravity.CENTER

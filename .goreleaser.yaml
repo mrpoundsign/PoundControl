@@ -1,6 +1,6 @@
 version: 2
 
-project_name: pounddeck
+project_name: poundcontrol
 
 before:
   hooks:
@@ -15,7 +15,7 @@ checksum:
 release:
   github:
     owner: mrpoundsign
-    name: PoundDeck
+    name: PoundControl
   draft: false
   prerelease: auto
   mode: keep-existing

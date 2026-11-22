@@ -1,4 +1,4 @@
-// Package apps provides PoundDeck's built-in cross-platform application launch, URL, HTTP/WebSocket,
+// Package apps provides PoundControl's built-in cross-platform application launch, URL, HTTP/WebSocket,
 // keyboard macro, and OS media control plugin.
 package apps
 

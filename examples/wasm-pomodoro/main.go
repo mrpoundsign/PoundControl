@@ -11,11 +11,11 @@ import (
 	"unsafe"
 )
 
-//go:wasmimport pounddeck pd_update_visual
-func pdUpdateVisual(ctxPtr, ctxLen, patchPtr, patchLen uint32) int32
+//go:wasmimport poundcontrol pc_update_visual
+func pcUpdateVisual(ctxPtr, ctxLen, patchPtr, patchLen uint32) int32
 
-//go:wasmimport pounddeck pd_set_timer
-func pdSetTimer(idPtr, idLen, ctxPtr, ctxLen, intervalMs uint32) int32
+//go:wasmimport poundcontrol pc_set_timer
+func pcSetTimer(idPtr, idLen, ctxPtr, ctxLen, intervalMs uint32) int32
 
 type timerState struct {
 	running   bool
@@ -33,8 +33,8 @@ var (
 	states  = make(map[string]*timerState)
 )
 
-//go:wasmexport pd_alloc
-func pdAlloc(size uint32) uint32 {
+//go:wasmexport pc_alloc
+func pcAlloc(size uint32) uint32 {
 	if size == 0 {
 		size = 1
 	}
@@ -46,8 +46,8 @@ func pdAlloc(size uint32) uint32 {
 	return ptr
 }
 
-//go:wasmexport pd_free
-func pdFree(ptr uint32) {
+//go:wasmexport pc_free
+func pcFree(ptr uint32) {
 	allocMu.Lock()
 	delete(allocations, ptr)
 	allocMu.Unlock()
@@ -55,7 +55,7 @@ func pdFree(ptr uint32) {
 
 func returnHostString(s string) uint64 {
 	raw := []byte(s)
-	ptr := pdAlloc(uint32(len(raw)))
+	ptr := pcAlloc(uint32(len(raw)))
 	allocMu.Lock()
 	buf := allocations[ptr]
 	copy(buf, raw)
@@ -106,7 +106,7 @@ func updateVisual(ctxID, title, subtitle, color, flash string, pct *int) {
 	ctxBytes := []byte(ctxID)
 	cp, cl := bytesPtrLen(ctxBytes)
 	pp, pl := bytesPtrLen(patchBytes)
-	pdUpdateVisual(cp, cl, pp, pl)
+	pcUpdateVisual(cp, cl, pp, pl)
 }
 
 func setHostTimer(timerID, ctxID string, intervalMs uint32) {
@@ -114,20 +114,20 @@ func setHostTimer(timerID, ctxID string, intervalMs uint32) {
 	ctxBytes := []byte(ctxID)
 	ip, il := bytesPtrLen(idBytes)
 	cp, cl := bytesPtrLen(ctxBytes)
-	pdSetTimer(ip, il, cp, cl, intervalMs)
+	pcSetTimer(ip, il, cp, cl, intervalMs)
 }
 
-//go:wasmexport pd_manifest
-func pdManifest() uint64 {
+//go:wasmexport pc_manifest
+func pcManifest() uint64 {
 	manifest := map[string]any{
-		"uuid":        "com.pounddeck.examples.wasm-pomodoro",
+		"uuid":        "com.poundcontrol.examples.wasm-pomodoro",
 		"name":        "Wasm Break Timer",
 		"version":     "1.0.0",
-		"author":      "PoundDeck",
+		"author":      "PoundControl",
 		"description": "Sandboxed Go WebAssembly Pomodoro and stream break timer",
 		"actions": []map[string]any{
 			{
-				"uuid":         "com.pounddeck.examples.pomodoro",
+				"uuid":         "com.poundcontrol.examples.pomodoro",
 				"name":         "Pomodoro Timer",
 				"category":     "WebAssembly Plugins",
 				"tooltip":      "Start, pause, or reset a countdown timer running inside wazero",
@@ -173,8 +173,8 @@ func pdManifest() uint64 {
 	return returnHostString(string(raw))
 }
 
-//go:wasmexport pd_handle_event
-func pdHandleEvent(ptr, size uint32) int32 {
+//go:wasmexport pc_handle_event
+func pcHandleEvent(ptr, size uint32) int32 {
 	raw, ok := readHostSlice(ptr, size)
 	if !ok {
 		return -1
@@ -241,8 +241,8 @@ func pdHandleEvent(ptr, size uint32) int32 {
 	return 0
 }
 
-//go:wasmexport pd_on_timer
-func pdOnTimer(ptr, size uint32) int32 {
+//go:wasmexport pc_on_timer
+func pcOnTimer(ptr, size uint32) int32 {
 	raw, ok := readHostSlice(ptr, size)
 	if !ok {
 		return -1

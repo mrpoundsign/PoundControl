@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mrpoundsign/PoundDeck/internal/app"
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/internal/app"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
 )
 
 // ClientProfile is the sanitized profile summary exposed to remote touch deck clients.

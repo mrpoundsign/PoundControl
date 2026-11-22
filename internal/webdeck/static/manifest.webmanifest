@@ -1,7 +1,7 @@
 {
-  "name": "PoundDeck Touch Deck",
-  "short_name": "PoundDeck",
-  "description": "Authenticated LAN touch deck controller for PoundDeck",
+  "name": "PoundControl Touch Deck",
+  "short_name": "PoundControl",
+  "description": "Authenticated LAN touch deck controller for PoundControl",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0A0A0C",

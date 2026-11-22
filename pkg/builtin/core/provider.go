@@ -1,4 +1,4 @@
-// Package core provides PoundDeck's built-in navigation, folder, multi-action, delay, and counter actions.
+// Package core provides PoundControl's built-in navigation, folder, multi-action, delay, and counter actions.
 package core
 
 import (
@@ -11,13 +11,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
 const (
 	// PluginUUID identifies the built-in core navigation and macro plugin.
-	PluginUUID = "com.github.mrpoundsign.pounddeck.core"
+	PluginUUID = "com.github.mrpoundsign.poundcontrol.core"
 
 	ActionPageNext      = PluginUUID + ".page.next"
 	ActionPagePrev      = PluginUUID + ".page.prev"
@@ -42,7 +42,7 @@ type counterState struct {
 	initial int
 }
 
-// Provider implements plugin.Provider for PoundDeck's built-in core actions.
+// Provider implements plugin.Provider for PoundControl's built-in core actions.
 type Provider struct {
 	mu       sync.RWMutex
 	host     plugin.HostAPI
@@ -195,7 +195,7 @@ func buildManifest() plugin.Manifest {
 					Label:       "Steps JSON",
 					Type:        plugin.FieldMultiline,
 					Default:     "[]",
-					Placeholder: `[{"actionUuid":"com.github.mrpoundsign.pounddeck.core.delay","settings":{"ms":150}}]`,
+					Placeholder: `[{"actionUuid":"com.github.mrpoundsign.poundcontrol.core.delay","settings":{"ms":150}}]`,
 					Help:        "JSON array of {\"actionUuid\", \"settings\", \"delayMs\"} objects executed in order.",
 				},
 			},
@@ -253,7 +253,7 @@ func buildManifest() plugin.Manifest {
 		UUID:        PluginUUID,
 		Name:        "Core Navigation & Actions",
 		Version:     "0.1.0",
-		Author:      "PoundDeck",
+		Author:      "PoundControl",
 		Description: "Built-in page, profile, folder, multi-action, delay, and counter actions.",
 		Provider:    plugin.ProviderBuiltin,
 		Actions:     actions,

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
 )
 
 type registeredAction struct {

@@ -4,10 +4,10 @@ import (
 	"context"
 	"strings"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
 )
 
-// Canonical inspector section names recognized by PoundDeck's Action Inspector.
+// Canonical inspector section names recognized by PoundControl's Action Inspector.
 // Plugins may use these constants (matched case-insensitively) to merge settings
 // alongside built-in controls, or provide any custom section title.
 const (
@@ -39,7 +39,7 @@ type SelectOption struct {
 	Value string `json:"value"`
 }
 
-// SettingField declares one configurable property of an action so PoundDeck can render
+// SettingField declares one configurable property of an action so PoundControl can render
 // a native Obsidian-Slate inspector form automatically without HTML.
 type SettingField struct {
 	Key         string         `json:"key"`

@@ -1,4 +1,4 @@
-// Package obs implements PoundDeck's built-in OBS Studio WebSocket v5 client and plugin actions.
+// Package obs implements PoundControl's built-in OBS Studio WebSocket v5 client and plugin actions.
 package obs
 
 import (

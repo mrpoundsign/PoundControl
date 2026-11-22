@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrpoundsign/PoundDeck/internal/app"
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
-	"github.com/mrpoundsign/PoundDeck/pkg/secrets"
+	"github.com/mrpoundsign/PoundControl/internal/app"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/secrets"
 )
 
 func setupOBSTestEngine(t *testing.T) (*app.Engine, *Provider, *secrets.MemoryStore) {

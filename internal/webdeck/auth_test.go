@@ -14,7 +14,7 @@ import (
 
 	"filippo.io/edwards25519"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/secrets"
+	"github.com/mrpoundsign/PoundControl/pkg/secrets"
 )
 
 func TestEnsureHostIdentityAndFingerprints(t *testing.T) {
@@ -136,10 +136,10 @@ func TestCryptoJSInterop(t *testing.T) {
 	deviceID := "dev-uuid-2"
 
 	jsInput := map[string]string{
-		"msgB64":       base64.StdEncoding.EncodeToString([]byte("PoundDeck mutual auth test payload — 123456!")),
+		"msgB64":       base64.StdEncoding.EncodeToString([]byte("PoundControl mutual auth test payload — 123456!")),
 		"goPrivB64":    base64.StdEncoding.EncodeToString(hPriv[:32]),
 		"goPubB64":     base64.StdEncoding.EncodeToString(hPub),
-		"goSigB64":     base64.StdEncoding.EncodeToString(ed25519.Sign(hPriv, []byte("PoundDeck mutual auth test payload — 123456!"))),
+		"goSigB64":     base64.StdEncoding.EncodeToString(ed25519.Sign(hPriv, []byte("PoundControl mutual auth test payload — 123456!"))),
 		"goEphPubB64":  base64.StdEncoding.EncodeToString(goEphPub),
 		"clientSeed":   base64.StdEncoding.EncodeToString(cPriv[:32]),
 		"clientPubB64": base64.StdEncoding.EncodeToString(cPub),
@@ -226,7 +226,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("decode node step 1 output: %v\n%s", err, out1Bytes)
 	}
 
-	rawMsg := []byte("PoundDeck mutual auth test payload — 123456!")
+	rawMsg := []byte("PoundControl mutual auth test payload — 123456!")
 	wantSha2 := sha256.Sum256(rawMsg)
 	wantSha5 := sha512.Sum512(rawMsg)
 	if res1.Sha2 != base64.StdEncoding.EncodeToString(wantSha2[:]) {

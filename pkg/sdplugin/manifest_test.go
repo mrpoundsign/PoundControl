@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
 func createSyntheticBundle(t *testing.T, parentDir, folderName, manifestJSON, htmlPI string) string {
@@ -86,10 +86,10 @@ func TestLoadBundleAndDiscoverBundles(t *testing.T) {
 		t.Fatalf("expected HTML-extracted select field 'mode', got %+v", act.SettingsSchema)
 	}
 
-	// Sidecar pounddeck.schema.json overrides HTML extraction cleanly.
+	// Sidecar poundcontrol.schema.json overrides HTML extraction cleanly.
 	sidecar := `{"com.example.demo.action":[{"key":"token","label":"API Token","type":"password","required":true}]}`
-	if err := os.WriteFile(filepath.Join(bundleDir, "pounddeck.schema.json"), []byte(sidecar), 0o600); err != nil {
-		t.Fatalf("WriteFile(pounddeck.schema.json) error = %v", err)
+	if err := os.WriteFile(filepath.Join(bundleDir, "poundcontrol.schema.json"), []byte(sidecar), 0o600); err != nil {
+		t.Fatalf("WriteFile(poundcontrol.schema.json) error = %v", err)
 	}
 	loaded2, err := LoadBundle(bundleDir)
 	if err != nil {

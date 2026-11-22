@@ -1,4 +1,4 @@
-package com.mrpoundsign.pounddeck
+package com.mrpoundsign.poundcontrol
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

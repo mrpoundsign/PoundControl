@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/builtin/apps"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/apps"
 )
 
 type browserPIViewer struct{}

@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
 )
 
 var (

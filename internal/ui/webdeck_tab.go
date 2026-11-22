@@ -14,7 +14,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/mrpoundsign/PoundDeck/internal/webdeck"
+	"github.com/mrpoundsign/PoundControl/internal/webdeck"
 )
 
 const (
@@ -65,7 +65,7 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 	statusLbl.Wrapping = fyne.TextWrapWord
 
 	syncing := false
-	enabledCheck := widget.NewCheck("Enable LAN Web Touch Deck (auto-starts with PoundDeck)", nil)
+	enabledCheck := widget.NewCheck("Enable LAN Web Touch Deck (auto-starts with PoundControl)", nil)
 	enabledCheck.SetChecked(cfg.Enabled)
 
 	portEntry := widget.NewEntry()

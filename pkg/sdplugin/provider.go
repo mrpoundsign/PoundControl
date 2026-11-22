@@ -24,12 +24,12 @@ import (
 
 	"golang.org/x/net/websocket"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/builtin/apps"
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/apps"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
-const virtualDeviceID = "pounddeck-virtual-0"
+const virtualDeviceID = "poundcontrol-virtual-0"
 
 // PluginRunState describes the runtime status of a loaded .sdPlugin bundle.
 type PluginRunState string
@@ -1632,7 +1632,7 @@ func buildInfoObject(pluginUUID, version string) map[string]any {
 		"devices": []map[string]any{
 			{
 				"id":   virtualDeviceID,
-				"name": "PoundDeck Studio",
+				"name": "PoundControl Studio",
 				"size": map[string]int{"columns": 8, "rows": 4},
 				"type": 7,
 			},

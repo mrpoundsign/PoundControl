@@ -1,4 +1,4 @@
-package com.mrpoundsign.pounddeck
+package com.mrpoundsign.poundcontrol
 
 import java.net.URI
 import java.util.Locale

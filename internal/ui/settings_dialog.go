@@ -15,11 +15,11 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/mrpoundsign/PoundDeck/internal/app"
-	"github.com/mrpoundsign/PoundDeck/internal/version"
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/sdplugin"
-	"github.com/mrpoundsign/PoundDeck/pkg/wasmplugin"
+	"github.com/mrpoundsign/PoundControl/internal/app"
+	"github.com/mrpoundsign/PoundControl/internal/version"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/sdplugin"
+	"github.com/mrpoundsign/PoundControl/pkg/wasmplugin"
 )
 
 const (
@@ -93,7 +93,7 @@ func showSettingsDialog(
 		tabs.SelectIndex(initialTab)
 	}
 
-	dlg := dialog.NewCustom("PoundDeck Settings", "Close", tabs, win)
+	dlg := dialog.NewCustom("PoundControl Settings", "Close", tabs, win)
 	dlg.Resize(fyne.NewSize(680, 600))
 	dlg.SetOnClosed(func() {
 		if generalCleanup != nil {

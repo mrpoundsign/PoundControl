@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const C = window.PoundDeckCrypto;
+  const C = window.PoundControlCrypto;
   const HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
   function parseHexRGB(hex) {
     if (!HEX_RE.test(hex || '')) return null;
@@ -39,8 +39,8 @@
     return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
   }
   const nativeBridge =
-    window.PoundDeckNative && typeof window.PoundDeckNative.isNativeApp === 'function'
-      ? window.PoundDeckNative
+    window.PoundControlNative && typeof window.PoundControlNative.isNativeApp === 'function'
+      ? window.PoundControlNative
       : null;
   const supportsWakeLock = Boolean(!nativeBridge && window.isSecureContext && 'wakeLock' in navigator);
   const supportsFullscreen = Boolean(
@@ -107,7 +107,7 @@
   let activePair = null;
 
   function storageKey() {
-    return 'pounddeck_auth_v2_' + window.location.origin;
+    return 'poundcontrol_auth_v2_' + window.location.origin;
   }
 
   function loadAuthRecord() {
@@ -228,10 +228,10 @@
     els.confirmError.hidden = true;
     els.confirmApproveBtn.disabled = false;
     els.sasCode.textContent = pairCtx.mat.sas;
-    els.confirmHostName.textContent = pairCtx.info.hostName || 'PoundDeck Studio';
+    els.confirmHostName.textContent = pairCtx.info.hostName || 'PoundControl Studio';
     els.confirmHostFp.textContent = pairCtx.info.hostFingerprint;
     els.confirmClientFp.textContent = C.ed25519.fingerprint(pairCtx.clientPub);
-    els.confirmStatus.textContent = 'Check the verification code on your PoundDeck PC and tap Confirm Match.';
+    els.confirmStatus.textContent = 'Check the verification code on your PoundControl PC and tap Confirm Match.';
     setStatusBadge('connecting', 'Verify Both Devices');
   }
 
@@ -835,16 +835,16 @@
     if (data.status === 'denied' || data.status === 'expired') {
       stopPairPoll();
       const msg = data.status === 'denied'
-        ? 'Pairing request was denied on PoundDeck PC.'
+        ? 'Pairing request was denied on PoundControl PC.'
         : 'Pairing window expired before confirmation.';
       showPairView(msg);
       return;
     }
 
     if (data.hostApproved && !activePair.clientConfirmed) {
-      els.confirmStatus.textContent = 'PoundDeck PC approved! Tap Confirm Match on this device to finish.';
+      els.confirmStatus.textContent = 'PoundControl PC approved! Tap Confirm Match on this device to finish.';
     } else if (activePair.clientConfirmed && !data.hostApproved) {
-      els.confirmStatus.textContent = 'Confirmed on this device — tap Approve Device on your PoundDeck PC to finish.';
+      els.confirmStatus.textContent = 'Confirmed on this device — tap Approve Device on your PoundControl PC to finish.';
     }
   }
 
@@ -905,10 +905,10 @@
     try {
       const info = await refreshPairInfo();
       if (!info) {
-        throw new Error('Could not reach PoundDeck server.');
+        throw new Error('Could not reach PoundControl server.');
       }
       if (!info.pairingOpen || !info.windowId) {
-        throw new Error('Pairing is closed on PoundDeck PC. Click Pair New Device in Settings.');
+        throw new Error('Pairing is closed on PoundControl PC. Click Pair New Device in Settings.');
       }
 
       const hostPub = C.fromBase64(info.hostPublicKey);

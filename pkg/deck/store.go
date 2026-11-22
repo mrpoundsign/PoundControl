@@ -9,7 +9,7 @@ import (
 	"sync"
 )
 
-// Store persists and loads PoundDeck configuration trees.
+// Store persists and loads PoundControl configuration trees.
 type Store interface {
 	Load() (*Config, error)
 	Save(cfg *Config) error
@@ -153,12 +153,12 @@ func (f *FileStore) Save(cfg *Config) error {
 	return nil
 }
 
-// DefaultConfigPath returns the standard per-user PoundDeck configuration path.
+// DefaultConfigPath returns the standard per-user PoundControl configuration path.
 // Tests must NOT call this helper; pass an explicit t.TempDir() path or MemoryStore instead.
 func DefaultConfigPath() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user config dir: %w", err)
 	}
-	return filepath.Join(base, "PoundDeck", "config.json"), nil
+	return filepath.Join(base, "PoundControl", "config.json"), nil
 }

@@ -64,13 +64,13 @@ func NewNodeManager(managedDir string) *NodeManager {
 	}
 }
 
-// ManagedDir returns the root directory used for PoundDeck's managed Node.js binary.
+// ManagedDir returns the root directory used for PoundControl's managed Node.js binary.
 func (m *NodeManager) ManagedDir() string {
 	return m.managedDir
 }
 
 // Resolve finds a usable Node.js binary meeting minMajor (default 20) according to priority:
-// custom override -> PoundDeck managed binary -> system PATH -> Elgato bundled node.
+// custom override -> PoundControl managed binary -> system PATH -> Elgato bundled node.
 func (m *NodeManager) Resolve(customPath string, minMajor int) NodeRuntimeInfo {
 	if minMajor <= 0 {
 		minMajor = 20
@@ -168,7 +168,7 @@ func (m *NodeManager) DownloadManaged(
 		return NodeRuntimeInfo{}, fmt.Errorf("fetch Node.js checksums: %w", err)
 	}
 
-	tmpDir, err := os.MkdirTemp("", "pounddeck-node-*")
+	tmpDir, err := os.MkdirTemp("", "poundcontrol-node-*")
 	if err != nil {
 		return NodeRuntimeInfo{}, fmt.Errorf("create temp dir: %w", err)
 	}

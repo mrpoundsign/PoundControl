@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/deck"
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
 type recordedPatch struct {
@@ -195,7 +195,7 @@ func TestProviderPomodoroLifecycleTimersAndHotReload(t *testing.T) {
 	}
 
 	ctxID := "slot-pomodoro-0"
-	actionUUID := "com.pounddeck.examples.pomodoro"
+	actionUUID := "com.poundcontrol.examples.pomodoro"
 	if err := prov.Dispatch(context.Background(), plugin.ActionEvent{
 		Type:       plugin.EventWillAppear,
 		Context:    ctxID,
@@ -306,22 +306,22 @@ import (
 	"unsafe"
 )
 
-//go:wasmimport pounddeck pd_update_visual
-func pdUpdateVisual(ctxPtr, ctxLen, patchPtr, patchLen uint32) int32
+//go:wasmimport poundcontrol pc_update_visual
+func pcUpdateVisual(ctxPtr, ctxLen, patchPtr, patchLen uint32) int32
 
-//go:wasmimport pounddeck pd_http_request
-func pdHTTPRequest(reqPtr, reqLen, respPtr, respCap uint32) int32
+//go:wasmimport poundcontrol pc_http_request
+func pcHTTPRequest(reqPtr, reqLen, respPtr, respCap uint32) int32
 
-//go:wasmimport pounddeck pd_deck_nav
-func pdDeckNav(cmdPtr, cmdLen uint32) int32
+//go:wasmimport poundcontrol pc_deck_nav
+func pcDeckNav(cmdPtr, cmdLen uint32) int32
 
 var (
 	allocMu     sync.Mutex
 	allocations = make(map[uint32][]byte)
 )
 
-//go:wasmexport pd_alloc
-func pdAlloc(size uint32) uint32 {
+//go:wasmexport pc_alloc
+func pcAlloc(size uint32) uint32 {
 	if size == 0 {
 		size = 1
 	}
@@ -333,8 +333,8 @@ func pdAlloc(size uint32) uint32 {
 	return ptr
 }
 
-//go:wasmexport pd_free
-func pdFree(ptr uint32) {
+//go:wasmexport pc_free
+func pcFree(ptr uint32) {
 	allocMu.Lock()
 	delete(allocations, ptr)
 	allocMu.Unlock()
@@ -342,7 +342,7 @@ func pdFree(ptr uint32) {
 
 func returnHostString(s string) uint64 {
 	raw := []byte(s)
-	ptr := pdAlloc(uint32(len(raw)))
+	ptr := pcAlloc(uint32(len(raw)))
 	allocMu.Lock()
 	copy(allocations[ptr], raw)
 	allocMu.Unlock()
@@ -356,8 +356,8 @@ func ptrLen(b []byte) (uint32, uint32) {
 	return uint32(uintptr(unsafe.Pointer(&b[0]))), uint32(len(b))
 }
 
-//go:wasmexport pd_manifest
-func pdManifest() uint64 {
+//go:wasmexport pc_manifest
+func pcManifest() uint64 {
 	manifest := map[string]any{
 		"uuid":    "com.test.wasm.sandbox",
 		"name":    "Sandbox Test",
@@ -375,8 +375,8 @@ func pdManifest() uint64 {
 	return returnHostString(string(raw))
 }
 
-//go:wasmexport pd_handle_event
-func pdHandleEvent(ptr, size uint32) int32 {
+//go:wasmexport pc_handle_event
+func pcHandleEvent(ptr, size uint32) int32 {
 	raw := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(ptr))), size)
 	var ev struct {
 		Type       string `+"`"+`json:"event"`+"`"+`
@@ -396,14 +396,14 @@ func pdHandleEvent(ptr, size uint32) int32 {
 	} else {
 		navBytes := []byte(`+"`"+`{"action":"nextPage"}`+"`"+`)
 		np, nl := ptrLen(navBytes)
-		pdDeckNav(np, nl)
+		pcDeckNav(np, nl)
 	}
 
 	reqBytes, _ := json.Marshal(map[string]any{"method": "GET", "url": target})
 	rp, rl := ptrLen(reqBytes)
 	respBuf := make([]byte, 4096)
 	op, _ := ptrLen(respBuf)
-	n := pdHTTPRequest(rp, rl, op, uint32(len(respBuf)))
+	n := pcHTTPRequest(rp, rl, op, uint32(len(respBuf)))
 	sub := "err"
 	if n > 0 {
 		var resp struct {
@@ -421,7 +421,7 @@ func pdHandleEvent(ptr, size uint32) int32 {
 	patchBytes, _ := json.Marshal(map[string]any{"subtitle": sub})
 	cp, cl := ptrLen([]byte(ev.Context))
 	pp, pl := ptrLen(patchBytes)
-	pdUpdateVisual(cp, cl, pp, pl)
+	pcUpdateVisual(cp, cl, pp, pl)
 	return 0
 }
 
@@ -471,7 +471,7 @@ func main() {}
 	navCnt := len(host.navCalls)
 	host.mu.Unlock()
 	if navCnt != 1 {
-		t.Fatalf("expected pd_deck_nav nextPage call recorded, got %d", navCnt)
+		t.Fatalf("expected pc_deck_nav nextPage call recorded, got %d", navCnt)
 	}
 
 	// Disallowed host must be blocked by sandbox (403, zero requests reaching blockedSrv).
@@ -540,7 +540,7 @@ func TestProviderPomodoroSecondsPauseDoneColor(t *testing.T) {
 	gotSections := make(map[string]string, len(wantSections))
 	var foundSeconds bool
 	for _, act := range prov.Actions() {
-		if act.UUID != "com.pounddeck.examples.pomodoro" {
+		if act.UUID != "com.poundcontrol.examples.pomodoro" {
 			continue
 		}
 		for _, field := range act.SettingsSchema {
@@ -560,7 +560,7 @@ func TestProviderPomodoroSecondsPauseDoneColor(t *testing.T) {
 	}
 
 	ctxID := "slot-pomodoro-sec"
-	actionUUID := "com.pounddeck.examples.pomodoro"
+	actionUUID := "com.poundcontrol.examples.pomodoro"
 	if err := prov.Dispatch(context.Background(), plugin.ActionEvent{
 		Type:       plugin.EventWillAppear,
 		Context:    ctxID,

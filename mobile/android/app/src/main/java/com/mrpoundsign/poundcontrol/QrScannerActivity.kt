@@ -1,4 +1,4 @@
-package com.mrpoundsign.pounddeck
+package com.mrpoundsign.poundcontrol
 
 import android.Manifest
 import android.content.Intent
@@ -150,7 +150,7 @@ class QrScannerActivity : AppCompatActivity() {
         val overlay = FrameLayout(this)
 
         val prompt = TextView(this).apply {
-            text = "Point camera at the QR code in PoundDeck Settings -> Web Deck"
+            text = "Point camera at the QR code in PoundControl Settings -> Web Deck"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             typeface = Typeface.DEFAULT_BOLD
@@ -227,7 +227,7 @@ class QrScannerActivity : AppCompatActivity() {
         }
 
         val msg = TextView(this).apply {
-            text = "Camera permission is required to scan PoundDeck's pairing QR code.\nYou can also close this screen and type your PC IP address manually."
+            text = "Camera permission is required to scan PoundControl's pairing QR code.\nYou can also close this screen and type your PC IP address manually."
             setTextColor(Color.parseColor("#E2E8F0"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             gravity = Gravity.CENTER

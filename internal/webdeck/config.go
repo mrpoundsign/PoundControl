@@ -1,5 +1,5 @@
 // Package webdeck provides a mutually authenticated local HTTP and WebSocket touch deck server
-// and embedded Obsidian Slate web UI synchronized with the PoundDeck engine.
+// and embedded Obsidian Slate web UI synchronized with the PoundControl engine.
 package webdeck
 
 import (
@@ -20,7 +20,7 @@ import (
 
 const (
 	// SettingsPluginUUID is the Engine GlobalSettings namespace storing webdeck configuration.
-	SettingsPluginUUID = "com.github.mrpoundsign.pounddeck.webdeck"
+	SettingsPluginUUID = "com.github.mrpoundsign.poundcontrol.webdeck"
 
 	// DefaultPort is the default TCP port for the LAN web touch deck server.
 	DefaultPort = 9120

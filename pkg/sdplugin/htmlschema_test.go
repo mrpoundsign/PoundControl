@@ -3,7 +3,7 @@ package sdplugin
 import (
 	"testing"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
 func TestExtractHTMLSchemaScopedAndSDPI(t *testing.T) {

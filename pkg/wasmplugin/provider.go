@@ -21,7 +21,7 @@ import (
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 
-	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
 // PluginRunState describes the lifecycle state of a loaded .wasm module.
@@ -325,7 +325,7 @@ func (p *Provider) Reload() error {
 	return nil
 }
 
-// Dispatch implements plugin.Provider by serializing ev as JSON to the owning module's pd_handle_event export.
+// Dispatch implements plugin.Provider by serializing ev as JSON to the owning module's pc_handle_event export.
 func (p *Provider) Dispatch(_ context.Context, ev plugin.ActionEvent) error {
 	p.mu.RLock()
 	key, hasAct := p.actionToPlugin[ev.ActionUUID]
@@ -440,14 +440,14 @@ func (p *Provider) loadInstance(path string) *wasmInstance {
 		inst.closeInstance()
 		return inst
 	}
-	inst.allocFn = mod.ExportedFunction("pd_alloc")
-	inst.freeFn = mod.ExportedFunction("pd_free")
-	manifestFn := mod.ExportedFunction("pd_manifest")
-	inst.eventFn = mod.ExportedFunction("pd_handle_event")
-	inst.timerFn = mod.ExportedFunction("pd_on_timer")
+	inst.allocFn = mod.ExportedFunction("pc_alloc")
+	inst.freeFn = mod.ExportedFunction("pc_free")
+	manifestFn := mod.ExportedFunction("pc_manifest")
+	inst.eventFn = mod.ExportedFunction("pc_handle_event")
+	inst.timerFn = mod.ExportedFunction("pc_on_timer")
 
 	if manifestFn == nil || inst.eventFn == nil {
-		inst.errMsg = "missing required PoundDeck exports (pd_manifest, pd_handle_event)"
+		inst.errMsg = "missing required PoundControl exports (pc_manifest, pc_handle_event)"
 		inst.closeInstance()
 		return inst
 	}
@@ -494,7 +494,7 @@ func (p *Provider) instantiateHostModule(ctx context.Context, rt wazero.Runtime,
 			}
 			return 0
 		}).
-		Export("pd_update_visual")
+		Export("pc_update_visual")
 
 	builder.NewFunctionBuilder().
 		WithFunc(func(_ context.Context, m api.Module, ctxPtr, ctxLen, jsonPtr, jsonLen uint32) int32 {
@@ -518,7 +518,7 @@ func (p *Provider) instantiateHostModule(ctx context.Context, rt wazero.Runtime,
 			}
 			return 0
 		}).
-		Export("pd_save_settings")
+		Export("pc_save_settings")
 
 	builder.NewFunctionBuilder().
 		WithFunc(func(_ context.Context, m api.Module, outPtr, outCap uint32) int32 {
@@ -538,7 +538,7 @@ func (p *Provider) instantiateHostModule(ctx context.Context, rt wazero.Runtime,
 			}
 			return writeGuestResponse(m, outPtr, outCap, encoded)
 		}).
-		Export("pd_get_global_settings")
+		Export("pc_get_global_settings")
 
 	builder.NewFunctionBuilder().
 		WithFunc(func(_ context.Context, m api.Module, jsonPtr, jsonLen uint32) int32 {
@@ -561,7 +561,7 @@ func (p *Provider) instantiateHostModule(ctx context.Context, rt wazero.Runtime,
 			}
 			return 0
 		}).
-		Export("pd_save_global_settings")
+		Export("pc_save_global_settings")
 
 	builder.NewFunctionBuilder().
 		WithFunc(func(_ context.Context, m api.Module, msgPtr, msgLen uint32) {
@@ -580,7 +580,7 @@ func (p *Provider) instantiateHostModule(ctx context.Context, rt wazero.Runtime,
 				host.Log(pid, string(msgBytes))
 			}
 		}).
-		Export("pd_log")
+		Export("pc_log")
 
 	builder.NewFunctionBuilder().
 		WithFunc(func(callCtx context.Context, m api.Module, reqPtr, reqLen, respPtr, respCap uint32) int32 {
@@ -598,7 +598,7 @@ func (p *Provider) instantiateHostModule(ctx context.Context, rt wazero.Runtime,
 			resp := p.executeSandboxedHTTP(callCtx, inst.allowedHosts, req)
 			return writeGuestJSON(m, respPtr, respCap, resp)
 		}).
-		Export("pd_http_request")
+		Export("pc_http_request")
 
 	builder.NewFunctionBuilder().
 		WithFunc(func(_ context.Context, m api.Module, idPtr, idLen, ctxPtr, ctxLen, intervalMs uint32) int32 {
@@ -616,7 +616,7 @@ func (p *Provider) instantiateHostModule(ctx context.Context, rt wazero.Runtime,
 			}
 			return 0
 		}).
-		Export("pd_set_timer")
+		Export("pc_set_timer")
 
 	builder.NewFunctionBuilder().
 		WithFunc(func(_ context.Context, m api.Module, cmdPtr, cmdLen uint32) int32 {
@@ -657,7 +657,7 @@ func (p *Provider) instantiateHostModule(ctx context.Context, rt wazero.Runtime,
 			}
 			return 0
 		}).
-		Export("pd_deck_nav")
+		Export("pc_deck_nav")
 
 	_, err := builder.Instantiate(ctx)
 	return err
@@ -728,16 +728,16 @@ func (inst *wasmInstance) readManifest(manifestFn api.Function) (GuestManifest, 
 
 	res, err := manifestFn.Call(ctx)
 	if err != nil {
-		return GuestManifest{}, fmt.Errorf("pd_manifest failed: %w", err)
+		return GuestManifest{}, fmt.Errorf("pc_manifest failed: %w", err)
 	}
 	if len(res) == 0 {
-		return GuestManifest{}, errors.New("pd_manifest returned no pointer/length")
+		return GuestManifest{}, errors.New("pc_manifest returned no pointer/length")
 	}
 	packed := res[0]
 	ptr := uint32(packed >> 32)
 	size := uint32(packed & 0xffffffff)
 	if ptr == 0 || size == 0 || size > maxGuestPayloadBytes {
-		return GuestManifest{}, fmt.Errorf("pd_manifest returned invalid region ptr=%d len=%d", ptr, size)
+		return GuestManifest{}, fmt.Errorf("pc_manifest returned invalid region ptr=%d len=%d", ptr, size)
 	}
 
 	raw, ok := readGuestBytes(inst.mod, ptr, size)
@@ -745,12 +745,12 @@ func (inst *wasmInstance) readManifest(manifestFn api.Function) (GuestManifest, 
 		_, _ = inst.freeFn.Call(ctx, uint64(ptr))
 	}
 	if !ok {
-		return GuestManifest{}, errors.New("pd_manifest memory region out of bounds")
+		return GuestManifest{}, errors.New("pc_manifest memory region out of bounds")
 	}
 
 	var gm GuestManifest
 	if err := json.Unmarshal(raw, &gm); err != nil {
-		return GuestManifest{}, fmt.Errorf("decode pd_manifest JSON: %w", err)
+		return GuestManifest{}, fmt.Errorf("decode pc_manifest JSON: %w", err)
 	}
 	return gm, nil
 }
@@ -768,8 +768,8 @@ func (inst *wasmInstance) callWithBytes(fn api.Function, payload []byte) (int32,
 
 	allocRes, err := inst.allocFn.Call(ctx, uint64(len(payload)))
 	if err != nil || len(allocRes) == 0 || allocRes[0] == 0 {
-		inst.failLocked("pd_alloc failed: " + errString(err))
-		return -1, fmt.Errorf("pd_alloc failed: %w", err)
+		inst.failLocked("pc_alloc failed: " + errString(err))
+		return -1, fmt.Errorf("pc_alloc failed: %w", err)
 	}
 	ptr := uint32(allocRes[0])
 	defer func() {

@@ -1,9 +1,9 @@
-Website = "https://github.com/mrpoundsign/PoundDeck"
+Website = "https://github.com/mrpoundsign/PoundControl"
 
 [Details]
   Icon = "assets/icon.png"
-  Name = "PoundDeck"
-  ID = "com.github.mrpoundsign.pounddeck"
+  Name = "PoundControl"
+  ID = "com.github.mrpoundsign.poundcontrol"
   Version = "0.1.0"
   Build = 1
 

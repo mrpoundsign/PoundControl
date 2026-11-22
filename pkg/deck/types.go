@@ -1,4 +1,4 @@
-// Package deck defines core domain types for PoundDeck surfaces, grids, slots, and controllers.
+// Package deck defines core domain types for PoundControl surfaces, grids, slots, and controllers.
 package deck
 
 import (

@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "PoundDeckAndroid"
+rootProject.name = "PoundControlAndroid"
 include(":app")

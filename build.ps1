@@ -1,9 +1,9 @@
-# PoundDeck Build Script (PowerShell)
+# PoundControl Build Script (PowerShell)
 # Usage:
 #   .\build.ps1                  # Run lint, tests, and build Desktop Studio GUI
-#   .\build.ps1 -Target gui      # Build Desktop Studio GUI (with Zig CGo) -> build\bin\pounddeck.exe
+#   .\build.ps1 -Target gui      # Build Desktop Studio GUI (with Zig CGo) -> build\bin\poundcontrol.exe
 #   .\build.ps1 -Target wasm     # Build example WebAssembly plugins (WASI reactor) -> build\bin\*.wasm
-#   .\build.ps1 -Target android  # Test & build Android Companion APK -> build\bin\pounddeck-android.apk
+#   .\build.ps1 -Target android  # Test & build Android Companion APK -> build\bin\poundcontrol-android.apk
 #   .\build.ps1 -Target test     # Run all unit & headless UI tests
 #   .\build.ps1 -Target lint     # Run go fix -diff & golangci-lint-v2
 #   .\build.ps1 -Target check    # Run goreleaser check
@@ -91,25 +91,25 @@ function Enable-CGoToolchain {
 }
 
 function Build-GUI {
-    Write-Host "`n==> Building PoundDeck Desktop Studio GUI (with CGo)..." -ForegroundColor Cyan
+    Write-Host "`n==> Building PoundControl Desktop Studio GUI (with CGo)..." -ForegroundColor Cyan
     Enable-CGoToolchain
 
     if (-not (Test-Path $BinDir)) { New-Item -ItemType Directory -Path $BinDir | Out-Null }
-    $outPath = Join-Path $BinDir "pounddeck.exe"
-    $sysoPrefix = Join-Path $PSScriptRoot "cmd\pounddeck\rsrc"
+    $outPath = Join-Path $BinDir "poundcontrol.exe"
+    $sysoPrefix = Join-Path $PSScriptRoot "cmd\poundcontrol\rsrc"
     $sysoPath = "${sysoPrefix}_windows_amd64.syso"
     $ldflags = "-s -w -H=windowsgui -extldflags=-Wl,--subsystem,windows"
     if ($env:VERSION) {
         $ver = $env:VERSION.TrimStart('v')
-        $ldflags = "$ldflags -X github.com/mrpoundsign/PoundDeck/internal/version.Version=$ver"
+        $ldflags = "$ldflags -X github.com/mrpoundsign/PoundControl/internal/version.Version=$ver"
     }
     try {
-        New-WinResSyso -OutPrefix $sysoPrefix -ProductName "PoundDeck" -Description "PoundDeck Macro & Stream Deck Studio" -OriginalFilename "pounddeck.exe"
-        & $GoExe build -trimpath -ldflags="$ldflags" -o $outPath ./cmd/pounddeck
+        New-WinResSyso -OutPrefix $sysoPrefix -ProductName "PoundControl" -Description "PoundControl Macro & Stream Deck Studio" -OriginalFilename "poundcontrol.exe"
+        & $GoExe build -trimpath -ldflags="$ldflags" -o $outPath ./cmd/poundcontrol
         if ($LASTEXITCODE -eq 0) {
             Write-Host "[OK] Successfully built $outPath" -ForegroundColor Green
         } else {
-            Write-Error "Failed to build pounddeck.exe."
+            Write-Error "Failed to build poundcontrol.exe."
         }
     } finally {
         Remove-Item $sysoPath -Force -ErrorAction SilentlyContinue
@@ -195,7 +195,7 @@ function Run-Lint {
 
 function Clean-Artifacts {
     Write-Host "`n==> Cleaning build artifacts..." -ForegroundColor Yellow
-    Remove-Item pounddeck.exe -ErrorAction SilentlyContinue
+    Remove-Item poundcontrol.exe -ErrorAction SilentlyContinue
     if (Test-Path $BuildDir) { Remove-Item $BuildDir -Recurse -Force }
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     if (Test-Path "dist") { Remove-Item "dist" -Recurse -Force }
@@ -203,7 +203,7 @@ function Clean-Artifacts {
 }
 
 function Build-Android {
-    Write-Host "`n==> Testing & Building PoundDeck Android Companion APK..." -ForegroundColor Cyan
+    Write-Host "`n==> Testing & Building PoundControl Android Companion APK..." -ForegroundColor Cyan
     $androidDir = Join-Path $PSScriptRoot "mobile\android"
     $gradlew = Join-Path $androidDir "gradlew.bat"
     if (-not (Test-Path $gradlew)) {
@@ -267,7 +267,7 @@ function Build-Android {
         Write-Error "Expected APK not found at $apkSrc."
     }
     if (-not (Test-Path $BinDir)) { New-Item -ItemType Directory -Path $BinDir | Out-Null }
-    $apkOut = Join-Path $BinDir "pounddeck-android.apk"
+    $apkOut = Join-Path $BinDir "poundcontrol-android.apk"
     Copy-Item -Path $apkSrc -Destination $apkOut -Force
     Write-Host "[OK] Successfully built $apkOut" -ForegroundColor Green
 }

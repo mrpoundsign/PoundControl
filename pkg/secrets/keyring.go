@@ -9,8 +9,8 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-// ServiceName is the default OS credential manager service identifier for PoundDeck.
-const ServiceName = "PoundDeck"
+// ServiceName is the default OS credential manager service identifier for PoundControl.
+const ServiceName = "PoundControl"
 
 // ErrNotFound is returned when a requested secret does not exist in any backing store.
 var ErrNotFound = errors.New("secret not found")

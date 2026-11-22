@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# PoundDeck Git Pre-Commit Hook
+# PoundControl Git Pre-Commit Hook
 # Enforces:
 #   1. go fix -diff ./... (0 diff)
 #   2. golangci-lint-v2 run ./... (0 issues)
@@ -10,7 +10,7 @@ set -euo pipefail
 ROOT_DIR="$(git rev-parse --show-toplevel)"
 cd "$ROOT_DIR"
 
-echo "==> [pre-commit] Running PoundDeck Quality Gate..."
+echo "==> [pre-commit] Running PoundControl Quality Gate..."
 
 if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
     if command -v wsl.exe &>/dev/null; then
