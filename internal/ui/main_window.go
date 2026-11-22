@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"strconv"
 	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -42,6 +43,16 @@ var studioGridPresets = []gridPreset{
 	{label: "6×4 (XL)", grid: deck.GridSize{Cols: 6, Rows: 4}},
 	{label: "8×4 (XL+)", grid: deck.GridSize{Cols: 8, Rows: 4}},
 }
+
+const pageHoverFlipDelay = 450 * time.Millisecond
+
+type slotClipMode uint8
+
+const (
+	clipNone slotClipMode = iota
+	clipMove
+	clipCopy
+)
 
 // MainWindow hosts the PoundDeck desktop studio and interactive virtual macro deck.
 type MainWindow struct {
@@ -92,6 +103,34 @@ type MainWindow struct {
 	pairStatusLbl       *widget.Label
 	pairApproveBtn      *widget.Button
 	lastPairedCount     int
+
+	pageStrip    *fyne.Container
+	pageButtons  []*widget.Button
+	pageAddBtn   *widget.Button
+	pageStripKey string
+
+	clipBanner    *fyne.Container
+	clipBannerBg  *canvas.Rectangle
+	clipBannerLbl *widget.Label
+	clipPasteBtn  *widget.Button
+	clipCancelBtn *widget.Button
+
+	clipMode         slotClipMode
+	clipSrcLoc       app.SlotLocation
+	clipSlot         *deck.SlotConfig
+	clipSrcProfileID string
+	clipLabel        string
+	clipController   deck.ControllerType
+
+	dragActive       bool
+	dragSrcLoc       app.SlotLocation
+	hasHoverDropKey  bool
+	hoverDropKey     deck.Coordinates
+	hasHoverDropDial bool
+	hoverDropDial    int
+	hoverPageIdx     int
+	hoverAddPage     bool
+	hoverPageTimer   *time.Timer
 }
 
 // NewMainWindow constructs and initializes the PoundDeck studio window wired to engine.
@@ -107,18 +146,31 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 		selectedSlot:       deck.Coordinates{Row: 0, Col: 0},
 		statusNote:         "Ready",
 		catalogButtons:     make(map[string]*widget.Button),
+		hoverPageIdx:       -1,
 	}
 
 	mw.inspector = NewActionInspector(win, engine, mw.setStatus)
 	mw.inspector.SetOnOpenPluginsSettings(func() {
 		mw.ShowSettingsDialogTab(settingsTabPlugins)
 	})
+	mw.inspector.SetOnMoveSelected(mw.StartMoveSelected)
+	mw.inspector.SetOnCopySelected(mw.CopySelected)
+
 	mw.surface = newDeckSurfaceView(
 		mw.handleKeyTap,
 		mw.handleDialTap,
 		mw.handleDialDelta,
 		mw.handleDialPress,
 	)
+	mw.surface.SetEditHandlers(surfaceEditHandlers{
+		canEdit:         func() bool { return !mw.runMode },
+		onKeySecondary:  mw.handleKeySecondaryTap,
+		onKeyDragMove:   mw.handleTileDragMove,
+		onKeyDragEnd:    mw.handleTileDragEnd,
+		onDialSecondary: mw.handleDialSecondaryTap,
+		onDialDragMove:  mw.handleDialDragMove,
+		onDialDragEnd:   mw.handleDialDragEnd,
+	})
 
 	header := mw.buildHeader()
 	catalog := mw.buildActionCatalog()
@@ -152,6 +204,34 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 			mw.handleRedo()
 		}
 	})
+	mw.addCanvasShortcut(&fyne.ShortcutCut{}, func(s fyne.Shortcut) {
+		if mw.forwardShortcutToFocused(s) || len(mw.win.Canvas().Overlays().List()) > 0 {
+			return
+		}
+		mw.StartMoveSelected()
+	})
+	mw.addCanvasShortcut(&fyne.ShortcutCopy{}, func(s fyne.Shortcut) {
+		if mw.forwardShortcutToFocused(s) || len(mw.win.Canvas().Overlays().List()) > 0 {
+			return
+		}
+		mw.CopySelected()
+	})
+	mw.addCanvasShortcut(&fyne.ShortcutPaste{}, func(s fyne.Shortcut) {
+		if mw.forwardShortcutToFocused(s) || len(mw.win.Canvas().Overlays().List()) > 0 {
+			return
+		}
+		mw.PasteSelected()
+	})
+	mw.addCanvasShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyEscape}, func(fyne.Shortcut) {
+		if len(mw.win.Canvas().Overlays().List()) == 0 && mw.clipMode != clipNone {
+			mw.ClearClipboard()
+		}
+	})
+	win.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) {
+		if ev.Name == fyne.KeyEscape && len(mw.win.Canvas().Overlays().List()) == 0 && mw.clipMode != clipNone {
+			mw.ClearClipboard()
+		}
+	})
 
 	mw.applySnapshot(engine.Snapshot())
 	mw.unsub = engine.Subscribe(func(snap app.Snapshot) {
@@ -161,6 +241,7 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 	})
 
 	win.SetOnClosed(func() {
+		mw.cancelHoverPageTimer()
 		if mw.obsUnsub != nil {
 			mw.obsUnsub()
 			mw.obsUnsub = nil
@@ -246,10 +327,16 @@ func (mw *MainWindow) SetRunMode(run bool) {
 		mw.syncing = false
 	}
 	if run {
+		if mw.clipMode == clipMove || mw.dragActive {
+			mw.clearDragState()
+			if mw.clipMode == clipMove {
+				mw.ClearClipboard()
+			}
+		}
 		mw.deckHint.Text = "Run Mode: clicking tiles triggers actions live"
 		mw.setStatus("Run Mode enabled")
 	} else {
-		mw.deckHint.Text = "Edit Mode: click any slot or dial to inspect & bind actions"
+		mw.deckHint.Text = "Edit Mode: click any slot to inspect, drag to move/swap, right-click for menu"
 		mw.setStatus("Edit Mode enabled")
 	}
 	mw.deckHint.Refresh()
@@ -550,6 +637,9 @@ func (mw *MainWindow) handleUndo() {
 		mw.setStatus("Nothing to undo")
 		return
 	}
+	if mw.clipMode == clipMove {
+		mw.ClearClipboard()
+	}
 	mw.setStatus("Undid: " + label)
 }
 
@@ -563,6 +653,9 @@ func (mw *MainWindow) handleRedo() {
 		mw.setStatus("Nothing to redo")
 		return
 	}
+	if mw.clipMode == clipMove {
+		mw.ClearClipboard()
+	}
 	mw.setStatus("Redid: " + label)
 }
 
@@ -573,16 +666,35 @@ func (mw *MainWindow) assignAction(actionUUID string) {
 		return
 	}
 
+	targetCtrl := mw.selectedController
+	targetCoords := mw.selectedSlot
+	targetDial := mw.selectedDial
+	newActionName := actionUUID
+	if hasDesc && newDesc.Name != "" {
+		newActionName = newDesc.Name
+	}
+
+	if mw.confirmOverwriteSlot(targetCtrl, targetCoords, targetDial, newActionName, func() {
+		mw.performAssignAction(targetCtrl, targetCoords, targetDial, actionUUID)
+	}) {
+		return
+	}
+	mw.performAssignAction(targetCtrl, targetCoords, targetDial, actionUUID)
+}
+
+func (mw *MainWindow) confirmOverwriteSlot(
+	targetCtrl deck.ControllerType,
+	targetCoords deck.Coordinates,
+	targetDial int,
+	newActionName string,
+	onConfirm func(),
+) bool {
 	snap := mw.engine.Snapshot()
 	var (
 		occupied  bool
 		existing  app.RenderedSlot
 		targetLbl string
 	)
-	targetCtrl := mw.selectedController
-	targetCoords := mw.selectedSlot
-	targetDial := mw.selectedDial
-
 	if targetCtrl == deck.ControllerEncoder {
 		existing, occupied = snap.DialSlots[targetDial]
 		occupied = occupied && existing.Config != nil
@@ -592,10 +704,8 @@ func (mw *MainWindow) assignAction(actionUUID string) {
 		occupied = occupied && existing.Config != nil && !existing.AutoBack
 		targetLbl = fmt.Sprintf("Slot (%d, %d)", targetCoords.Row, targetCoords.Col)
 	}
-
 	if !occupied {
-		mw.performAssignAction(targetCtrl, targetCoords, targetDial, actionUUID)
-		return
+		return false
 	}
 
 	curActionName := existing.Config.ActionUUID
@@ -605,11 +715,6 @@ func (mw *MainWindow) assignAction(actionUUID string) {
 	curDesc := curActionName
 	if curTitle := strings.TrimSpace(existing.Config.Title); curTitle != "" && !strings.EqualFold(curTitle, curActionName) {
 		curDesc = fmt.Sprintf("%q (%s)", curTitle, curActionName)
-	}
-
-	newActionName := actionUUID
-	if hasDesc && newDesc.Name != "" {
-		newActionName = newDesc.Name
 	}
 
 	msg := fmt.Sprintf(
@@ -623,13 +728,16 @@ func (mw *MainWindow) assignAction(actionUUID string) {
 			mw.setStatus("Kept existing action")
 			return
 		}
-		mw.performAssignAction(targetCtrl, targetCoords, targetDial, actionUUID)
+		if onConfirm != nil {
+			onConfirm()
+		}
 	}, mw.win)
 	dlg.SetConfirmText("Replace")
 	dlg.SetDismissText("Cancel")
 	dlg.SetConfirmImportance(widget.DangerImportance)
 	mw.confirmDlg = dlg
 	dlg.Show()
+	return true
 }
 
 func (mw *MainWindow) performAssignAction(ctrl deck.ControllerType, coords deck.Coordinates, dial int, actionUUID string) {
@@ -657,6 +765,22 @@ func (mw *MainWindow) handleKeyTap(c deck.Coordinates) {
 		}
 		return
 	}
+	if mw.clipMode == clipMove && mw.clipController == deck.ControllerKeypad {
+		dstLoc := mw.engine.CurrentSlotLocation(deck.ControllerKeypad, c, 0)
+		if mw.locationsEqual(mw.clipSrcLoc, dstLoc) {
+			mw.ClearClipboard()
+			mw.SelectSlot(c)
+			mw.setStatus("Move canceled")
+			return
+		}
+		if err := mw.performMove(mw.clipSrcLoc, dstLoc); err != nil {
+			mw.setStatus(err.Error())
+			return
+		}
+		mw.ClearClipboard()
+		mw.SelectSlot(c)
+		return
+	}
 	mw.SelectSlot(c)
 }
 
@@ -665,6 +789,22 @@ func (mw *MainWindow) handleDialTap(dial int) {
 		if err := mw.engine.PressDial(context.Background(), dial); err != nil {
 			mw.setStatus("Dial error: " + err.Error())
 		}
+		return
+	}
+	if mw.clipMode == clipMove && mw.clipController == deck.ControllerEncoder {
+		dstLoc := mw.engine.CurrentSlotLocation(deck.ControllerEncoder, deck.Coordinates{}, dial)
+		if mw.locationsEqual(mw.clipSrcLoc, dstLoc) {
+			mw.ClearClipboard()
+			mw.SelectDial(dial)
+			mw.setStatus("Move canceled")
+			return
+		}
+		if err := mw.performMove(mw.clipSrcLoc, dstLoc); err != nil {
+			mw.setStatus(err.Error())
+			return
+		}
+		mw.ClearClipboard()
+		mw.SelectDial(dial)
 		return
 	}
 	mw.SelectDial(dial)
@@ -750,7 +890,10 @@ func (mw *MainWindow) applySnapshot(snap app.Snapshot) {
 
 	mw.syncing = false
 
+	mw.syncPageStrip(snap)
 	mw.surface.ApplySnapshot(snap, true, mw.selectedController, mw.selectedSlot, mw.selectedDial)
+	mw.syncSurfaceHighlights()
+	mw.syncClipboardUI()
 	mw.inspector.SetSelection(snap, mw.selectedController, mw.selectedSlot, mw.selectedDial)
 	mw.refreshStatusBar(snap)
 }
@@ -956,8 +1099,28 @@ func (mw *MainWindow) buildDeckCenter() fyne.CanvasObject {
 	mw.deckTitle.TextSize = 14
 	mw.deckTitle.TextStyle = fyne.TextStyle{Bold: true}
 
-	mw.deckHint = canvas.NewText("Edit Mode: click any slot or dial to inspect & bind actions", ColorSecondarySlate)
+	mw.deckHint = canvas.NewText("Edit Mode: click any slot to inspect, drag to move/swap, right-click for menu", ColorSecondarySlate)
 	mw.deckHint.TextSize = 11
+
+	mw.clipBannerBg = canvas.NewRectangle(ColorElevatedSlate)
+	mw.clipBannerBg.CornerRadius = 8
+	mw.clipBannerBg.StrokeColor = ColorSkyBlue
+	mw.clipBannerBg.StrokeWidth = 1.5
+	mw.clipBannerLbl = widget.NewLabel("")
+	mw.clipBannerLbl.Wrapping = fyne.TextWrapWord
+	mw.clipPasteBtn = widget.NewButton("Paste Here", func() {
+		mw.PasteSelected()
+	})
+	mw.clipPasteBtn.Importance = widget.HighImportance
+	mw.clipPasteBtn.Hide()
+	mw.clipCancelBtn = widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), func() {
+		mw.ClearClipboard()
+	})
+	clipRow := container.NewBorder(nil, nil, nil, container.NewHBox(mw.clipPasteBtn, mw.clipCancelBtn), mw.clipBannerLbl)
+	mw.clipBanner = container.NewStack(mw.clipBannerBg, container.NewPadded(clipRow))
+	mw.clipBanner.Hide()
+
+	mw.pageStrip = container.NewHBox()
 
 	padFrameBg := canvas.NewRectangle(color.RGBA{R: 15, G: 17, B: 21, A: 255})
 	padFrameBg.CornerRadius = 14
@@ -966,6 +1129,8 @@ func (mw *MainWindow) buildDeckCenter() fyne.CanvasObject {
 
 	padBody := container.NewVBox(
 		container.NewHBox(mw.deckTitle, layout.NewSpacer(), mw.deckHint),
+		mw.clipBanner,
+		mw.pageStrip,
 		widget.NewSeparator(),
 		mw.surface.Object(),
 	)
@@ -976,6 +1141,709 @@ func (mw *MainWindow) buildDeckCenter() fyne.CanvasObject {
 
 	canvasBg := canvas.NewRectangle(ColorObsidianSlate)
 	return container.NewStack(canvasBg, container.NewScroll(centered))
+}
+
+func (mw *MainWindow) forwardShortcutToFocused(s fyne.Shortcut) bool {
+	if mw.win == nil || mw.win.Canvas() == nil {
+		return false
+	}
+	if foc := mw.win.Canvas().Focused(); foc != nil {
+		if target, ok := foc.(fyne.Shortcutable); ok {
+			target.TypedShortcut(s)
+			return true
+		}
+	}
+	return false
+}
+
+// StartMoveSelected enters Move pick-target mode for the currently selected button or dial.
+func (mw *MainWindow) StartMoveSelected() {
+	if mw.runMode {
+		return
+	}
+	mw.startMoveAt(mw.selectedController, mw.selectedSlot, mw.selectedDial)
+}
+
+// CopySelected copies the currently selected button or dial onto Studio's internal clipboard for cross-page/folder/profile pasting.
+func (mw *MainWindow) CopySelected() {
+	if mw.runMode {
+		return
+	}
+	mw.copyAt(mw.selectedController, mw.selectedSlot, mw.selectedDial)
+}
+
+// PasteSelected applies the active Move or Copy clipboard onto the currently selected destination slot.
+func (mw *MainWindow) PasteSelected() {
+	if mw.runMode || mw.clipMode == clipNone {
+		return
+	}
+	dstLoc := mw.engine.CurrentSlotLocation(mw.selectedController, mw.selectedSlot, mw.selectedDial)
+	switch mw.clipMode {
+	case clipMove:
+		if mw.clipController != mw.selectedController {
+			mw.setStatus(fmt.Sprintf("Cannot move %s into %s slot", mw.clipController, mw.selectedController))
+			return
+		}
+		if mw.locationsEqual(mw.clipSrcLoc, dstLoc) {
+			mw.ClearClipboard()
+			return
+		}
+		if err := mw.performMove(mw.clipSrcLoc, dstLoc); err != nil {
+			mw.setStatus(err.Error())
+			return
+		}
+		mw.ClearClipboard()
+	case clipCopy:
+		if mw.clipSlot == nil {
+			return
+		}
+		slotCopy := mw.clipSlot.Clone()
+		srcProfID := mw.clipSrcProfileID
+		label := mw.clipLabel
+		if desc, ok := mw.engine.Registry().Action(slotCopy.ActionUUID); ok && !desc.SupportsController(dstLoc.Controller) {
+			mw.performPaste(slotCopy, srcProfID, label, dstLoc)
+			return
+		}
+		pasteDesc := "copied action"
+		if strings.TrimSpace(label) != "" {
+			pasteDesc = fmt.Sprintf("copied %q", label)
+		}
+		if mw.confirmOverwriteSlot(mw.selectedController, mw.selectedSlot, mw.selectedDial, pasteDesc, func() {
+			mw.performPaste(slotCopy, srcProfID, label, dstLoc)
+		}) {
+			return
+		}
+		mw.performPaste(slotCopy, srcProfID, label, dstLoc)
+	}
+}
+
+func (mw *MainWindow) performPaste(slot *deck.SlotConfig, srcProfileID, label string, dstLoc app.SlotLocation) {
+	if _, err := mw.engine.PasteSlotConfig(slot, srcProfileID, dstLoc); err != nil {
+		mw.setStatus("Paste failed: " + err.Error())
+		return
+	}
+	mw.setStatus("Pasted " + label)
+}
+
+// ClearClipboard cancels Move mode or clears any copied button/dial from Studio's clipboard.
+func (mw *MainWindow) ClearClipboard() {
+	mw.clipMode = clipNone
+	mw.clipSrcLoc = app.SlotLocation{}
+	mw.clipSlot = nil
+	mw.clipSrcProfileID = ""
+	mw.clipLabel = ""
+	mw.clipController = ""
+	mw.syncClipboardUI()
+	mw.syncSurfaceHighlights()
+}
+
+func (mw *MainWindow) slotLookup(snap app.Snapshot, ctrl deck.ControllerType, coords deck.Coordinates, dial int) (app.RenderedSlot, bool) {
+	if ctrl == deck.ControllerEncoder {
+		r, ok := snap.DialSlots[dial]
+		return r, ok && r.Config != nil
+	}
+	r, ok := snap.Slots[coords.SlotKey()]
+	if !ok || r.AutoBack || r.Config == nil {
+		return app.RenderedSlot{}, false
+	}
+	return r, true
+}
+
+func slotDisplayLabel(r app.RenderedSlot) string {
+	if title := strings.TrimSpace(r.Visual.Title); title != "" {
+		return title
+	}
+	if r.Config != nil && strings.TrimSpace(r.Config.Title) != "" {
+		return strings.TrimSpace(r.Config.Title)
+	}
+	if r.Action != nil && r.Action.Name != "" {
+		return r.Action.Name
+	}
+	if r.Config != nil {
+		return r.Config.ActionUUID
+	}
+	return "Action"
+}
+
+func (mw *MainWindow) startMoveAt(ctrl deck.ControllerType, coords deck.Coordinates, dial int) {
+	snap := mw.engine.Snapshot()
+	rendered, ok := mw.slotLookup(snap, ctrl, coords, dial)
+	if !ok || rendered.Config == nil {
+		mw.setStatus("Select an assigned button or dial to move")
+		return
+	}
+	mw.clipMode = clipMove
+	mw.clipController = ctrl
+	mw.clipSrcLoc = mw.engine.CurrentSlotLocation(ctrl, coords, dial)
+	mw.clipSlot = rendered.Config.Clone()
+	mw.clipSrcProfileID = snap.ActiveProfileID
+	mw.clipLabel = slotDisplayLabel(rendered)
+	mw.syncClipboardUI()
+	mw.syncSurfaceHighlights()
+	mw.setStatus("Moving " + mw.clipLabel + " — click destination slot or switch page/folder")
+}
+
+func (mw *MainWindow) copyAt(ctrl deck.ControllerType, coords deck.Coordinates, dial int) {
+	snap := mw.engine.Snapshot()
+	rendered, ok := mw.slotLookup(snap, ctrl, coords, dial)
+	if !ok || rendered.Config == nil {
+		mw.setStatus("Select an assigned button or dial to copy")
+		return
+	}
+	mw.clipMode = clipCopy
+	mw.clipController = ctrl
+	mw.clipSrcLoc = mw.engine.CurrentSlotLocation(ctrl, coords, dial)
+	mw.clipSlot = rendered.Config.Clone()
+	mw.clipSrcProfileID = snap.ActiveProfileID
+	mw.clipLabel = slotDisplayLabel(rendered)
+	mw.syncClipboardUI()
+	mw.syncSurfaceHighlights()
+	mw.setStatus("Copied " + mw.clipLabel + " (press Ctrl+V on any page, folder, or profile)")
+}
+
+func (mw *MainWindow) performMove(src, dst app.SlotLocation) error {
+	swapped, err := mw.engine.MoveSlot(src, dst)
+	if err != nil {
+		return err
+	}
+	if swapped {
+		mw.setStatus("Swapped slots")
+	} else {
+		mw.setStatus("Moved slot")
+	}
+	return nil
+}
+
+func (mw *MainWindow) locationsEqual(a, b app.SlotLocation) bool {
+	if a.ProfileID != b.ProfileID || a.FolderID != b.FolderID || a.Controller != b.Controller {
+		return false
+	}
+	if a.FolderID == "" && a.PageIndex != b.PageIndex {
+		return false
+	}
+	if a.Controller == deck.ControllerEncoder {
+		return a.Dial == b.Dial
+	}
+	return a.Coords == b.Coords
+}
+
+func (mw *MainWindow) isLocationVisible(snap app.Snapshot, loc app.SlotLocation) bool {
+	if loc.ProfileID != snap.ActiveProfileID {
+		return false
+	}
+	if snap.InFolder {
+		return loc.FolderID != "" && loc.FolderID == snap.ActiveFolderID
+	}
+	return loc.FolderID == "" && loc.PageIndex == snap.PageIndex
+}
+
+func (mw *MainWindow) syncClipboardUI() {
+	if mw.clipBanner == nil {
+		return
+	}
+	switch mw.clipMode {
+	case clipMove:
+		mw.clipBannerBg.StrokeColor = ColorWarning
+		locDesc := fmt.Sprintf("Page %d (%d,%d)", mw.clipSrcLoc.PageIndex+1, mw.clipSrcLoc.Coords.Row, mw.clipSrcLoc.Coords.Col)
+		if mw.clipSrcLoc.FolderID != "" {
+			locDesc = fmt.Sprintf("Folder (%d,%d)", mw.clipSrcLoc.Coords.Row, mw.clipSrcLoc.Coords.Col)
+		}
+		if mw.clipController == deck.ControllerEncoder {
+			locDesc = fmt.Sprintf("Dial %d", mw.clipSrcLoc.Dial+1)
+		}
+		mw.clipBannerLbl.SetText(fmt.Sprintf("Moving %q from %s — click destination slot on any page, folder, or profile (Esc to cancel)", mw.clipLabel, locDesc))
+		mw.clipCancelBtn.SetText("Cancel")
+		mw.clipPasteBtn.Hide()
+		mw.clipBanner.Show()
+	case clipCopy:
+		mw.clipBannerBg.StrokeColor = ColorSkyBlue
+		mw.clipBannerLbl.SetText(fmt.Sprintf("Copied %q — select any slot (any page, folder, or profile) and press Ctrl+V", mw.clipLabel))
+		mw.clipCancelBtn.SetText("Clear")
+		mw.clipPasteBtn.Show()
+		mw.clipBanner.Show()
+	default:
+		mw.clipBanner.Hide()
+	}
+	mw.clipBanner.Refresh()
+}
+
+func (mw *MainWindow) syncSurfaceHighlights() {
+	if mw.surface == nil {
+		return
+	}
+	var (
+		hasMoveKey  bool
+		moveKey     deck.Coordinates
+		hasMoveDial bool
+		moveDial    int
+	)
+	if mw.clipMode == clipMove && mw.isLocationVisible(mw.lastSnap, mw.clipSrcLoc) {
+		if mw.clipSrcLoc.Controller == deck.ControllerEncoder {
+			hasMoveDial = true
+			moveDial = mw.clipSrcLoc.Dial
+		} else {
+			hasMoveKey = true
+			moveKey = mw.clipSrcLoc.Coords
+		}
+	}
+	if mw.dragActive && mw.isLocationVisible(mw.lastSnap, mw.dragSrcLoc) {
+		if mw.dragSrcLoc.Controller == deck.ControllerEncoder {
+			hasMoveDial = true
+			moveDial = mw.dragSrcLoc.Dial
+		} else {
+			hasMoveKey = true
+			moveKey = mw.dragSrcLoc.Coords
+		}
+	}
+	mw.surface.SetMoveHighlights(
+		hasMoveKey, moveKey,
+		hasMoveDial, moveDial,
+		mw.dragActive && mw.hasHoverDropKey, mw.hoverDropKey,
+		mw.dragActive && mw.hasHoverDropDial, mw.hoverDropDial,
+	)
+}
+
+func (mw *MainWindow) syncPageStrip(snap app.Snapshot) {
+	if mw.pageStrip == nil {
+		return
+	}
+	key := fmt.Sprintf("f=%v|%s|%s", snap.InFolder, strings.Join(snap.FolderPath, "/"), strings.Join(snap.PageNames, "|"))
+	if key == mw.pageStripKey {
+		mw.refreshPageButtonImportance(snap)
+		return
+	}
+	mw.pageStripKey = key
+
+	if snap.InFolder {
+		mw.pageButtons = nil
+		mw.pageAddBtn = nil
+		folderBtn := widget.NewButton("← Exit Folder ("+strings.Join(snap.FolderPath, " / ")+")", func() {
+			_ = mw.engine.CloseFolder()
+		})
+		hint := widget.NewLabel("Switch to root pages or cancel Move to pick another location")
+		mw.pageStrip.Objects = []fyne.CanvasObject{folderBtn, hint}
+		mw.pageStrip.Refresh()
+		return
+	}
+
+	pageNames := snap.PageNames
+	if len(pageNames) == 0 {
+		pageNames = []string{"Page 1"}
+	}
+	btns := make([]*widget.Button, len(pageNames))
+	objs := make([]fyne.CanvasObject, 0, len(pageNames)+1)
+	for i, name := range pageNames {
+		pageNum := i + 1
+		b := widget.NewButton(name, func() {
+			if err := mw.engine.GoToPage(pageNum); err != nil {
+				mw.setStatus("Page switch failed: " + err.Error())
+			}
+		})
+		btns[i] = b
+		objs = append(objs, b)
+	}
+	addBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
+		if _, err := mw.engine.AddPage(""); err != nil {
+			mw.setStatus("Add page failed: " + err.Error())
+		}
+	})
+	objs = append(objs, addBtn)
+
+	mw.pageButtons = btns
+	mw.pageAddBtn = addBtn
+	mw.refreshPageButtonImportance(snap)
+	mw.pageStrip.Objects = objs
+	mw.pageStrip.Refresh()
+}
+
+func (mw *MainWindow) refreshPageButtonImportance(snap app.Snapshot) {
+	for i, b := range mw.pageButtons {
+		if b == nil {
+			continue
+		}
+		var want widget.Importance
+		switch {
+		case mw.dragActive && mw.hoverPageIdx == i:
+			want = widget.WarningImportance
+		case !snap.InFolder && i == snap.PageIndex:
+			want = widget.HighImportance
+		default:
+			want = widget.MediumImportance
+		}
+		if b.Importance != want {
+			b.Importance = want
+			b.Refresh()
+		}
+	}
+	if mw.pageAddBtn != nil {
+		want := widget.MediumImportance
+		if mw.dragActive && mw.hoverAddPage {
+			want = widget.WarningImportance
+		}
+		if mw.pageAddBtn.Importance != want {
+			mw.pageAddBtn.Importance = want
+			mw.pageAddBtn.Refresh()
+		}
+	}
+}
+
+func (mw *MainWindow) pagePillAtPosition(absPos fyne.Position) (pageIdx int, isAddPage bool) {
+	curApp := fyne.CurrentApp()
+	if curApp == nil || curApp.Driver() == nil {
+		return -1, false
+	}
+	drv := curApp.Driver()
+	for i, b := range mw.pageButtons {
+		if b == nil {
+			continue
+		}
+		sz := b.Size()
+		if sz.Width <= 0 || sz.Height <= 0 {
+			continue
+		}
+		pos := drv.AbsolutePositionForObject(b)
+		if absPos.X >= pos.X && absPos.X <= pos.X+sz.Width &&
+			absPos.Y >= pos.Y && absPos.Y <= pos.Y+sz.Height {
+			return i, false
+		}
+	}
+	if mw.pageAddBtn != nil {
+		sz := mw.pageAddBtn.Size()
+		if sz.Width > 0 && sz.Height > 0 {
+			pos := drv.AbsolutePositionForObject(mw.pageAddBtn)
+			if absPos.X >= pos.X && absPos.X <= pos.X+sz.Width &&
+				absPos.Y >= pos.Y && absPos.Y <= pos.Y+sz.Height {
+				return -1, true
+			}
+		}
+	}
+	return -1, false
+}
+
+func (mw *MainWindow) cancelHoverPageTimer() {
+	if mw.hoverPageTimer != nil {
+		mw.hoverPageTimer.Stop()
+		mw.hoverPageTimer = nil
+	}
+	mw.hoverPageIdx = -1
+	mw.hoverAddPage = false
+}
+
+func (mw *MainWindow) clearDragState() {
+	mw.dragActive = false
+	mw.dragSrcLoc = app.SlotLocation{}
+	mw.hasHoverDropKey = false
+	mw.hasHoverDropDial = false
+	mw.cancelHoverPageTimer()
+	mw.refreshPageButtonImportance(mw.lastSnap)
+	mw.syncSurfaceHighlights()
+}
+
+func (mw *MainWindow) handleTileDragMove(srcCoords deck.Coordinates, absPos fyne.Position) {
+	if mw.runMode {
+		return
+	}
+	if !mw.dragActive {
+		if _, ok := mw.slotLookup(mw.lastSnap, deck.ControllerKeypad, srcCoords, 0); !ok {
+			return
+		}
+		mw.dragActive = true
+		mw.dragSrcLoc = mw.engine.CurrentSlotLocation(deck.ControllerKeypad, srcCoords, 0)
+	}
+
+	if targetCoords, hit := mw.surface.TileAtPosition(absPos); hit {
+		if mw.lastSnap.InFolder && targetCoords == (deck.Coordinates{Row: 0, Col: 0}) {
+			mw.hasHoverDropKey = false
+		} else {
+			mw.hasHoverDropKey = true
+			mw.hoverDropKey = targetCoords
+		}
+		mw.hasHoverDropDial = false
+		mw.cancelHoverPageTimer()
+		mw.refreshPageButtonImportance(mw.lastSnap)
+		mw.syncSurfaceHighlights()
+		return
+	}
+
+	mw.hasHoverDropKey = false
+	mw.hasHoverDropDial = false
+	pageIdx, isAddPage := mw.pagePillAtPosition(absPos)
+	switch {
+	case isAddPage:
+		mw.cancelHoverPageTimer()
+		mw.hoverAddPage = true
+	case pageIdx >= 0:
+		if mw.hoverPageIdx != pageIdx {
+			mw.cancelHoverPageTimer()
+			mw.hoverPageIdx = pageIdx
+			if mw.lastSnap.InFolder || pageIdx != mw.lastSnap.PageIndex {
+				targetIdx := pageIdx
+				mw.hoverPageTimer = time.AfterFunc(pageHoverFlipDelay, func() {
+					dispatchUI(func() {
+						if !mw.dragActive || mw.hoverPageIdx != targetIdx {
+							return
+						}
+						_ = mw.engine.GoToPage(targetIdx + 1)
+					})
+				})
+			}
+		}
+	default:
+		mw.cancelHoverPageTimer()
+	}
+
+	mw.refreshPageButtonImportance(mw.lastSnap)
+	mw.syncSurfaceHighlights()
+}
+
+func (mw *MainWindow) handleTileDragEnd(_ deck.Coordinates, absPos fyne.Position) {
+	if !mw.dragActive {
+		return
+	}
+	srcLoc := mw.dragSrcLoc
+	mw.clearDragState()
+	if mw.runMode {
+		return
+	}
+
+	if dstCoords, hit := mw.surface.TileAtPosition(absPos); hit {
+		dstLoc := mw.engine.CurrentSlotLocation(deck.ControllerKeypad, dstCoords, 0)
+		if mw.locationsEqual(srcLoc, dstLoc) {
+			mw.SelectSlot(dstCoords)
+			return
+		}
+		if err := mw.performMove(srcLoc, dstLoc); err != nil {
+			mw.setStatus(err.Error())
+			return
+		}
+		mw.SelectSlot(dstCoords)
+		return
+	}
+
+	pageIdx, isAddPage := mw.pagePillAtPosition(absPos)
+	switch {
+	case isAddPage:
+		newIdx, dstCoord, err := mw.engine.MoveSlotToNewPage(srcLoc)
+		if err != nil {
+			mw.setStatus("Move to new page failed: " + err.Error())
+			return
+		}
+		mw.setStatus(fmt.Sprintf("Moved to Page %d (%d, %d)", newIdx+1, dstCoord.Row, dstCoord.Col))
+	case pageIdx >= 0:
+		dstCoord, err := mw.engine.MoveSlotToPage(srcLoc, pageIdx)
+		if err != nil {
+			mw.setStatus("Move failed: " + err.Error())
+			return
+		}
+		mw.setStatus(fmt.Sprintf("Moved to Page %d (%d, %d)", pageIdx+1, dstCoord.Row, dstCoord.Col))
+	}
+}
+
+func (mw *MainWindow) handleDialDragMove(srcDial int, absPos fyne.Position) {
+	if mw.runMode {
+		return
+	}
+	if !mw.dragActive {
+		if _, ok := mw.slotLookup(mw.lastSnap, deck.ControllerEncoder, deck.Coordinates{}, srcDial); !ok {
+			return
+		}
+		mw.dragActive = true
+		mw.dragSrcLoc = mw.engine.CurrentSlotLocation(deck.ControllerEncoder, deck.Coordinates{}, srcDial)
+	}
+	mw.hasHoverDropKey = false
+	if dstDial, hit := mw.surface.DialAtPosition(absPos); hit {
+		mw.hasHoverDropDial = true
+		mw.hoverDropDial = dstDial
+	} else {
+		mw.hasHoverDropDial = false
+	}
+	mw.syncSurfaceHighlights()
+}
+
+func (mw *MainWindow) handleDialDragEnd(_ int, absPos fyne.Position) {
+	if !mw.dragActive {
+		return
+	}
+	srcLoc := mw.dragSrcLoc
+	mw.clearDragState()
+	if mw.runMode {
+		return
+	}
+	if dstDial, hit := mw.surface.DialAtPosition(absPos); hit {
+		dstLoc := mw.engine.CurrentSlotLocation(deck.ControllerEncoder, deck.Coordinates{}, dstDial)
+		if mw.locationsEqual(srcLoc, dstLoc) {
+			mw.SelectDial(dstDial)
+			return
+		}
+		if err := mw.performMove(srcLoc, dstLoc); err != nil {
+			mw.setStatus(err.Error())
+			return
+		}
+		mw.SelectDial(dstDial)
+	}
+}
+
+func (mw *MainWindow) handleKeySecondaryTap(c deck.Coordinates, absPos fyne.Position) {
+	if mw.runMode || mw.win == nil || mw.win.Canvas() == nil {
+		return
+	}
+	mw.SelectSlot(c)
+	snap := mw.engine.Snapshot()
+	rendered, hasRendered := snap.Slots[c.SlotKey()]
+	if hasRendered && rendered.AutoBack {
+		item := fyne.NewMenuItem("Auto Back Button (Reserved)", nil)
+		item.Disabled = true
+		widget.ShowPopUpMenuAtPosition(fyne.NewMenu("", item), mw.win.Canvas(), absPos)
+		return
+	}
+
+	assigned := hasRendered && rendered.Config != nil
+	var items []*fyne.MenuItem
+	if assigned {
+		srcLoc := mw.engine.CurrentSlotLocation(deck.ControllerKeypad, c, 0)
+		items = append(items,
+			fyne.NewMenuItem("Move (Pick Slot)", func() {
+				mw.startMoveAt(deck.ControllerKeypad, c, 0)
+			}),
+			fyne.NewMenuItem("Copy", func() {
+				mw.copyAt(deck.ControllerKeypad, c, 0)
+			}),
+		)
+
+		pageNames := snap.PageNames
+		if len(pageNames) == 0 {
+			pageNames = []string{"Page 1"}
+		}
+		var pageSub []*fyne.MenuItem
+		for i, name := range pageNames {
+			if !snap.InFolder && i == snap.PageIndex {
+				continue
+			}
+			targetIdx := i
+			pageLabel := name
+			pageSub = append(pageSub, fyne.NewMenuItem(pageLabel+" (first open)", func() {
+				dstCoord, err := mw.engine.MoveSlotToPage(srcLoc, targetIdx)
+				if err != nil {
+					mw.setStatus("Move failed: " + err.Error())
+					return
+				}
+				mw.setStatus(fmt.Sprintf("Moved to %s (%d, %d)", pageLabel, dstCoord.Row, dstCoord.Col))
+			}))
+		}
+		pageSub = append(pageSub, fyne.NewMenuItem("+ Move to New Page", func() {
+			newIdx, dstCoord, err := mw.engine.MoveSlotToNewPage(srcLoc)
+			if err != nil {
+				mw.setStatus("Move failed: " + err.Error())
+				return
+			}
+			mw.setStatus(fmt.Sprintf("Moved to Page %d (%d, %d)", newIdx+1, dstCoord.Row, dstCoord.Col))
+		}))
+		movePageItem := fyne.NewMenuItem("Move to Page", nil)
+		movePageItem.ChildMenu = fyne.NewMenu("", pageSub...)
+		items = append(items, movePageItem)
+
+		var selfFolderID string
+		if rendered.Config.ActionUUID == "com.github.mrpoundsign.pounddeck.core.folder.open" {
+			if fid, ok := rendered.Config.Settings["folderId"].(string); ok && strings.TrimSpace(fid) != "" {
+				selfFolderID = strings.TrimSpace(fid)
+			} else {
+				selfFolderID = rendered.Config.Context
+			}
+		}
+		var folderSub []*fyne.MenuItem
+		for _, f := range snap.Folders {
+			if f.ID == snap.ActiveFolderID || f.ID == selfFolderID {
+				continue
+			}
+			targetFID := f.ID
+			targetName := f.Name
+			folderSub = append(folderSub, fyne.NewMenuItem(targetName, func() {
+				dstCoord, err := mw.engine.MoveSlotToFolder(srcLoc, targetFID)
+				if err != nil {
+					mw.setStatus("Move into folder failed: " + err.Error())
+					return
+				}
+				mw.setStatus(fmt.Sprintf("Moved to folder %s (%d, %d)", targetName, dstCoord.Row, dstCoord.Col))
+			}))
+		}
+		if len(folderSub) > 0 {
+			moveFolderItem := fyne.NewMenuItem("Move into Folder", nil)
+			moveFolderItem.ChildMenu = fyne.NewMenu("", folderSub...)
+			items = append(items, moveFolderItem)
+		}
+	}
+
+	if mw.clipMode != clipNone {
+		label := "Paste Copy Here"
+		if mw.clipMode == clipMove {
+			if assigned {
+				label = "Swap With " + mw.clipLabel
+			} else {
+				label = "Move " + mw.clipLabel + " Here"
+			}
+		}
+		items = append(items, fyne.NewMenuItem(label, func() {
+			mw.PasteSelected()
+		}))
+	}
+
+	if assigned {
+		items = append(items, fyne.NewMenuItemSeparator(), fyne.NewMenuItem("Clear Slot", func() {
+			if err := mw.engine.ClearKeypadSlot(c); err != nil {
+				mw.setStatus("Clear slot failed: " + err.Error())
+			}
+		}))
+	}
+
+	if len(items) == 0 {
+		return
+	}
+	widget.ShowPopUpMenuAtPosition(fyne.NewMenu("", items...), mw.win.Canvas(), absPos)
+}
+
+func (mw *MainWindow) handleDialSecondaryTap(dial int, absPos fyne.Position) {
+	if mw.runMode || mw.win == nil || mw.win.Canvas() == nil {
+		return
+	}
+	mw.SelectDial(dial)
+	snap := mw.engine.Snapshot()
+	_, assigned := mw.slotLookup(snap, deck.ControllerEncoder, deck.Coordinates{}, dial)
+
+	var items []*fyne.MenuItem
+	if assigned {
+		items = append(items,
+			fyne.NewMenuItem("Move Dial", func() {
+				mw.startMoveAt(deck.ControllerEncoder, deck.Coordinates{}, dial)
+			}),
+			fyne.NewMenuItem("Copy Dial", func() {
+				mw.copyAt(deck.ControllerEncoder, deck.Coordinates{}, dial)
+			}),
+		)
+	}
+	if mw.clipMode != clipNone {
+		label := "Paste Copy on Dial"
+		if mw.clipMode == clipMove {
+			if assigned {
+				label = "Swap With " + mw.clipLabel
+			} else {
+				label = "Move " + mw.clipLabel + " Here"
+			}
+		}
+		items = append(items, fyne.NewMenuItem(label, func() {
+			mw.PasteSelected()
+		}))
+	}
+	if assigned {
+		items = append(items, fyne.NewMenuItemSeparator(), fyne.NewMenuItem("Clear Dial", func() {
+			if err := mw.engine.ClearDialSlot(dial); err != nil {
+				mw.setStatus("Clear dial failed: " + err.Error())
+			}
+		}))
+	}
+	if len(items) == 0 {
+		return
+	}
+	widget.ShowPopUpMenuAtPosition(fyne.NewMenu("", items...), mw.win.Canvas(), absPos)
 }
 
 func (mw *MainWindow) buildStatusBar() fyne.CanvasObject {

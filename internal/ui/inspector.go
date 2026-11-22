@@ -43,6 +43,8 @@ type ActionInspector struct {
 	piViewer              PIViewer
 	sdCtrl                SDPluginController
 	onOpenPluginsSettings func()
+	onMoveSelected        func()
+	onCopySelected        func()
 	root                  fyne.CanvasObject
 
 	slotLbl    *widget.Label
@@ -62,6 +64,8 @@ type ActionInspector struct {
 	saveBtn            *widget.Button
 	triggerBtn         *widget.Button
 	clearBtn           *widget.Button
+	moveBtn            *widget.Button
+	copyBtn            *widget.Button
 	lastCapture        *hotkeyCaptureSession
 
 	selCtrl         deck.ControllerType
@@ -105,7 +109,22 @@ func NewActionInspector(win fyne.Window, engine *app.Engine, onStatus func(strin
 	ins.saveBtn.Importance = widget.HighImportance
 	ins.triggerBtn = widget.NewButtonWithIcon("Trigger", theme.MediaPlayIcon(), ins.handleTrigger)
 	ins.clearBtn = widget.NewButtonWithIcon("Clear", theme.DeleteIcon(), ins.handleClear)
-	ins.actionsRow = container.NewGridWithColumns(3, ins.saveBtn, ins.triggerBtn, ins.clearBtn)
+	ins.moveBtn = widget.NewButton("Move...", func() {
+		if ins.onMoveSelected != nil {
+			ins.onMoveSelected()
+		}
+	})
+	ins.moveBtn.Disable()
+	ins.copyBtn = widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
+		if ins.onCopySelected != nil {
+			ins.onCopySelected()
+		}
+	})
+	ins.copyBtn.Disable()
+	ins.actionsRow = container.NewVBox(
+		container.NewGridWithColumns(2, ins.moveBtn, ins.copyBtn),
+		container.NewGridWithColumns(3, ins.saveBtn, ins.triggerBtn, ins.clearBtn),
+	)
 
 	top := container.NewVBox(
 		heading,
@@ -148,6 +167,16 @@ func (ins *ActionInspector) SetSDPluginController(ctrl SDPluginController) {
 // SetOnOpenPluginsSettings registers a callback invoked when the user clicks "Install Node.js in Settings".
 func (ins *ActionInspector) SetOnOpenPluginsSettings(fn func()) {
 	ins.onOpenPluginsSettings = fn
+}
+
+// SetOnMoveSelected registers a callback invoked when the user clicks Move in the inspector.
+func (ins *ActionInspector) SetOnMoveSelected(fn func()) {
+	ins.onMoveSelected = fn
+}
+
+// SetOnCopySelected registers a callback invoked when the user clicks Copy in the inspector.
+func (ins *ActionInspector) SetOnCopySelected(fn func()) {
+	ins.onCopySelected = fn
 }
 
 // InvalidateBinding clears the cached inspector binding so the next SetSelection rebuilds controls cleanly.
@@ -245,6 +274,12 @@ func (ins *ActionInspector) clearForm(title, message string, canTrigger bool) {
 
 	ins.saveBtn.Disable()
 	ins.clearBtn.Disable()
+	if ins.moveBtn != nil {
+		ins.moveBtn.Disable()
+	}
+	if ins.copyBtn != nil {
+		ins.copyBtn.Disable()
+	}
 	if canTrigger {
 		ins.triggerBtn.Enable()
 	} else {
@@ -372,6 +407,12 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 	ins.saveBtn.Enable()
 	ins.triggerBtn.Enable()
 	ins.clearBtn.Enable()
+	if ins.moveBtn != nil {
+		ins.moveBtn.Enable()
+	}
+	if ins.copyBtn != nil {
+		ins.copyBtn.Enable()
+	}
 }
 
 func (ins *ActionInspector) buildSchemaField(field plugin.SettingField, settings map[string]any) []fyne.CanvasObject {

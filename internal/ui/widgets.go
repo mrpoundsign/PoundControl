@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
 	"strconv"
 	"strings"
 
@@ -38,26 +39,54 @@ func parseHexColor(hex string, fallback color.RGBA) color.RGBA {
 	}
 }
 
+const dragActivationThresholdPx = 10
+
+func widgetAbsolutePos(obj fyne.CanvasObject, local, fallbackAbs fyne.Position) fyne.Position {
+	if !fallbackAbs.IsZero() {
+		return fallbackAbs
+	}
+	if curApp := fyne.CurrentApp(); curApp != nil {
+		if drv := curApp.Driver(); drv != nil {
+			return drv.AbsolutePositionForObject(obj).Add(local)
+		}
+	}
+	return local
+}
+
 type deckTileWidget struct {
 	widget.BaseWidget
-	coords     deck.Coordinates
-	title      string
-	subtitle   string
-	hotkey     string
-	accentHex  string
-	flash      string
-	imageURI   string
-	decodedImg image.Image
-	assigned   bool
-	autoBack   bool
+	coords         deck.Coordinates
+	title          string
+	subtitle       string
+	hotkey         string
+	accentHex      string
+	flash          string
+	imageURI       string
+	decodedImg     image.Image
+	assigned       bool
+	autoBack       bool
 	selected   bool
 	hovered    bool
-	onTapped   func(deck.Coordinates)
+	dropTarget bool
+	moveSource bool
+
+	dragAccumX  float32
+	dragAccumY  float32
+	dragActive  bool
+	dragLastAbs fyne.Position
+
+	canDrag        func() bool
+	onTapped       func(deck.Coordinates)
+	onSecondaryTap func(deck.Coordinates, fyne.Position)
+	onDragMove     func(deck.Coordinates, fyne.Position)
+	onDragEnd      func(deck.Coordinates, fyne.Position)
 }
 
 var (
-	_ fyne.Tappable     = (*deckTileWidget)(nil)
-	_ desktop.Hoverable = (*deckTileWidget)(nil)
+	_ fyne.Tappable          = (*deckTileWidget)(nil)
+	_ fyne.SecondaryTappable = (*deckTileWidget)(nil)
+	_ fyne.Draggable         = (*deckTileWidget)(nil)
+	_ desktop.Hoverable      = (*deckTileWidget)(nil)
 )
 
 func newDeckTileWidget(coords deck.Coordinates, onTapped func(deck.Coordinates)) *deckTileWidget {
@@ -120,6 +149,43 @@ func (t *deckTileWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 func (t *deckTileWidget) Tapped(*fyne.PointEvent) {
 	if t.onTapped != nil {
 		t.onTapped(t.coords)
+	}
+}
+
+func (t *deckTileWidget) TappedSecondary(ev *fyne.PointEvent) {
+	if t.onSecondaryTap != nil {
+		t.onSecondaryTap(t.coords, widgetAbsolutePos(t, ev.Position, ev.AbsolutePosition))
+	}
+}
+
+func (t *deckTileWidget) Dragged(ev *fyne.DragEvent) {
+	if t.onDragMove == nil {
+		return
+	}
+	abs := widgetAbsolutePos(t, ev.Position, ev.AbsolutePosition)
+	t.dragLastAbs = abs
+	if !t.dragActive {
+		if !t.assigned || t.autoBack || (t.canDrag != nil && !t.canDrag()) {
+			return
+		}
+		t.dragAccumX += ev.Dragged.DX
+		t.dragAccumY += ev.Dragged.DY
+		if math.Hypot(float64(t.dragAccumX), float64(t.dragAccumY)) < dragActivationThresholdPx {
+			return
+		}
+		t.dragActive = true
+	}
+	t.onDragMove(t.coords, abs)
+}
+
+func (t *deckTileWidget) DragEnd() {
+	wasActive := t.dragActive
+	abs := t.dragLastAbs
+	t.dragAccumX = 0
+	t.dragAccumY = 0
+	t.dragActive = false
+	if wasActive && t.onDragEnd != nil {
+		t.onDragEnd(t.coords, abs)
 	}
 }
 
@@ -307,6 +373,18 @@ func (r *deckTileRenderer) Refresh() {
 	}
 
 	switch {
+	case r.tile.dropTarget:
+		r.bg.FillColor = ColorElevatedSlate
+		r.bg.StrokeColor = ColorSkyBlue
+		r.bg.StrokeWidth = 3.0
+		r.titleTxt.Color = ColorChromeWhite
+		r.coordTxt.Color = ColorSkyBlue
+	case r.tile.moveSource:
+		r.bg.FillColor = ColorElevatedSlate
+		r.bg.StrokeColor = ColorWarning
+		r.bg.StrokeWidth = 2.5
+		r.titleTxt.Color = ColorChromeWhite
+		r.coordTxt.Color = ColorWarning
 	case r.tile.selected:
 		r.bg.FillColor = ColorElevatedSlate
 		r.bg.StrokeColor = ColorSkyBlue
@@ -363,23 +441,37 @@ func (r *deckTileRenderer) Destroy() {}
 
 type dialFaceWidget struct {
 	widget.BaseWidget
-	index        int
-	title        string
-	value        string
-	accentHex    string
-	hasIndicator bool
-	indicatorPct float64
+	index          int
+	title          string
+	value          string
+	accentHex      string
+	hasIndicator   bool
+	indicatorPct   float64
 	assigned     bool
 	selected     bool
 	hovered      bool
-	onTapped     func(int)
-	onScroll     func(int, int)
+	dropTarget   bool
+	moveSource   bool
+
+	dragAccumX  float32
+	dragAccumY  float32
+	dragActive  bool
+	dragLastAbs fyne.Position
+
+	canDrag        func() bool
+	onTapped       func(int)
+	onScroll       func(int, int)
+	onSecondaryTap func(int, fyne.Position)
+	onDragMove     func(int, fyne.Position)
+	onDragEnd      func(int, fyne.Position)
 }
 
 var (
-	_ fyne.Tappable     = (*dialFaceWidget)(nil)
-	_ fyne.Scrollable   = (*dialFaceWidget)(nil)
-	_ desktop.Hoverable = (*dialFaceWidget)(nil)
+	_ fyne.Tappable          = (*dialFaceWidget)(nil)
+	_ fyne.SecondaryTappable = (*dialFaceWidget)(nil)
+	_ fyne.Draggable         = (*dialFaceWidget)(nil)
+	_ fyne.Scrollable        = (*dialFaceWidget)(nil)
+	_ desktop.Hoverable      = (*dialFaceWidget)(nil)
 )
 
 func newDialFaceWidget(index int, onTapped func(int), onScroll func(int, int)) *dialFaceWidget {
@@ -471,6 +563,43 @@ func parseDialIndicator(raw any) (float64, bool) {
 func (d *dialFaceWidget) Tapped(*fyne.PointEvent) {
 	if d.onTapped != nil {
 		d.onTapped(d.index)
+	}
+}
+
+func (d *dialFaceWidget) TappedSecondary(ev *fyne.PointEvent) {
+	if d.onSecondaryTap != nil {
+		d.onSecondaryTap(d.index, widgetAbsolutePos(d, ev.Position, ev.AbsolutePosition))
+	}
+}
+
+func (d *dialFaceWidget) Dragged(ev *fyne.DragEvent) {
+	if d.onDragMove == nil {
+		return
+	}
+	abs := widgetAbsolutePos(d, ev.Position, ev.AbsolutePosition)
+	d.dragLastAbs = abs
+	if !d.dragActive {
+		if !d.assigned || (d.canDrag != nil && !d.canDrag()) {
+			return
+		}
+		d.dragAccumX += ev.Dragged.DX
+		d.dragAccumY += ev.Dragged.DY
+		if math.Hypot(float64(d.dragAccumX), float64(d.dragAccumY)) < dragActivationThresholdPx {
+			return
+		}
+		d.dragActive = true
+	}
+	d.onDragMove(d.index, abs)
+}
+
+func (d *dialFaceWidget) DragEnd() {
+	wasActive := d.dragActive
+	abs := d.dragLastAbs
+	d.dragAccumX = 0
+	d.dragAccumY = 0
+	d.dragActive = false
+	if wasActive && d.onDragEnd != nil {
+		d.onDragEnd(d.index, abs)
 	}
 }
 
@@ -614,6 +743,14 @@ func (r *dialFaceRenderer) Refresh() {
 	r.indFill.FillColor = ringColor
 
 	switch {
+	case r.face.dropTarget:
+		r.bg.FillColor = ColorElevatedSlate
+		r.bg.StrokeColor = ColorSkyBlue
+		r.bg.StrokeWidth = 3.0
+	case r.face.moveSource:
+		r.bg.FillColor = ColorElevatedSlate
+		r.bg.StrokeColor = ColorWarning
+		r.bg.StrokeWidth = 2.5
 	case r.face.selected:
 		r.bg.FillColor = ColorElevatedSlate
 		r.bg.StrokeColor = ColorSkyBlue
@@ -659,6 +796,16 @@ type dialControl struct {
 	plusBtn  *widget.Button
 }
 
+type surfaceEditHandlers struct {
+	canEdit         func() bool
+	onKeySecondary  func(deck.Coordinates, fyne.Position)
+	onKeyDragMove   func(deck.Coordinates, fyne.Position)
+	onKeyDragEnd    func(deck.Coordinates, fyne.Position)
+	onDialSecondary func(int, fyne.Position)
+	onDialDragMove  func(int, fyne.Position)
+	onDialDragEnd   func(int, fyne.Position)
+}
+
 type deckSurfaceView struct {
 	root       *fyne.Container
 	gridHost   *fyne.Container
@@ -673,6 +820,7 @@ type deckSurfaceView struct {
 	onDialTap   func(int)
 	onDialDelta func(int, int)
 	onDialPress func(int)
+	edit        surfaceEditHandlers
 }
 
 func newDeckSurfaceView(
@@ -698,6 +846,138 @@ func newDeckSurfaceView(
 		onDialTap:   onDialTap,
 		onDialDelta: onDialDelta,
 		onDialPress: onDialPress,
+	}
+}
+
+// SetEditHandlers attaches optional Studio editing gestures (right-click & drag-and-drop) onto all tiles and dials.
+func (v *deckSurfaceView) SetEditHandlers(h surfaceEditHandlers) {
+	v.edit = h
+	for _, tile := range v.tiles {
+		v.bindTileEdit(tile)
+	}
+	for _, dc := range v.dials {
+		v.bindDialEdit(dc.face)
+	}
+}
+
+func (v *deckSurfaceView) editingActive() bool {
+	return v.edit.canEdit == nil || v.edit.canEdit()
+}
+
+func (v *deckSurfaceView) bindTileEdit(tile *deckTileWidget) {
+	if tile == nil {
+		return
+	}
+	tile.canDrag = v.editingActive
+	tile.onSecondaryTap = func(c deck.Coordinates, abs fyne.Position) {
+		if v.editingActive() && v.edit.onKeySecondary != nil {
+			v.edit.onKeySecondary(c, abs)
+		}
+	}
+	tile.onDragMove = func(c deck.Coordinates, abs fyne.Position) {
+		if v.editingActive() && v.edit.onKeyDragMove != nil {
+			v.edit.onKeyDragMove(c, abs)
+		}
+	}
+	tile.onDragEnd = func(c deck.Coordinates, abs fyne.Position) {
+		if v.editingActive() && v.edit.onKeyDragEnd != nil {
+			v.edit.onKeyDragEnd(c, abs)
+		}
+	}
+}
+
+func (v *deckSurfaceView) bindDialEdit(face *dialFaceWidget) {
+	if face == nil {
+		return
+	}
+	face.canDrag = v.editingActive
+	face.onSecondaryTap = func(idx int, abs fyne.Position) {
+		if v.editingActive() && v.edit.onDialSecondary != nil {
+			v.edit.onDialSecondary(idx, abs)
+		}
+	}
+	face.onDragMove = func(idx int, abs fyne.Position) {
+		if v.editingActive() && v.edit.onDialDragMove != nil {
+			v.edit.onDialDragMove(idx, abs)
+		}
+	}
+	face.onDragEnd = func(idx int, abs fyne.Position) {
+		if v.editingActive() && v.edit.onDialDragEnd != nil {
+			v.edit.onDialDragEnd(idx, abs)
+		}
+	}
+}
+
+// TileAtPosition returns the keypad tile overlapping canvas position absPos, if any.
+func (v *deckSurfaceView) TileAtPosition(absPos fyne.Position) (deck.Coordinates, bool) {
+	curApp := fyne.CurrentApp()
+	if curApp == nil || curApp.Driver() == nil {
+		return deck.Coordinates{}, false
+	}
+	drv := curApp.Driver()
+	for _, tile := range v.tiles {
+		sz := tile.Size()
+		if sz.Width <= 0 || sz.Height <= 0 {
+			continue
+		}
+		pos := drv.AbsolutePositionForObject(tile)
+		if absPos.X >= pos.X && absPos.X <= pos.X+sz.Width &&
+			absPos.Y >= pos.Y && absPos.Y <= pos.Y+sz.Height {
+			return tile.coords, true
+		}
+	}
+	return deck.Coordinates{}, false
+}
+
+// DialAtPosition returns the encoder dial overlapping canvas position absPos, if any.
+func (v *deckSurfaceView) DialAtPosition(absPos fyne.Position) (int, bool) {
+	curApp := fyne.CurrentApp()
+	if curApp == nil || curApp.Driver() == nil {
+		return 0, false
+	}
+	drv := curApp.Driver()
+	for _, dc := range v.dials {
+		sz := dc.face.Size()
+		if sz.Width <= 0 || sz.Height <= 0 {
+			continue
+		}
+		pos := drv.AbsolutePositionForObject(dc.face)
+		if absPos.X >= pos.X && absPos.X <= pos.X+sz.Width &&
+			absPos.Y >= pos.Y && absPos.Y <= pos.Y+sz.Height {
+			return dc.face.index, true
+		}
+	}
+	return 0, false
+}
+
+// SetMoveHighlights updates move-source and drag-drop highlight rings across keypad tiles and dials.
+func (v *deckSurfaceView) SetMoveHighlights(
+	hasMoveKey bool,
+	moveKey deck.Coordinates,
+	hasMoveDial bool,
+	moveDial int,
+	hasDropKey bool,
+	dropKey deck.Coordinates,
+	hasDropDial bool,
+	dropDial int,
+) {
+	for _, tile := range v.tiles {
+		wantMove := hasMoveKey && tile.coords == moveKey
+		wantDrop := hasDropKey && tile.coords == dropKey
+		if tile.moveSource != wantMove || tile.dropTarget != wantDrop {
+			tile.moveSource = wantMove
+			tile.dropTarget = wantDrop
+			tile.Refresh()
+		}
+	}
+	for _, dc := range v.dials {
+		wantMove := hasMoveDial && dc.face.index == moveDial
+		wantDrop := hasDropDial && dc.face.index == dropDial
+		if dc.face.moveSource != wantMove || dc.face.dropTarget != wantDrop {
+			dc.face.moveSource = wantMove
+			dc.face.dropTarget = wantDrop
+			dc.face.Refresh()
+		}
 	}
 }
 
@@ -755,6 +1035,7 @@ func (v *deckSurfaceView) rebuildGeometry(grid deck.GridSize, dials int) {
 		for col := range grid.Cols {
 			c := deck.Coordinates{Row: row, Col: col}
 			tile := newDeckTileWidget(c, v.onKeyTap)
+			v.bindTileEdit(tile)
 			v.tiles[c.SlotKey()] = tile
 			gridBox.Add(tile)
 		}
@@ -779,6 +1060,7 @@ func (v *deckSurfaceView) rebuildGeometry(grid deck.GridSize, dials int) {
 	for i := range dials {
 		idx := i
 		face := newDialFaceWidget(idx, v.onDialTap, v.onDialDelta)
+		v.bindDialEdit(face)
 		minusBtn := widget.NewButton("-", func() {
 			if v.onDialDelta != nil {
 				v.onDialDelta(idx, -1)

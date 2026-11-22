@@ -2,11 +2,13 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -42,6 +44,12 @@ type ProfileSummary struct {
 	PageCount int           `json:"pageCount"`
 }
 
+// FolderSummary describes a configured sub-deck folder in the active profile.
+type FolderSummary struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 // Snapshot is an immutable point-in-time view of the active deck state for UI and remote surfaces.
 type Snapshot struct {
 	Profiles          []ProfileSummary        `json:"profiles"`
@@ -52,7 +60,10 @@ type Snapshot struct {
 	PageIndex         int                     `json:"pageIndex"`
 	PageCount         int                     `json:"pageCount"`
 	PageName          string                  `json:"pageName"`
+	PageNames         []string                `json:"pageNames,omitempty"`
 	FolderPath        []string                `json:"folderPath,omitempty"`
+	ActiveFolderID    string                  `json:"activeFolderId,omitempty"`
+	Folders           []FolderSummary         `json:"folders,omitempty"`
 	InFolder          bool                    `json:"inFolder"`
 	Slots             map[string]RenderedSlot `json:"slots"`
 	DialSlots         map[int]RenderedSlot    `json:"dialSlots"`
@@ -65,7 +76,10 @@ type Snapshot struct {
 	HistoryRevision   uint64                  `json:"historyRevision"`
 }
 
-const maxHistoryEntries = 50
+const (
+	maxHistoryEntries    = 50
+	actionFolderOpenUUID = "com.github.mrpoundsign.pounddeck.core.folder.open"
+)
 
 type historyEntry struct {
 	label       string
@@ -191,11 +205,43 @@ func (e *Engine) snapshotLocked() Snapshot {
 
 	slotsMap, dialsMap, folderNames := e.activeContainerLocked(prof)
 	inFolder := len(folderNames) > 0
-	pageIdx := min(max(e.pageIdx, 0), max(0, len(prof.Pages)-1))
-	pageName := ""
-	if len(prof.Pages) > 0 {
-		pageName = prof.Pages[pageIdx].Name
+	var activeFolderID string
+	if inFolder && len(e.folderStack) > 0 {
+		idx := min(len(folderNames), len(e.folderStack)) - 1
+		activeFolderID = e.folderStack[idx]
 	}
+
+	pageIdx := min(max(e.pageIdx, 0), max(0, len(prof.Pages)-1))
+	pageNames := make([]string, len(prof.Pages))
+	for i, pg := range prof.Pages {
+		name := strings.TrimSpace(pg.Name)
+		if name == "" {
+			name = "Page " + strconv.Itoa(i+1)
+		}
+		pageNames[i] = name
+	}
+	pageName := ""
+	if len(pageNames) > 0 {
+		pageName = pageNames[pageIdx]
+	}
+
+	folders := make([]FolderSummary, 0, len(prof.Folders))
+	for fid, f := range prof.Folders {
+		if f == nil {
+			continue
+		}
+		name := strings.TrimSpace(f.Name)
+		if name == "" {
+			name = "Folder"
+		}
+		folders = append(folders, FolderSummary{ID: fid, Name: name})
+	}
+	slices.SortFunc(folders, func(a, b FolderSummary) int {
+		if c := cmp.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name)); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ID, b.ID)
+	})
 
 	renderedSlots := make(map[string]RenderedSlot, prof.Grid.TotalSlots())
 	for row := range prof.Grid.Rows {
@@ -244,7 +290,10 @@ func (e *Engine) snapshotLocked() Snapshot {
 		PageIndex:         pageIdx,
 		PageCount:         len(prof.Pages),
 		PageName:          pageName,
+		PageNames:         pageNames,
 		FolderPath:        folderNames,
+		ActiveFolderID:    activeFolderID,
+		Folders:           folders,
 		InFolder:          inFolder,
 		Slots:             renderedSlots,
 		DialSlots:         renderedDials,
@@ -1224,6 +1273,658 @@ func (e *Engine) ClearDialSlot(dialIndex int) error {
 	})
 	e.notifySubscribers()
 	return nil
+}
+
+// SlotLocation uniquely addresses a keypad button or encoder dial inside any profile page or folder.
+type SlotLocation struct {
+	ProfileID  string
+	PageIndex  int
+	FolderID   string
+	Controller deck.ControllerType
+	Coords     deck.Coordinates
+	Dial       int
+}
+
+// CurrentSlotLocation returns the SlotLocation corresponding to the currently active page or folder.
+func (e *Engine) CurrentSlotLocation(ctrl deck.ControllerType, coords deck.Coordinates, dial int) SlotLocation {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	prof := e.activeProfileLocked()
+	pageIdx := min(max(e.pageIdx, 0), max(0, len(prof.Pages)-1))
+	var folderID string
+	if len(e.folderStack) > 0 {
+		for _, fid := range e.folderStack {
+			if f := prof.Folders[fid]; f != nil {
+				folderID = fid
+			} else {
+				break
+			}
+		}
+	}
+	return SlotLocation{
+		ProfileID:  prof.ID,
+		PageIndex:  pageIdx,
+		FolderID:   folderID,
+		Controller: ctrl,
+		Coords:     coords,
+		Dial:       dial,
+	}
+}
+
+func (e *Engine) findProfileByIDLocked(profileID string) *deck.Profile {
+	pid := strings.TrimSpace(profileID)
+	if pid == "" {
+		return e.activeProfileLocked()
+	}
+	for _, p := range e.cfg.Profiles {
+		if p.ID == pid {
+			return p
+		}
+	}
+	return nil
+}
+
+func (e *Engine) resolveSlotLocationLocked(loc SlotLocation) (
+	prof *deck.Profile,
+	slots map[string]*deck.SlotConfig,
+	dials map[int]*deck.SlotConfig,
+	norm SlotLocation,
+	err error,
+) {
+	prof = e.findProfileByIDLocked(loc.ProfileID)
+	if prof == nil {
+		return nil, nil, nil, SlotLocation{}, fmt.Errorf("profile %q not found", loc.ProfileID)
+	}
+	norm = loc
+	norm.ProfileID = prof.ID
+	norm.FolderID = strings.TrimSpace(norm.FolderID)
+	if norm.Controller == "" {
+		norm.Controller = deck.ControllerKeypad
+	}
+
+	if norm.FolderID != "" {
+		if prof.Folders == nil {
+			return nil, nil, nil, SlotLocation{}, fmt.Errorf("folder %q not found", norm.FolderID)
+		}
+		f := prof.Folders[norm.FolderID]
+		if f == nil {
+			return nil, nil, nil, SlotLocation{}, fmt.Errorf("folder %q not found", norm.FolderID)
+		}
+		if f.Slots == nil {
+			f.Slots = make(map[string]*deck.SlotConfig)
+		}
+		if f.Dials == nil {
+			f.Dials = make(map[int]*deck.SlotConfig)
+		}
+		norm.PageIndex = 0
+		slots = f.Slots
+		dials = f.Dials
+	} else {
+		if norm.PageIndex < 0 || norm.PageIndex >= len(prof.Pages) {
+			return nil, nil, nil, SlotLocation{}, fmt.Errorf("page index %d out of range [0, %d)", norm.PageIndex, len(prof.Pages))
+		}
+		pg := prof.Pages[norm.PageIndex]
+		if pg.Slots == nil {
+			pg.Slots = make(map[string]*deck.SlotConfig)
+		}
+		if pg.Dials == nil {
+			pg.Dials = make(map[int]*deck.SlotConfig)
+		}
+		slots = pg.Slots
+		dials = pg.Dials
+	}
+
+	switch norm.Controller {
+	case deck.ControllerKeypad:
+		if !prof.Grid.Contains(norm.Coords) {
+			return nil, nil, nil, SlotLocation{}, fmt.Errorf("slot %s out of bounds for %dx%d grid", norm.Coords.SlotKey(), prof.Grid.Cols, prof.Grid.Rows)
+		}
+		if norm.FolderID != "" && norm.Coords == (deck.Coordinates{Row: 0, Col: 0}) {
+			return nil, nil, nil, SlotLocation{}, errors.New("slot (0, 0) is reserved for folder Back button")
+		}
+	case deck.ControllerEncoder:
+		if norm.Dial < 0 || norm.Dial >= prof.Dials {
+			return nil, nil, nil, SlotLocation{}, fmt.Errorf("dial index %d out of range [0, %d)", norm.Dial, prof.Dials)
+		}
+	default:
+		return nil, nil, nil, SlotLocation{}, fmt.Errorf("unsupported controller %q", norm.Controller)
+	}
+	return prof, slots, dials, norm, nil
+}
+
+func slotLocationsEqual(a, b SlotLocation) bool {
+	if a.ProfileID != b.ProfileID || a.FolderID != b.FolderID || a.Controller != b.Controller {
+		return false
+	}
+	if a.FolderID == "" && a.PageIndex != b.PageIndex {
+		return false
+	}
+	if a.Controller == deck.ControllerEncoder {
+		return a.Dial == b.Dial
+	}
+	return a.Coords == b.Coords
+}
+
+func (e *Engine) isSlotLocationVisibleLocked(loc SlotLocation) bool {
+	active := e.activeProfileLocked()
+	if active == nil || loc.ProfileID != active.ID {
+		return false
+	}
+	if len(e.folderStack) > 0 {
+		var topFolderID string
+		for _, fid := range e.folderStack {
+			if active.Folders[fid] != nil {
+				topFolderID = fid
+			} else {
+				break
+			}
+		}
+		if topFolderID != "" {
+			return loc.FolderID == topFolderID
+		}
+	}
+	return loc.FolderID == "" && loc.PageIndex == min(max(e.pageIdx, 0), max(0, len(active.Pages)-1))
+}
+
+func makeSlotLifecycleEvent(evType plugin.EventType, slot *deck.SlotConfig, loc SlotLocation) plugin.ActionEvent {
+	ev := plugin.ActionEvent{
+		Type:       evType,
+		Context:    slot.Context,
+		ActionUUID: slot.ActionUUID,
+		Controller: loc.Controller,
+		Settings:   cloneSettings(slot.Settings),
+		State:      slot.State,
+	}
+	if loc.Controller == deck.ControllerEncoder {
+		ev.DialIndex = loc.Dial
+	} else {
+		ev.Coordinates = loc.Coords
+	}
+	return ev
+}
+
+func folderIDForOpenSlot(slot *deck.SlotConfig) string {
+	if slot == nil || slot.ActionUUID != actionFolderOpenUUID {
+		return ""
+	}
+	if raw, ok := slot.Settings["folderId"].(string); ok && strings.TrimSpace(raw) != "" {
+		return strings.TrimSpace(raw)
+	}
+	return slot.Context
+}
+
+func transferFolderSubtreeLocked(srcProf, dstProf *deck.Profile, folderSlot *deck.SlotConfig, visited map[string]bool) {
+	if srcProf == nil || dstProf == nil || srcProf.ID == dstProf.ID || srcProf.Folders == nil {
+		return
+	}
+	fid := folderIDForOpenSlot(folderSlot)
+	if fid == "" || visited[fid] {
+		return
+	}
+	srcFolder := srcProf.Folders[fid]
+	if srcFolder == nil {
+		return
+	}
+	visited[fid] = true
+	if dstProf.Folders == nil {
+		dstProf.Folders = make(map[string]*deck.Folder)
+	}
+	if _, exists := dstProf.Folders[fid]; !exists {
+		dstProf.Folders[fid] = srcFolder.Clone()
+	}
+	for _, child := range srcFolder.Slots {
+		transferFolderSubtreeLocked(srcProf, dstProf, child, visited)
+	}
+}
+
+func cloneFolderTreeFreshLocked(srcProf *deck.Profile, srcFolderID string, dstProf *deck.Profile, cloned map[string]string) string {
+	if newID, ok := cloned[srcFolderID]; ok {
+		return newID
+	}
+	srcFolder := srcProf.Folders[srcFolderID]
+	if srcFolder == nil {
+		return ""
+	}
+	newFolderID := deck.NewUUID()
+	cloned[srcFolderID] = newFolderID
+	if dstProf.Folders == nil {
+		dstProf.Folders = make(map[string]*deck.Folder)
+	}
+	dstFolder := &deck.Folder{
+		ID:    newFolderID,
+		Name:  srcFolder.Name,
+		Slots: make(map[string]*deck.SlotConfig, len(srcFolder.Slots)),
+		Dials: make(map[int]*deck.SlotConfig, len(srcFolder.Dials)),
+	}
+	for k, child := range srcFolder.Slots {
+		if child == nil {
+			continue
+		}
+		cp := child.Clone()
+		cp.Context = deck.NewUUID()
+		if cp.ActionUUID == actionFolderOpenUUID {
+			if subSrcID := folderIDForOpenSlot(child); subSrcID != "" && srcProf.Folders[subSrcID] != nil {
+				if subNewID := cloneFolderTreeFreshLocked(srcProf, subSrcID, dstProf, cloned); subNewID != "" {
+					if cp.Settings == nil {
+						cp.Settings = make(map[string]any)
+					}
+					cp.Settings["folderId"] = subNewID
+				}
+			}
+		}
+		dstFolder.Slots[k] = cp
+	}
+	for idx, child := range srcFolder.Dials {
+		if child == nil {
+			continue
+		}
+		cp := child.Clone()
+		cp.Context = deck.NewUUID()
+		dstFolder.Dials[idx] = cp
+	}
+	dstProf.Folders[newFolderID] = dstFolder
+	return newFolderID
+}
+
+// MoveSlot moves or swaps an assigned keypad button or dial between src and dst (within or across pages, folders, or profiles).
+// If dst is occupied, the two slots are atomically swapped. Only moved slots whose screen visibility or coordinates changed
+// receive targeted WillDisappear / WillAppear events, under a single Undo step.
+func (e *Engine) MoveSlot(src, dst SlotLocation) (bool, error) {
+	if src.Controller != "" && dst.Controller != "" && src.Controller != dst.Controller {
+		return false, fmt.Errorf("cannot move %s into %s slot", src.Controller, dst.Controller)
+	}
+
+	e.opMu.Lock()
+	e.mu.Lock()
+	srcProf, srcSlots, srcDials, normSrc, err := e.resolveSlotLocationLocked(src)
+	if err != nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return false, err
+	}
+	dstProf, dstSlots, dstDials, normDst, err := e.resolveSlotLocationLocked(dst)
+	if err != nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return false, err
+	}
+	if slotLocationsEqual(normSrc, normDst) {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return false, nil
+	}
+
+	var srcSlot, dstSlot *deck.SlotConfig
+	if normSrc.Controller == deck.ControllerEncoder {
+		srcSlot = srcDials[normSrc.Dial]
+		dstSlot = dstDials[normDst.Dial]
+		if srcSlot == nil {
+			e.mu.Unlock()
+			e.opMu.Unlock()
+			return false, fmt.Errorf("dial %d is empty", normSrc.Dial)
+		}
+	} else {
+		srcSlot = srcSlots[normSrc.Coords.SlotKey()]
+		dstSlot = dstSlots[normDst.Coords.SlotKey()]
+		if srcSlot == nil {
+			e.mu.Unlock()
+			e.opMu.Unlock()
+			return false, fmt.Errorf("slot %s is empty", normSrc.Coords.SlotKey())
+		}
+	}
+
+	if normDst.FolderID != "" && srcProf.ID == dstProf.ID && folderIDForOpenSlot(srcSlot) == normDst.FolderID {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return false, errors.New("cannot move a folder button inside itself")
+	}
+	if dstSlot != nil && normSrc.FolderID != "" && srcProf.ID == dstProf.ID && folderIDForOpenSlot(dstSlot) == normSrc.FolderID {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return false, errors.New("cannot move a folder button inside itself")
+	}
+
+	before := e.captureHistoryLocked("")
+	srcVis := e.isSlotLocationVisibleLocked(normSrc)
+	dstVis := e.isSlotLocationVisibleLocked(normDst)
+
+	var disappear, appear []plugin.ActionEvent
+	if srcVis {
+		disappear = append(disappear, makeSlotLifecycleEvent(plugin.EventWillDisappear, srcSlot, normSrc))
+	}
+	if dstVis && dstSlot != nil {
+		disappear = append(disappear, makeSlotLifecycleEvent(plugin.EventWillDisappear, dstSlot, normDst))
+	}
+
+	if srcProf.ID != dstProf.ID {
+		transferFolderSubtreeLocked(srcProf, dstProf, srcSlot, make(map[string]bool))
+		if dstSlot != nil {
+			transferFolderSubtreeLocked(dstProf, srcProf, dstSlot, make(map[string]bool))
+		}
+	}
+
+	swapped := dstSlot != nil
+	if normSrc.Controller == deck.ControllerEncoder {
+		dstDials[normDst.Dial] = srcSlot
+		if swapped {
+			srcDials[normSrc.Dial] = dstSlot
+		} else {
+			delete(srcDials, normSrc.Dial)
+		}
+	} else {
+		dstSlots[normDst.Coords.SlotKey()] = srcSlot
+		if swapped {
+			srcSlots[normSrc.Coords.SlotKey()] = dstSlot
+		} else {
+			delete(srcSlots, normSrc.Coords.SlotKey())
+		}
+	}
+
+	if !dstVis {
+		delete(e.visuals, srcSlot.Context)
+	}
+	if dstSlot != nil && !srcVis {
+		delete(e.visuals, dstSlot.Context)
+	}
+
+	if dstVis {
+		appear = append(appear, makeSlotLifecycleEvent(plugin.EventWillAppear, srcSlot, normDst))
+	}
+	if srcVis && dstSlot != nil {
+		appear = append(appear, makeSlotLifecycleEvent(plugin.EventWillAppear, dstSlot, normSrc))
+	}
+
+	label := "Move button"
+	if normSrc.Controller == deck.ControllerEncoder {
+		if swapped {
+			label = "Swap dials"
+		} else {
+			label = "Move dial"
+		}
+	} else if swapped {
+		label = "Swap buttons"
+	}
+
+	cfgCopy := e.cfg.Clone()
+	e.mu.Unlock()
+
+	err = e.finishMutation(before, cfgCopy, label)
+	e.opMu.Unlock()
+	if err != nil {
+		return false, err
+	}
+
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
+	e.notifySubscribers()
+	return swapped, nil
+}
+
+// MoveSlotToPage moves the keypad action at src into the first empty slot on targetPageIdx of src's profile.
+func (e *Engine) MoveSlotToPage(src SlotLocation, targetPageIdx int) (deck.Coordinates, error) {
+	if src.Controller != "" && src.Controller != deck.ControllerKeypad {
+		return deck.Coordinates{}, errors.New("only keypad buttons can move to another page")
+	}
+
+	e.mu.RLock()
+	srcProf := e.findProfileByIDLocked(src.ProfileID)
+	if srcProf == nil {
+		e.mu.RUnlock()
+		return deck.Coordinates{}, fmt.Errorf("profile %q not found", src.ProfileID)
+	}
+	if targetPageIdx < 0 || targetPageIdx >= len(srcProf.Pages) {
+		e.mu.RUnlock()
+		return deck.Coordinates{}, fmt.Errorf("page index %d out of range", targetPageIdx)
+	}
+	if src.FolderID == "" && src.PageIndex == targetPageIdx && (src.ProfileID == "" || src.ProfileID == srcProf.ID) {
+		e.mu.RUnlock()
+		return src.Coords, nil
+	}
+	targetPg := srcProf.Pages[targetPageIdx]
+	var (
+		found    bool
+		dstCoord deck.Coordinates
+	)
+	for row := range srcProf.Grid.Rows {
+		for col := range srcProf.Grid.Cols {
+			c := deck.Coordinates{Row: row, Col: col}
+			if targetPg.Slots[c.SlotKey()] == nil {
+				dstCoord = c
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	srcProfileID := srcProf.ID
+	e.mu.RUnlock()
+
+	if !found {
+		return deck.Coordinates{}, fmt.Errorf("page %d is full", targetPageIdx+1)
+	}
+
+	dst := SlotLocation{
+		ProfileID:  srcProfileID,
+		PageIndex:  targetPageIdx,
+		Controller: deck.ControllerKeypad,
+		Coords:     dstCoord,
+	}
+	if _, err := e.MoveSlot(src, dst); err != nil {
+		return deck.Coordinates{}, err
+	}
+	return dstCoord, nil
+}
+
+// MoveSlotToNewPage appends a new page to src's profile and moves src to slot (0, 0) on that page atomically.
+func (e *Engine) MoveSlotToNewPage(src SlotLocation) (int, deck.Coordinates, error) {
+	if src.Controller != "" && src.Controller != deck.ControllerKeypad {
+		return 0, deck.Coordinates{}, errors.New("only keypad buttons can move to a new page")
+	}
+
+	e.opMu.Lock()
+	e.mu.Lock()
+	srcProf, srcSlots, _, normSrc, err := e.resolveSlotLocationLocked(src)
+	if err != nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return 0, deck.Coordinates{}, err
+	}
+	srcSlot := srcSlots[normSrc.Coords.SlotKey()]
+	if srcSlot == nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return 0, deck.Coordinates{}, fmt.Errorf("slot %s is empty", normSrc.Coords.SlotKey())
+	}
+
+	before := e.captureHistoryLocked("")
+	var disappear []plugin.ActionEvent
+	if e.isSlotLocationVisibleLocked(normSrc) {
+		disappear = append(disappear, makeSlotLifecycleEvent(plugin.EventWillDisappear, srcSlot, normSrc))
+	}
+
+	newPageIdx := len(srcProf.Pages)
+	newPage := &deck.Page{
+		ID:    deck.NewUUID(),
+		Name:  fmt.Sprintf("Page %d", newPageIdx+1),
+		Slots: map[string]*deck.SlotConfig{(deck.Coordinates{Row: 0, Col: 0}).SlotKey(): srcSlot},
+		Dials: make(map[int]*deck.SlotConfig),
+	}
+	srcProf.Pages = append(srcProf.Pages, newPage)
+	delete(srcSlots, normSrc.Coords.SlotKey())
+	delete(e.visuals, srcSlot.Context)
+
+	cfgCopy := e.cfg.Clone()
+	e.mu.Unlock()
+
+	err = e.finishMutation(before, cfgCopy, "Move button to new page")
+	e.opMu.Unlock()
+	if err != nil {
+		return 0, deck.Coordinates{}, err
+	}
+
+	e.dispatchAll(context.Background(), disappear)
+	e.notifySubscribers()
+	return newPageIdx, deck.Coordinates{Row: 0, Col: 0}, nil
+}
+
+// MoveSlotToFolder moves the keypad button at src into the first open slot (skipping reserved AutoBack (0,0)) in targetFolderID.
+func (e *Engine) MoveSlotToFolder(src SlotLocation, targetFolderID string) (deck.Coordinates, error) {
+	if src.Controller != "" && src.Controller != deck.ControllerKeypad {
+		return deck.Coordinates{}, errors.New("only keypad buttons can move into folders")
+	}
+	fid := strings.TrimSpace(targetFolderID)
+	if fid == "" {
+		return deck.Coordinates{}, errors.New("target folder ID cannot be empty")
+	}
+
+	e.mu.RLock()
+	srcProf := e.findProfileByIDLocked(src.ProfileID)
+	if srcProf == nil {
+		e.mu.RUnlock()
+		return deck.Coordinates{}, fmt.Errorf("profile %q not found", src.ProfileID)
+	}
+	folder := srcProf.Folders[fid]
+	if folder == nil {
+		e.mu.RUnlock()
+		return deck.Coordinates{}, fmt.Errorf("folder %q not found", fid)
+	}
+	// Check source slot is not the OpenFolder button pointing to targetFolderID itself.
+	if src.FolderID == "" && src.PageIndex >= 0 && src.PageIndex < len(srcProf.Pages) {
+		if s := srcProf.Pages[src.PageIndex].Slots[src.Coords.SlotKey()]; s != nil && folderIDForOpenSlot(s) == fid {
+			e.mu.RUnlock()
+			return deck.Coordinates{}, errors.New("cannot move a folder button inside itself")
+		}
+	} else if srcF := srcProf.Folders[src.FolderID]; srcF != nil {
+		if s := srcF.Slots[src.Coords.SlotKey()]; s != nil && folderIDForOpenSlot(s) == fid {
+			e.mu.RUnlock()
+			return deck.Coordinates{}, errors.New("cannot move a folder button inside itself")
+		}
+	}
+
+	var (
+		found    bool
+		dstCoord deck.Coordinates
+	)
+	for row := range srcProf.Grid.Rows {
+		for col := range srcProf.Grid.Cols {
+			if row == 0 && col == 0 {
+				continue
+			}
+			c := deck.Coordinates{Row: row, Col: col}
+			if folder.Slots[c.SlotKey()] == nil {
+				dstCoord = c
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	srcProfileID := srcProf.ID
+	e.mu.RUnlock()
+
+	if !found {
+		return deck.Coordinates{}, errors.New("folder is full")
+	}
+
+	dst := SlotLocation{
+		ProfileID:  srcProfileID,
+		FolderID:   fid,
+		Controller: deck.ControllerKeypad,
+		Coords:     dstCoord,
+	}
+	if _, err := e.MoveSlot(src, dst); err != nil {
+		return deck.Coordinates{}, err
+	}
+	return dstCoord, nil
+}
+
+// PasteSlotConfig clones cfg (allocating a fresh Context UUID and independent folder subtree if ActionFolderOpen) into dst.
+func (e *Engine) PasteSlotConfig(cfg *deck.SlotConfig, srcProfileID string, dst SlotLocation) (*deck.SlotConfig, error) {
+	if cfg == nil || strings.TrimSpace(cfg.ActionUUID) == "" {
+		return nil, errors.New("copied slot configuration is empty")
+	}
+	checkCtrl := dst.Controller
+	if checkCtrl == "" {
+		checkCtrl = deck.ControllerKeypad
+	}
+	if desc, ok := e.registry.Action(cfg.ActionUUID); ok && !desc.SupportsController(checkCtrl) {
+		return nil, fmt.Errorf("action %q does not support %s slots", desc.Name, checkCtrl)
+	}
+
+	e.opMu.Lock()
+	e.mu.Lock()
+	dstProf, dstSlots, dstDials, normDst, err := e.resolveSlotLocationLocked(dst)
+	if err != nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return nil, err
+	}
+
+	before := e.captureHistoryLocked("")
+	dstVis := e.isSlotLocationVisibleLocked(normDst)
+	var oldDst *deck.SlotConfig
+	if normDst.Controller == deck.ControllerEncoder {
+		oldDst = dstDials[normDst.Dial]
+	} else {
+		oldDst = dstSlots[normDst.Coords.SlotKey()]
+	}
+
+	var disappear, appear []plugin.ActionEvent
+	if oldDst != nil {
+		if dstVis {
+			disappear = append(disappear, makeSlotLifecycleEvent(plugin.EventWillDisappear, oldDst, normDst))
+		}
+		delete(e.visuals, oldDst.Context)
+	}
+
+	newSlot := cfg.Clone()
+	newSlot.Context = deck.NewUUID()
+	if newSlot.ActionUUID == actionFolderOpenUUID {
+		srcProf := e.findProfileByIDLocked(srcProfileID)
+		if srcProf == nil {
+			srcProf = dstProf
+		}
+		if srcFid := folderIDForOpenSlot(cfg); srcFid != "" && srcProf.Folders[srcFid] != nil {
+			if clonedID := cloneFolderTreeFreshLocked(srcProf, srcFid, dstProf, make(map[string]string)); clonedID != "" {
+				if newSlot.Settings == nil {
+					newSlot.Settings = make(map[string]any)
+				}
+				newSlot.Settings["folderId"] = clonedID
+			}
+		}
+	}
+
+	if normDst.Controller == deck.ControllerEncoder {
+		dstDials[normDst.Dial] = newSlot
+	} else {
+		dstSlots[normDst.Coords.SlotKey()] = newSlot
+	}
+	slotCopy := newSlot.Clone()
+	if dstVis {
+		appear = append(appear, makeSlotLifecycleEvent(plugin.EventWillAppear, slotCopy, normDst))
+	}
+
+	label := "Paste button"
+	if normDst.Controller == deck.ControllerEncoder {
+		label = "Paste dial"
+	}
+	cfgCopy := e.cfg.Clone()
+	e.mu.Unlock()
+
+	err = e.finishMutation(before, cfgCopy, label)
+	e.opMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
+	e.notifySubscribers()
+	return slotCopy, nil
 }
 
 // Undo reverts the most recent user configuration change and persists the restored deck state.

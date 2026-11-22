@@ -1067,3 +1067,309 @@ func TestMainWindowWasmPluginReloadAndSettings(t *testing.T) {
 	pluginsDlg.Hide()
 	drainUI()
 }
+
+func TestMainWindowMoveSwapCopyAcrossPagesAndProfiles(t *testing.T) {
+	eng, _, mw := newTestStudio(t)
+	mw.win.Resize(fyne.NewSize(1240, 760))
+	drainUI()
+
+	c00 := deck.Coordinates{Row: 0, Col: 0}
+	c01 := deck.Coordinates{Row: 0, Col: 1}
+	c02 := deck.Coordinates{Row: 0, Col: 2}
+	c10 := deck.Coordinates{Row: 1, Col: 0}
+	c11 := deck.Coordinates{Row: 1, Col: 1}
+
+	// 1. Clickable Page Strip: starts with Page 1, "+" creates & switches to Page 2.
+	if len(mw.pageButtons) != 1 || mw.pageButtons[0].Text != "Page 1" {
+		t.Fatalf("unexpected initial page strip buttons: %d", len(mw.pageButtons))
+	}
+	if mw.pageAddBtn == nil {
+		t.Fatal("expected non-nil pageAddBtn in page strip")
+	}
+	test.Tap(mw.pageAddBtn)
+	drainUI()
+	if snap := eng.Snapshot(); snap.PageCount != 2 || snap.PageIndex != 1 || len(mw.pageButtons) != 2 {
+		t.Fatalf("expected Page 2 added & active, got count=%d idx=%d btns=%d", snap.PageCount, snap.PageIndex, len(mw.pageButtons))
+	}
+	test.Tap(mw.pageButtons[0])
+	drainUI()
+	if eng.Snapshot().PageIndex != 0 {
+		t.Fatalf("expected Page 1 active after clicking page pill, got %d", eng.Snapshot().PageIndex)
+	}
+
+	// Assign customized actions on Page 1 (0,0) and (0,1).
+	if _, err := eng.AssignKeypadAction(c00, core.ActionCounter); err != nil {
+		t.Fatalf("AssignKeypadAction(c00) error = %v", err)
+	}
+	if err := eng.UpdateKeypadSlot(c00, "Alpha", "#38BDF8", nil); err != nil {
+		t.Fatalf("UpdateKeypadSlot(c00) error = %v", err)
+	}
+	if _, err := eng.AssignKeypadAction(c01, core.ActionDelay); err != nil {
+		t.Fatalf("AssignKeypadAction(c01) error = %v", err)
+	}
+	if err := eng.UpdateKeypadSlot(c01, "Beta", "#22C55E", nil); err != nil {
+		t.Fatalf("UpdateKeypadSlot(c01) error = %v", err)
+	}
+	drainUI()
+
+	// 2. Inspector Move + Cross-Page Pick-Target + Esc cancel + Auto-Swap + Undo.
+	mw.SelectSlot(c00)
+	drainUI()
+	if mw.inspector.moveBtn.Disabled() || mw.inspector.copyBtn.Disabled() {
+		t.Fatal("expected Move and Copy buttons enabled for assigned slot")
+	}
+	test.Tap(mw.inspector.moveBtn)
+	drainUI()
+	if mw.clipMode != clipMove || !mw.clipBanner.Visible() {
+		t.Fatalf("expected clipMove active with visible banner, got mode=%v visible=%v", mw.clipMode, mw.clipBanner.Visible())
+	}
+
+	test.Tap(mw.pageButtons[1])
+	drainUI()
+	mw.handleKeyTap(c10)
+	drainUI()
+	if mw.clipMode != clipNone || mw.clipBanner.Visible() {
+		t.Fatalf("expected Move mode cleared after placing on Page 2, got mode=%v", mw.clipMode)
+	}
+	if got := eng.Snapshot().Slots[c10.SlotKey()].Config; got == nil || got.Title != "Alpha" {
+		t.Fatalf("expected Page 2 (1,0) to hold Alpha, got %+v", got)
+	}
+
+	// Start Move on Page 1 (0,1), verify bare Esc key cancels Move mode cleanly.
+	test.Tap(mw.pageButtons[0])
+	drainUI()
+	if eng.Snapshot().Slots[c00.SlotKey()].Config != nil {
+		t.Fatal("expected Page 1 (0,0) cleared after moving Alpha to Page 2")
+	}
+	mw.SelectSlot(c01)
+	test.Tap(mw.inspector.moveBtn)
+	drainUI()
+	if mw.clipMode != clipMove {
+		t.Fatal("expected clipMove before Esc")
+	}
+	mw.win.Canvas().OnTypedKey()(&fyne.KeyEvent{Name: fyne.KeyEscape})
+	drainUI()
+	if mw.clipMode != clipNone || mw.clipBanner.Visible() {
+		t.Fatalf("expected bare Esc to cancel Move mode, got mode=%v", mw.clipMode)
+	}
+
+	// Move Page 1 (0,1) ("Beta") onto occupied Page 2 (1,0) ("Alpha") -> cross-page swap, then Undo.
+	mw.StartMoveSelected()
+	test.Tap(mw.pageButtons[1])
+	drainUI()
+	mw.handleKeyTap(c10)
+	drainUI()
+	if got := eng.Snapshot().Slots[c10.SlotKey()].Config; got == nil || got.Title != "Beta" {
+		t.Fatalf("expected Page 2 (1,0) to hold Beta after swap, got %+v", got)
+	}
+	test.Tap(mw.pageButtons[0])
+	drainUI()
+	if got := eng.Snapshot().Slots[c01.SlotKey()].Config; got == nil || got.Title != "Alpha" {
+		t.Fatalf("expected Page 1 (0,1) to hold Alpha after swap, got %+v", got)
+	}
+	mw.handleUndo()
+	drainUI()
+	if got := eng.Snapshot().Slots[c10.SlotKey()].Config; got == nil || got.Title != "Alpha" {
+		t.Fatalf("expected Undo to restore Alpha at Page 2 (1,0), got %+v", got)
+	}
+	test.Tap(mw.pageButtons[0])
+	drainUI()
+	if got := eng.Snapshot().Slots[c01.SlotKey()].Config; got == nil || got.Title != "Beta" {
+		t.Fatalf("expected Undo to restore Beta at Page 1 (0,1), got %+v", got)
+	}
+	test.Tap(mw.pageButtons[1])
+	drainUI()
+
+	// 3. Drag threshold guard (<10px ignored), tile->tile drag, and tile->pageAddBtn drop.
+	// Force a fresh layout pass in headless test driver (NewMainWindow initialized at 1240x760).
+	mw.win.Resize(fyne.NewSize(1280, 800))
+	drainUI()
+	tile10 := mw.surface.tiles[c10.SlotKey()]
+	tile11 := mw.surface.tiles[c11.SlotKey()]
+	if tile10 == nil || tile11 == nil {
+		t.Fatal("expected tiles for (1,0) and (1,1)")
+	}
+	if tile11.Size().Width <= 0 || mw.pageAddBtn.Size().Width <= 0 {
+		t.Fatalf("expected positive laid-out bounds, got tile11=%+v pageAddBtn=%+v", tile11.Size(), mw.pageAddBtn.Size())
+	}
+	tile10.Dragged(&fyne.DragEvent{
+		Position: fyne.NewPos(10, 10),
+		Dragged:  fyne.Delta{DX: 3, DY: 3},
+	})
+	if mw.dragActive {
+		t.Fatal("expected sub-10px drag delta not to activate drag mode")
+	}
+	tile10.DragEnd()
+
+	drv := fyne.CurrentApp().Driver()
+	dstPos := drv.AbsolutePositionForObject(tile11).Add(fyne.NewPos(tile11.Size().Width/2, tile11.Size().Height/2))
+	tile10.Dragged(&fyne.DragEvent{
+		Position:         fyne.NewPos(12, 12),
+		AbsolutePosition: dstPos,
+		Dragged:          fyne.Delta{DX: 20, DY: 0},
+	})
+	if !mw.dragActive || !mw.hasHoverDropKey || mw.hoverDropKey != c11 {
+		t.Fatalf("expected dragActive hovering (1,1), got active=%v hover=%v key=%+v", mw.dragActive, mw.hasHoverDropKey, mw.hoverDropKey)
+	}
+	tile10.DragEnd()
+	drainUI()
+	if mw.dragActive {
+		t.Fatal("expected dragActive cleared after DragEnd")
+	}
+	if got := eng.Snapshot().Slots[c11.SlotKey()].Config; got == nil || got.Title != "Alpha" {
+		t.Fatalf("expected drag drop to move Alpha to (1,1), got %+v", got)
+	}
+
+	addPos := drv.AbsolutePositionForObject(mw.pageAddBtn).Add(fyne.NewPos(mw.pageAddBtn.Size().Width/2, mw.pageAddBtn.Size().Height/2))
+	mw.handleTileDragMove(c11, addPos)
+	if !mw.dragActive || !mw.hoverAddPage {
+		t.Fatalf("expected drag hover on '+' add page button, got active=%v hoverAdd=%v", mw.dragActive, mw.hoverAddPage)
+	}
+	mw.handleTileDragEnd(c11, addPos)
+	drainUI()
+	if snap := eng.Snapshot(); snap.PageCount != 3 || len(mw.pageButtons) != 3 {
+		t.Fatalf("expected Page 3 created via drag onto '+', got PageCount=%d btns=%d", snap.PageCount, len(mw.pageButtons))
+	}
+	test.Tap(mw.pageButtons[2])
+	drainUI()
+	if got := eng.Snapshot().Slots[c00.SlotKey()].Config; got == nil || got.Title != "Alpha" {
+		t.Fatalf("expected Page 3 (0,0) to hold Alpha after drop onto '+', got %+v", got)
+	}
+
+	// 4. Entry shortcut safety: Ctrl+C while Inspector Entry focused must NOT trigger slot Copy.
+	mw.SelectSlot(c00)
+	mw.inspector.titleEntry.SetText("Editable")
+	mw.win.Canvas().Focus(mw.inspector.titleEntry)
+	mw.shortcuts.TypedShortcut(&fyne.ShortcutCopy{})
+	drainUI()
+	if mw.clipMode != clipNone {
+		t.Fatalf("expected focused entry Ctrl+C not to hijack Studio slot copy, got mode=%v", mw.clipMode)
+	}
+	mw.win.Canvas().Focus(nil)
+
+	// 5. Cross-profile Copy/Paste (including Folder subtree cloning) + Dial Move/Swap.
+	test.Tap(mw.pageButtons[0])
+	drainUI()
+	if _, err := eng.AssignKeypadAction(c02, core.ActionFolderOpen); err != nil {
+		t.Fatalf("AssignKeypadAction(FolderOpen) error = %v", err)
+	}
+	if err := eng.PressKey(context.Background(), c02); err != nil {
+		t.Fatalf("open folder error = %v", err)
+	}
+	origFolderID := eng.Snapshot().ActiveFolderID
+	if _, err := eng.AssignKeypadAction(c01, core.ActionDelay); err != nil {
+		t.Fatalf("AssignKeypadAction(folder child) error = %v", err)
+	}
+	if err := eng.UpdateKeypadSlot(c01, "Inner Delay", "", nil); err != nil {
+		t.Fatalf("UpdateKeypadSlot(folder child) error = %v", err)
+	}
+	_ = eng.CloseFolder()
+	drainUI()
+
+	mw.SelectSlot(c02)
+	mw.shortcuts.TypedShortcut(&fyne.ShortcutCopy{})
+	drainUI()
+	if mw.clipMode != clipCopy || mw.clipSlot == nil {
+		t.Fatalf("expected clipCopy after Ctrl+C on folder slot, got mode=%v", mw.clipMode)
+	}
+
+	if _, err := eng.CreateProfile("Second", deck.GridSize{Cols: 3, Rows: 2}, 2); err != nil {
+		t.Fatalf("CreateProfile(Second) error = %v", err)
+	}
+	drainUI()
+	mw.SelectSlot(c00)
+	mw.shortcuts.TypedShortcut(&fyne.ShortcutPaste{})
+	drainUI()
+	if mw.confirmDlg != nil {
+		t.Fatal("expected no confirmation dialog when pasting onto empty slot")
+	}
+
+	pastedFolder := eng.Snapshot().Slots[c00.SlotKey()].Config
+	if pastedFolder == nil || pastedFolder.ActionUUID != core.ActionFolderOpen {
+		t.Fatalf("expected pasted FolderOpen at Profile 2 (0,0), got %+v", pastedFolder)
+	}
+	clonedFID, _ := pastedFolder.Settings["folderId"].(string)
+	if clonedFID == "" || clonedFID == origFolderID {
+		t.Fatalf("expected independent cloned folderId != %q, got %q", origFolderID, clonedFID)
+	}
+	if err := eng.PressKey(context.Background(), c00); err != nil {
+		t.Fatalf("open pasted folder error = %v", err)
+	}
+	drainUI()
+	if inner := eng.Snapshot().Slots[c01.SlotKey()].Config; inner == nil || inner.Title != "Inner Delay" {
+		t.Fatalf("expected Inner Delay inside cloned folder at (0,1), got %+v", inner)
+	}
+	_ = eng.CloseFolder()
+	drainUI()
+
+	// Pasting onto an occupied slot prompts confirmation: Dismiss keeps existing, Confirm replaces (and Undo restores).
+	if _, err := eng.AssignKeypadAction(c01, core.ActionCounter); err != nil {
+		t.Fatalf("AssignKeypadAction(c01) error = %v", err)
+	}
+	if err := eng.UpdateKeypadSlot(c01, "KeepMe", "", nil); err != nil {
+		t.Fatalf("UpdateKeypadSlot(c01) error = %v", err)
+	}
+	drainUI()
+	mw.SelectSlot(c01)
+	mw.shortcuts.TypedShortcut(&fyne.ShortcutPaste{})
+	drainUI()
+	if mw.confirmDlg == nil {
+		t.Fatal("expected overwrite confirmation dialog when pasting onto occupied slot")
+	}
+	if got := eng.Snapshot().Slots[c01.SlotKey()].Config; got == nil || got.Title != "KeepMe" {
+		t.Fatalf("expected KeepMe preserved before confirming paste, got %+v", got)
+	}
+	mw.confirmDlg.Dismiss()
+	drainUI()
+	if mw.confirmDlg != nil {
+		t.Fatal("expected confirmDlg cleared after Dismiss")
+	}
+	if got := eng.Snapshot().Slots[c01.SlotKey()].Config; got == nil || got.Title != "KeepMe" {
+		t.Fatalf("expected Dismiss to preserve KeepMe, got %+v", got)
+	}
+
+	mw.shortcuts.TypedShortcut(&fyne.ShortcutPaste{})
+	drainUI()
+	if mw.confirmDlg == nil {
+		t.Fatal("expected overwrite confirmation dialog on second paste attempt")
+	}
+	mw.confirmDlg.Confirm()
+	drainUI()
+	if mw.confirmDlg != nil {
+		t.Fatal("expected confirmDlg cleared after Confirm")
+	}
+	if got := eng.Snapshot().Slots[c01.SlotKey()].Config; got == nil || got.ActionUUID != core.ActionFolderOpen {
+		t.Fatalf("expected Confirm to replace (0,1) with FolderOpen, got %+v", got)
+	}
+	mw.handleUndo()
+	drainUI()
+	if got := eng.Snapshot().Slots[c01.SlotKey()].Config; got == nil || got.Title != "KeepMe" {
+		t.Fatalf("expected Undo after confirmed paste to restore KeepMe, got %+v", got)
+	}
+
+	mw.ClearClipboard()
+
+	// Dial Move / Swap in Profile 2 (2 dials).
+	if _, err := eng.AssignDialAction(0, core.ActionCounter); err != nil {
+		t.Fatalf("AssignDialAction(0) error = %v", err)
+	}
+	if err := eng.UpdateDialSlot(0, "Dial Zero", "", nil); err != nil {
+		t.Fatalf("UpdateDialSlot(0) error = %v", err)
+	}
+	if _, err := eng.AssignDialAction(1, core.ActionCounter); err != nil {
+		t.Fatalf("AssignDialAction(1) error = %v", err)
+	}
+	if err := eng.UpdateDialSlot(1, "Dial One", "", nil); err != nil {
+		t.Fatalf("UpdateDialSlot(1) error = %v", err)
+	}
+	drainUI()
+
+	mw.SelectDial(0)
+	mw.StartMoveSelected()
+	mw.handleDialTap(1)
+	drainUI()
+	dials := eng.Snapshot().DialSlots
+	if dials[0].Config == nil || dials[0].Config.Title != "Dial One" || dials[1].Config == nil || dials[1].Config.Title != "Dial Zero" {
+		t.Fatalf("expected swapped dials, got d0=%+v d1=%+v", dials[0].Config, dials[1].Config)
+	}
+}
