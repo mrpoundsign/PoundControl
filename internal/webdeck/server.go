@@ -896,13 +896,25 @@ func (s *Server) refreshSnapshotFromEngine(snap app.Snapshot) ClientSnapshot {
 	return clientSnap
 }
 
+func signAssetURL(raw, sessionID string, assetMacKey []byte) (string, bool) {
+	assetID, ok := strings.CutPrefix(raw, assetPrefix)
+	if !ok {
+		return raw, false
+	}
+	if baseID, _, hasQ := strings.Cut(assetID, "?"); hasQ {
+		assetID = baseID
+	}
+	mac := computeAssetMAC(assetMacKey, sessionID, assetID)
+	return assetPrefix + assetID + "?sid=" + url.QueryEscape(sessionID) + "&mac=" + mac, true
+}
+
 func signSnapshotAssets(snap ClientSnapshot, sessionID string, assetMacKey []byte) ClientSnapshot {
 	if len(snap.Slots) == 0 || sessionID == "" || len(assetMacKey) == 0 {
 		return snap
 	}
 	hasAsset := false
 	for _, sl := range snap.Slots {
-		if strings.HasPrefix(sl.ImageURL, assetPrefix) {
+		if strings.HasPrefix(sl.ImageURL, assetPrefix) || strings.HasPrefix(sl.BackgroundImageURL, assetPrefix) {
 			hasAsset = true
 			break
 		}
@@ -912,12 +924,11 @@ func signSnapshotAssets(snap ClientSnapshot, sessionID string, assetMacKey []byt
 	}
 	slotsCopy := make(map[string]ClientSlot, len(snap.Slots))
 	for k, sl := range snap.Slots {
-		if assetID, ok := strings.CutPrefix(sl.ImageURL, assetPrefix); ok {
-			if baseID, _, hasQ := strings.Cut(assetID, "?"); hasQ {
-				assetID = baseID
-			}
-			mac := computeAssetMAC(assetMacKey, sessionID, assetID)
-			sl.ImageURL = assetPrefix + assetID + "?sid=" + url.QueryEscape(sessionID) + "&mac=" + mac
+		if signed, ok := signAssetURL(sl.ImageURL, sessionID, assetMacKey); ok {
+			sl.ImageURL = signed
+		}
+		if signed, ok := signAssetURL(sl.BackgroundImageURL, sessionID, assetMacKey); ok {
+			sl.BackgroundImageURL = signed
 		}
 		slotsCopy[k] = sl
 	}

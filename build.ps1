@@ -2,6 +2,7 @@
 # Usage:
 #   .\build.ps1                  # Run lint, tests, and build Desktop Studio GUI
 #   .\build.ps1 -Target gui      # Build Desktop Studio GUI (with Zig CGo) -> build\bin\pounddeck.exe
+#   .\build.ps1 -Target wasm     # Build example WebAssembly plugins (WASI reactor) -> build\bin\*.wasm
 #   .\build.ps1 -Target android  # Test & build Android Companion APK -> build\bin\pounddeck-android.apk
 #   .\build.ps1 -Target test     # Run all unit & headless UI tests
 #   .\build.ps1 -Target lint     # Run go fix -diff & golangci-lint-v2
@@ -9,7 +10,7 @@
 #   .\build.ps1 -Target clean    # Clean build artifacts
 
 param(
-    [ValidateSet("all", "gui", "android", "test", "lint", "check", "clean")]
+    [ValidateSet("all", "gui", "wasm", "android", "test", "lint", "check", "clean")]
     [string]$Target = "all"
 )
 
@@ -112,6 +113,30 @@ function Build-GUI {
         }
     } finally {
         Remove-Item $sysoPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Build-Wasm {
+    Write-Host "`n==> Building example WebAssembly plugins (WASI reactor)..." -ForegroundColor Cyan
+    if (-not (Test-Path $BinDir)) { New-Item -ItemType Directory -Path $BinDir | Out-Null }
+    $outPath = Join-Path $BinDir "pomodoro.wasm"
+    $prevGOOS = $env:GOOS
+    $prevGOARCH = $env:GOARCH
+    $prevCGO = $env:CGO_ENABLED
+    try {
+        $env:GOOS = "wasip1"
+        $env:GOARCH = "wasm"
+        $env:CGO_ENABLED = "0"
+        & $GoExe build -buildmode=c-shared -o $outPath ./examples/wasm-pomodoro
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[OK] Successfully built $outPath" -ForegroundColor Green
+        } else {
+            Write-Error "Failed to build pomodoro.wasm."
+        }
+    } finally {
+        $env:GOOS = $prevGOOS
+        $env:GOARCH = $prevGOARCH
+        $env:CGO_ENABLED = $prevCGO
     }
 }
 
@@ -250,6 +275,7 @@ function Build-Android {
 switch ($Target) {
     "all"     { Run-Lint; Run-Tests; Build-GUI }
     "gui"     { Build-GUI }
+    "wasm"    { Build-Wasm }
     "android" { Build-Android }
     "test"    { Run-Tests }
     "lint"    { Run-Lint }

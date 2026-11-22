@@ -1,6 +1,9 @@
 package deck
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestNewUUIDAndDefaultConfig(t *testing.T) {
 	u1 := NewUUID()
@@ -66,5 +69,60 @@ func TestConfigCloneIsolationAndValidate(t *testing.T) {
 	badSlot.Profiles[0].Pages[0].Slots["0,0"].ActionUUID = ""
 	if err := badSlot.Validate(); err == nil {
 		t.Error("expected error for empty slot ActionUUID")
+	}
+}
+
+func TestColorPaletteNormalizeHexDedupeAndEmptyPreservation(t *testing.T) {
+	if hex, ok := NormalizeHexColor("38bdf8"); !ok || hex != "#38BDF8" {
+		t.Fatalf("NormalizeHexColor(38bdf8) = (%q, %v), want (#38BDF8, true)", hex, ok)
+	}
+	if hex, ok := NormalizeHexColor("#0fc"); !ok || hex != "#00FFCC" {
+		t.Fatalf("NormalizeHexColor(#0fc) = (%q, %v), want (#00FFCC, true)", hex, ok)
+	}
+	if _, ok := NormalizeHexColor("#12345"); ok {
+		t.Fatal("expected invalid 5-char hex rejected")
+	}
+
+	// Nil palette seeds built-in defaults; custom palette deduplicates and normalizes.
+	norm := NormalizeColorPalette([]ColorSwatch{
+		{Name: " Primary ", Hex: "38bdf8"},
+		{Name: "Duplicate Lowercase", Hex: "#38BDF8"},
+		{Name: "", Hex: "#abc"},
+		{Name: "Bad", Hex: "not-hex"},
+	})
+	if len(norm) != 2 || norm[0] != (ColorSwatch{Name: "Primary", Hex: "#38BDF8"}) || norm[1] != (ColorSwatch{Name: "#AABBCC", Hex: "#AABBCC"}) {
+		t.Fatalf("unexpected normalized palette: %+v", norm)
+	}
+
+	// Empty non-nil palette survives JSON roundtrip and Normalize().
+	cfg := DefaultConfig()
+	cfg.ColorPalette = []ColorSwatch{}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	var decoded Config
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	decoded.Normalize()
+	if decoded.ColorPalette == nil || len(decoded.ColorPalette) != 0 {
+		t.Fatalf("expected intentionally empty ColorPalette preserved across JSON roundtrip, got %#v", decoded.ColorPalette)
+	}
+
+	// SlotConfig Clone & Normalize preserve BackgroundColor, BackgroundImage, HideTitle.
+	slot := &SlotConfig{
+		ActionUUID:      "test.act",
+		Color:           "38bdf8",
+		BackgroundColor: "#0f0",
+		BackgroundImage: " /tmp/bg.png ",
+		HideTitle:       true,
+	}
+	cfg.Profiles[0].Pages[0].Slots["0,0"] = slot
+	cfg.Normalize()
+	cp := cfg.Clone()
+	got := cp.Profiles[0].Pages[0].Slots["0,0"]
+	if got.Color != "#38BDF8" || got.BackgroundColor != "#00FF00" || got.BackgroundImage != "/tmp/bg.png" || !got.HideTitle {
+		t.Fatalf("unexpected normalized slot background fields: %+v", got)
 	}
 }

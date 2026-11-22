@@ -1,8 +1,12 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1039,11 +1043,20 @@ func TestMainWindowWasmPluginReloadAndSettings(t *testing.T) {
 	test.Tap(pomoBtn)
 	drainUI()
 
-	for _, key := range []string{"label", "minutes", "color"} {
+	for _, key := range []string{"label", "minutes", "doneColor"} {
 		if _, ok := mw.inspector.fields[key]; !ok {
 			t.Fatalf("expected inspector field %q for pomodoro action, got %+v", key, mw.inspector.fields)
 		}
 	}
+	if _, isColorCtrl := mw.inspector.fields["doneColor"].control.(*colorFieldControl); !isColorCtrl {
+		t.Fatalf("expected *colorFieldControl for pomodoro doneColor, got %T", mw.inspector.fields["doneColor"].control)
+	}
+	if mw.inspector.accentColorCtrl == nil {
+		t.Fatal("expected accentColorCtrl on inspector")
+	}
+	mw.inspector.accentColorCtrl.SetValue("#FBBF24")
+	test.Tap(mw.inspector.saveBtn)
+	drainUI()
 
 	if mw.inspector.triggerBtn == nil {
 		t.Fatal("expected trigger button in inspector")
@@ -1060,6 +1073,9 @@ func TestMainWindowWasmPluginReloadAndSettings(t *testing.T) {
 	}
 	if tile00.subtitle == "" {
 		t.Fatal("expected non-empty countdown subtitle on tile (0,0)")
+	}
+	if tile00.accentHex != "#FBBF24" {
+		t.Fatalf("expected Pomodoro resting tile to keep user Accent Color #FBBF24, got %q", tile00.accentHex)
 	}
 
 	pluginsDlg := mw.ShowSettingsDialogTab(settingsTabPlugins)
@@ -1372,4 +1388,160 @@ func TestMainWindowMoveSwapCopyAcrossPagesAndProfiles(t *testing.T) {
 	if dials[0].Config == nil || dials[0].Config.Title != "Dial One" || dials[1].Config == nil || dials[1].Config.Title != "Dial Zero" {
 		t.Fatalf("expected swapped dials, got d0=%+v d1=%+v", dials[0].Config, dials[1].Config)
 	}
+}
+
+type widgetTestProvider struct{}
+
+func (p *widgetTestProvider) Kind() plugin.ProviderKind { return plugin.ProviderWasm }
+func (p *widgetTestProvider) Name() string              { return "Widget Test Provider" }
+
+func (p *widgetTestProvider) Manifests() []plugin.Manifest {
+	return []plugin.Manifest{{
+		UUID:     "com.test.ui.widgets",
+		Name:     "Widget Test",
+		Version:  "1.0.0",
+		Provider: plugin.ProviderWasm,
+		Actions:  p.Actions(),
+	}}
+}
+
+func (p *widgetTestProvider) Actions() []plugin.ActionDescriptor {
+	return []plugin.ActionDescriptor{{
+		UUID:        "test.ui.widgets",
+		PluginUUID:  "com.test.ui.widgets",
+		Name:        "All Schema Widgets",
+		Category:    "Test",
+		Controllers: []deck.ControllerType{deck.ControllerKeypad},
+		Provider:    plugin.ProviderWasm,
+		SettingsSchema: []plugin.SettingField{
+			{Key: "tint", Label: "Tint Color", Type: plugin.FieldColor, Default: "#38BDF8"},
+			{Key: "badge", Label: "Badge Image", Type: plugin.FieldImage},
+			{Key: "script", Label: "Target File", Type: plugin.FieldFile},
+		},
+	}}
+}
+
+func (p *widgetTestProvider) BindHost(plugin.HostAPI)                  {}
+func (p *widgetTestProvider) Dispatch(context.Context, plugin.ActionEvent) error { return nil }
+func (p *widgetTestProvider) Close() error                             { return nil }
+
+func TestMainWindowCustomPaletteBackgroundsAndSchemaWidgets(t *testing.T) {
+	drainUI()
+	testApp := test.NewApp()
+	t.Cleanup(func() {
+		drainUI()
+		testApp.Quit()
+	})
+	testApp.Settings().SetTheme(&StudioTheme{})
+
+	reg := plugin.NewRegistry()
+	if err := reg.RegisterProvider(core.New()); err != nil {
+		t.Fatalf("RegisterProvider(core) error = %v", err)
+	}
+	if err := reg.RegisterProvider(&widgetTestProvider{}); err != nil {
+		t.Fatalf("RegisterProvider(widgetTestProvider) error = %v", err)
+	}
+	eng, err := app.NewEngine(deck.NewMemoryStore(nil), reg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = eng.Close()
+		drainUI()
+	})
+
+	cfgDir := t.TempDir()
+	mw := NewMainWindow(testApp, eng)
+	mw.SetConfigPath(filepath.Join(cfgDir, "config.json"))
+	drainUI()
+
+	btn := mw.catalogButtons["test.ui.widgets"]
+	if btn == nil {
+		t.Fatal("expected test.ui.widgets in Action Catalog")
+	}
+	test.Tap(btn)
+	drainUI()
+
+	tintCtrl, okTint := mw.inspector.fields["tint"].control.(*colorFieldControl)
+	if !okTint || tintCtrl == nil {
+		t.Fatalf("expected *colorFieldControl for FieldColor, got %T", mw.inspector.fields["tint"].control)
+	}
+	if _, okImg := mw.inspector.fields["badge"].control.(*imageFieldControl); !okImg {
+		t.Fatalf("expected *imageFieldControl for FieldImage, got %T", mw.inspector.fields["badge"].control)
+	}
+	if _, okFile := mw.inspector.fields["script"].control.(*fileFieldControl); !okFile {
+		t.Fatalf("expected *fileFieldControl for FieldFile, got %T", mw.inspector.fields["script"].control)
+	}
+
+	// Live palette update adds swatch chip without clobbering unsaved title edits.
+	mw.inspector.titleEntry.SetText("Unsaved Title")
+	origCount := len(mw.inspector.accentColorCtrl.swatchBtns)
+	if err := eng.AddColorSwatch("Mint", "#10B981"); err != nil {
+		t.Fatalf("AddColorSwatch() error = %v", err)
+	}
+	drainUI()
+	if gotCount := len(mw.inspector.accentColorCtrl.swatchBtns); gotCount != origCount+1 {
+		t.Fatalf("expected swatch button count %d, got %d", origCount+1, gotCount)
+	}
+	if mw.inspector.titleEntry.Text != "Unsaved Title" {
+		t.Fatalf("expected unsaved titleEntry preserved on palette refresh, got %q", mw.inspector.titleEntry.Text)
+	}
+
+	// Solid bright background color + custom schema color save -> contrast text stays dark on bright Amber.
+	mw.inspector.bgColorCtrl.SetValue("#FBBF24")
+	tintCtrl.SetValue("14b8a6")
+	test.Tap(mw.inspector.saveBtn)
+	drainUI()
+
+	tile00 := mw.surface.tiles["0,0"]
+	if tile00 == nil || tile00.bgColorHex != "#FBBF24" {
+		t.Fatalf("expected tile (0,0) bgColorHex #FBBF24, got %+v", tile00)
+	}
+	if gotContrast := contrastTextColor(parseHexColor("#FBBF24", ColorDarkCharcoal)); gotContrast != ColorObsidianSlate {
+		t.Fatalf("expected dark contrast text for #FBBF24, got %+v", gotContrast)
+	}
+	savedSlot := eng.Snapshot().Slots["0,0"].Config
+	if savedSlot == nil || savedSlot.Settings["tint"] != "#14B8A6" {
+		t.Fatalf("expected normalized tint #14B8A6 in saved settings, got %+v", savedSlot)
+	}
+
+	// Import a rectangular PNG (12x8) as Background Image + enable Hide Title.
+	srcPNG := filepath.Join(cfgDir, "bg-source.png")
+	rectImg := image.NewRGBA(image.Rect(0, 0, 12, 8))
+	for y := range 8 {
+		for x := range 12 {
+			rectImg.SetRGBA(x, y, color.RGBA{R: 56, G: 189, B: 248, A: 255})
+		}
+	}
+	var pngBuf bytes.Buffer
+	if err := png.Encode(&pngBuf, rectImg); err != nil {
+		t.Fatalf("png.Encode() error = %v", err)
+	}
+	if err := os.WriteFile(srcPNG, pngBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("WriteFile(srcPNG) error = %v", err)
+	}
+
+	if err := mw.inspector.bgImageCtrl.ImportFile(srcPNG); err != nil {
+		t.Fatalf("bgImageCtrl.ImportFile() error = %v", err)
+	}
+	mw.inspector.hideTitleCheck.SetChecked(true)
+	test.Tap(mw.inspector.saveBtn)
+	drainUI()
+
+	assetsDir := filepath.Join(cfgDir, "assets")
+	if !strings.HasPrefix(tile00.bgImageURI, assetsDir) {
+		t.Fatalf("expected imported background image inside %q, got %q", assetsDir, tile00.bgImageURI)
+	}
+	if tile00.decodedBgImg == nil || tile00.decodedBgImg.Bounds().Dx() != 8 || tile00.decodedBgImg.Bounds().Dy() != 8 {
+		t.Fatalf("expected 8x8 square-cropped background image, got %+v", tile00.decodedBgImg)
+	}
+	if tile00.title != "" {
+		t.Fatalf("expected HideTitle to blank tile title, got %q", tile00.title)
+	}
+
+	// Open General Settings tab containing Custom Color Palette manager & close cleanly.
+	genDlg := mw.ShowSettingsDialogTab(settingsTabGeneral)
+	drainUI()
+	genDlg.Hide()
+	drainUI()
 }

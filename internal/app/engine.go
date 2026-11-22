@@ -18,13 +18,15 @@ import (
 
 // SlotVisual represents the live rendered appearance of a keypad slot or encoder dial.
 type SlotVisual struct {
-	Title    string         `json:"title"`
-	Subtitle string         `json:"subtitle,omitempty"`
-	Color    string         `json:"color,omitempty"`
-	ImageURI string         `json:"imageUri,omitempty"`
-	State    int            `json:"state,omitempty"`
-	Feedback map[string]any `json:"feedback,omitempty"`
-	Flash    string         `json:"flash,omitempty"`
+	Title           string         `json:"title"`
+	Subtitle        string         `json:"subtitle,omitempty"`
+	Color           string         `json:"color,omitempty"`
+	BackgroundColor string         `json:"backgroundColor,omitempty"`
+	BackgroundImage string         `json:"backgroundImage,omitempty"`
+	ImageURI        string         `json:"imageUri,omitempty"`
+	State           int            `json:"state,omitempty"`
+	Feedback        map[string]any `json:"feedback,omitempty"`
+	Flash           string         `json:"flash,omitempty"`
 }
 
 // RenderedSlot pairs a persisted SlotConfig with its live SlotVisual and resolved ActionDescriptor.
@@ -67,6 +69,7 @@ type Snapshot struct {
 	InFolder          bool                    `json:"inFolder"`
 	Slots             map[string]RenderedSlot `json:"slots"`
 	DialSlots         map[int]RenderedSlot    `json:"dialSlots"`
+	ColorPalette      []deck.ColorSwatch      `json:"colorPalette,omitempty"`
 	PluginCount       int                     `json:"pluginCount"`
 	ActionCount       int                     `json:"actionCount"`
 	CanUndo           bool                    `json:"canUndo"`
@@ -297,6 +300,7 @@ func (e *Engine) snapshotLocked() Snapshot {
 		InFolder:          inFolder,
 		Slots:             renderedSlots,
 		DialSlots:         renderedDials,
+		ColorPalette:      slices.Clone(e.cfg.ColorPalette),
 		PluginCount:       len(e.registry.Providers()),
 		ActionCount:       len(e.registry.Actions()),
 		CanUndo:           len(e.undoStack) > 0,
@@ -333,9 +337,11 @@ func (e *Engine) renderSlotLocked(slot *deck.SlotConfig) RenderedSlot {
 	}
 
 	vis := SlotVisual{
-		Title: title,
-		Color: col,
-		State: cp.State,
+		Title:           title,
+		Color:           col,
+		BackgroundColor: cp.BackgroundColor,
+		BackgroundImage: cp.BackgroundImage,
+		State:           cp.State,
 	}
 	live, hasLive := e.visuals[cp.Context]
 	if hasLive {
@@ -362,7 +368,9 @@ func (e *Engine) renderSlotLocked(slot *deck.SlotConfig) RenderedSlot {
 	if vis.ImageURI == "" && descPtr != nil && descPtr.DefaultImage != "" {
 		vis.ImageURI = descPtr.DefaultImage
 	}
-	if descPtr != nil && descPtr.HideTitle && (!hasLive || !live.hasTitle) && vis.ImageURI != "" &&
+	if cp.HideTitle {
+		vis.Title = ""
+	} else if descPtr != nil && descPtr.HideTitle && (!hasLive || !live.hasTitle) && vis.ImageURI != "" &&
 		(cp.Title == descPtr.DefaultTitle || cp.Title == descPtr.Name) {
 		vis.Title = ""
 	}
@@ -1065,6 +1073,41 @@ func (e *Engine) AssignDialAction(dialIndex int, actionUUID string) (*deck.SlotC
 	return slotCopy, nil
 }
 
+// SlotAppearance describes user-editable visual and trigger metadata for a button or dial slot.
+type SlotAppearance struct {
+	Title           string
+	Color           string
+	BackgroundColor string
+	BackgroundImage string
+	HideTitle       bool
+	SetHotkey       bool
+	Hotkey          string
+}
+
+func applySlotAppearance(slot *deck.SlotConfig, app SlotAppearance, allowHotkey bool) error {
+	slot.Title = app.Title
+	if raw := strings.TrimSpace(app.Color); raw == "" {
+		slot.Color = ""
+	} else if hex, ok := deck.NormalizeHexColor(raw); ok {
+		slot.Color = hex
+	} else {
+		return fmt.Errorf("invalid accent color %q (expected #RRGGBB)", app.Color)
+	}
+	if raw := strings.TrimSpace(app.BackgroundColor); raw == "" {
+		slot.BackgroundColor = ""
+	} else if hex, ok := deck.NormalizeHexColor(raw); ok {
+		slot.BackgroundColor = hex
+	} else {
+		return fmt.Errorf("invalid background color %q (expected #RRGGBB)", app.BackgroundColor)
+	}
+	slot.BackgroundImage = strings.TrimSpace(app.BackgroundImage)
+	slot.HideTitle = app.HideTitle
+	if allowHotkey && app.SetHotkey {
+		slot.Hotkey = strings.TrimSpace(app.Hotkey)
+	}
+	return nil
+}
+
 // UpdateKeypadSlot persists title, color, and settings changes for the action at c.
 func (e *Engine) UpdateKeypadSlot(c deck.Coordinates, title, color string, settings map[string]any) error {
 	return e.updateKeypadSlotInternal(c, title, color, false, "", settings)
@@ -1075,12 +1118,38 @@ func (e *Engine) UpdateKeypadSlotWithHotkey(c deck.Coordinates, title, color, ho
 	return e.updateKeypadSlotInternal(c, title, color, true, strings.TrimSpace(hotkeyStr), settings)
 }
 
+// UpdateKeypadSlotAppearance atomically persists title, accent/background styling, hotkey, and settings for keypad slot c.
+func (e *Engine) UpdateKeypadSlotAppearance(c deck.Coordinates, app SlotAppearance, settings map[string]any) error {
+	return e.updateKeypadSlotWith(c, "Edit slot", func(slot *deck.SlotConfig) error {
+		return applySlotAppearance(slot, app, true)
+	}, settings)
+}
+
 func (e *Engine) updateKeypadSlotInternal(
 	c deck.Coordinates,
 	title string,
 	color string,
 	setHotkey bool,
 	hotkeyStr string,
+	settings map[string]any,
+) error {
+	return e.updateKeypadSlotWith(c, "Edit slot", func(slot *deck.SlotConfig) error {
+		return applySlotAppearance(slot, SlotAppearance{
+			Title:           title,
+			Color:           color,
+			BackgroundColor: slot.BackgroundColor,
+			BackgroundImage: slot.BackgroundImage,
+			HideTitle:       slot.HideTitle,
+			SetHotkey:       setHotkey,
+			Hotkey:          hotkeyStr,
+		}, true)
+	}, settings)
+}
+
+func (e *Engine) updateKeypadSlotWith(
+	c deck.Coordinates,
+	label string,
+	mutate func(slot *deck.SlotConfig) error,
 	settings map[string]any,
 ) error {
 	e.opMu.Lock()
@@ -1094,19 +1163,24 @@ func (e *Engine) updateKeypadSlotInternal(
 		return fmt.Errorf("no action assigned at slot %s", c.SlotKey())
 	}
 	before := e.captureHistoryLocked("")
-	slot.Title = title
-	slot.Color = color
-	if setHotkey {
-		slot.Hotkey = hotkeyStr
+	if err := mutate(slot); err != nil {
+		e.restoreStateLocked(before)
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return err
 	}
 	if settings != nil {
 		slot.Settings = cloneSettings(settings)
+	}
+	if live, ok := e.visuals[slot.Context]; ok {
+		live.hasTitle = false
+		e.visuals[slot.Context] = live
 	}
 	slotCopy := slot.Clone()
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.finishMutation(before, cfgCopy, "Edit slot")
+	err := e.finishMutation(before, cfgCopy, label)
 	e.opMu.Unlock()
 	if err != nil {
 		return err
@@ -1127,6 +1201,30 @@ func (e *Engine) updateKeypadSlotInternal(
 
 // UpdateDialSlot persists title, color, and settings changes for the action on dialIndex.
 func (e *Engine) UpdateDialSlot(dialIndex int, title, color string, settings map[string]any) error {
+	return e.updateDialSlotWith(dialIndex, "Edit dial", func(slot *deck.SlotConfig) error {
+		return applySlotAppearance(slot, SlotAppearance{
+			Title:           title,
+			Color:           color,
+			BackgroundColor: slot.BackgroundColor,
+			BackgroundImage: slot.BackgroundImage,
+			HideTitle:       slot.HideTitle,
+		}, false)
+	}, settings)
+}
+
+// UpdateDialSlotAppearance atomically persists title, accent/background styling, and settings for encoder dialIndex.
+func (e *Engine) UpdateDialSlotAppearance(dialIndex int, app SlotAppearance, settings map[string]any) error {
+	return e.updateDialSlotWith(dialIndex, "Edit dial", func(slot *deck.SlotConfig) error {
+		return applySlotAppearance(slot, app, false)
+	}, settings)
+}
+
+func (e *Engine) updateDialSlotWith(
+	dialIndex int,
+	label string,
+	mutate func(slot *deck.SlotConfig) error,
+	settings map[string]any,
+) error {
 	e.opMu.Lock()
 	e.mu.Lock()
 	prof := e.activeProfileLocked()
@@ -1138,16 +1236,24 @@ func (e *Engine) UpdateDialSlot(dialIndex int, title, color string, settings map
 		return fmt.Errorf("no action assigned at dial %d", dialIndex)
 	}
 	before := e.captureHistoryLocked("")
-	slot.Title = title
-	slot.Color = color
+	if err := mutate(slot); err != nil {
+		e.restoreStateLocked(before)
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return err
+	}
 	if settings != nil {
 		slot.Settings = cloneSettings(settings)
+	}
+	if live, ok := e.visuals[slot.Context]; ok {
+		live.hasTitle = false
+		e.visuals[slot.Context] = live
 	}
 	slotCopy := slot.Clone()
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.finishMutation(before, cfgCopy, "Edit dial")
+	err := e.finishMutation(before, cfgCopy, label)
 	e.opMu.Unlock()
 	if err != nil {
 		return err
@@ -1955,6 +2061,9 @@ func (e *Engine) applyHistoryStep(isRedo bool) (string, error) {
 	topIdx := len(stack) - 1
 	target := stack[topIdx]
 	nextCfg := target.cfg.Clone()
+	if e.cfg != nil && e.cfg.ColorPalette != nil {
+		nextCfg.ColorPalette = slices.Clone(e.cfg.ColorPalette)
+	}
 	nextCfg.Normalize()
 	e.mu.Unlock()
 
@@ -2203,6 +2312,85 @@ func (e *Engine) SaveGlobalSettings(pluginUUID string, settings map[string]any) 
 	}
 	e.notifySubscribers()
 	return nil
+}
+
+// ColorPalette returns a cloned slice of the user's global reusable color swatches.
+func (e *Engine) ColorPalette() []deck.ColorSwatch {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.cfg == nil {
+		return deck.DefaultColorPalette()
+	}
+	return slices.Clone(e.cfg.ColorPalette)
+}
+
+func (e *Engine) mutateColorPalette(fn func(cur []deck.ColorSwatch) ([]deck.ColorSwatch, error)) error {
+	e.opMu.Lock()
+	e.mu.Lock()
+	cur := slices.Clone(e.cfg.ColorPalette)
+	next, err := fn(cur)
+	if err != nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return err
+	}
+	if next == nil {
+		next = []deck.ColorSwatch{}
+	} else {
+		next = deck.NormalizeColorPalette(next)
+	}
+	prev := e.cfg.ColorPalette
+	e.cfg.ColorPalette = next
+	cfgCopy := e.cfg.Clone()
+	e.mu.Unlock()
+
+	if err := e.store.Save(cfgCopy); err != nil {
+		e.mu.Lock()
+		e.cfg.ColorPalette = prev
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return err
+	}
+	e.opMu.Unlock()
+	e.notifySubscribers()
+	return nil
+}
+
+// SaveColorPalette replaces the persisted global color palette with normalized swatches.
+func (e *Engine) SaveColorPalette(swatches []deck.ColorSwatch) error {
+	return e.mutateColorPalette(func(_ []deck.ColorSwatch) ([]deck.ColorSwatch, error) {
+		if swatches == nil {
+			return []deck.ColorSwatch{}, nil
+		}
+		return swatches, nil
+	})
+}
+
+// AddColorSwatch validates hex, updates an existing swatch name or appends a new swatch, and persists the palette.
+func (e *Engine) AddColorSwatch(name, hex string) error {
+	normHex, ok := deck.NormalizeHexColor(hex)
+	if !ok {
+		return fmt.Errorf("invalid hex color %q (expected #RRGGBB)", hex)
+	}
+	cleanName := strings.TrimSpace(name)
+	if cleanName == "" {
+		cleanName = normHex
+	}
+	return e.mutateColorPalette(func(cur []deck.ColorSwatch) ([]deck.ColorSwatch, error) {
+		for i := range cur {
+			if strings.EqualFold(cur[i].Hex, normHex) {
+				cur[i].Hex = normHex
+				cur[i].Name = cleanName
+				return cur, nil
+			}
+		}
+		return append(cur, deck.ColorSwatch{Name: cleanName, Hex: normHex}), nil
+	})
+}
+
+// ResetColorPalette restores the built-in Obsidian Slate default color palette.
+func (e *Engine) ResetColorPalette() error {
+	return e.SaveColorPalette(deck.DefaultColorPalette())
 }
 
 func (e *Engine) updateVisual(ctxID string, patch plugin.VisualPatch) {

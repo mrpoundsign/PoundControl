@@ -6,6 +6,7 @@ set -euo pipefail
 #   ./build.sh           # Run lint, tests, and build Desktop Studio GUI
 #   ./build.sh gui       # Build native Desktop Studio GUI into build/bin/pounddeck
 #   ./build.sh gui-win   # Cross-compile Windows Desktop Studio GUI via MinGW into build/bin/pounddeck.exe
+#   ./build.sh wasm      # Build example WebAssembly plugins (WASI reactor) into build/bin/*.wasm
 #   ./build.sh test      # Run unit & headless UI tests
 #   ./build.sh lint      # Run go fix -diff & golangci-lint-v2
 #   ./build.sh clean     # Clean build outputs
@@ -95,6 +96,12 @@ build_gui_win() {
     echo "✓ Successfully built $BIN_DIR/pounddeck.exe"
 }
 
+build_wasm() {
+    echo "==> Building example WebAssembly plugins (WASI reactor)..."
+    GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 go build -buildmode=c-shared -o "$BIN_DIR/pomodoro.wasm" ./examples/wasm-pomodoro
+    echo "✓ Successfully built $BIN_DIR/pomodoro.wasm"
+}
+
 run_tests() {
     echo "==> Running unit and headless UI tests..."
     go test -count=1 -v ./cmd/... ./internal/... ./pkg/...
@@ -120,6 +127,9 @@ case "$TARGET" in
     gui-win)
         build_gui_win
         ;;
+    wasm)
+        build_wasm
+        ;;
     test)
         run_tests
         ;;
@@ -130,7 +140,7 @@ case "$TARGET" in
         clean_artifacts
         ;;
     *)
-        echo "Unknown target: $TARGET. Available: all, gui, gui-win, test, lint, clean"
+        echo "Unknown target: $TARGET. Available: all, gui, gui-win, wasm, test, lint, clean"
         exit 1
         ;;
 esac

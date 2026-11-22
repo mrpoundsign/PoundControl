@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"syscall"
 	"unicode/utf16"
 	"unsafe"
@@ -29,12 +30,12 @@ const (
 	vkLWin    uint16 = 0x5B
 	vkReturn  uint16 = 0x0D
 
-	vkVolumeMute    uint16 = 0xAD
-	vkVolumeDown    uint16 = 0xAE
-	vkVolumeUp      uint16 = 0xAF
-	vkMediaNext     uint16 = 0xB0
-	vkMediaPrev     uint16 = 0xB1
-	vkMediaStop     uint16 = 0xB2
+	vkVolumeMute     uint16 = 0xAD
+	vkVolumeDown     uint16 = 0xAE
+	vkVolumeUp       uint16 = 0xAF
+	vkMediaNext      uint16 = 0xB0
+	vkMediaPrev      uint16 = 0xB1
+	vkMediaStop      uint16 = 0xB2
 	vkMediaPlayPause uint16 = 0xB3
 
 	createNoWindow uint32 = 0x08000000
@@ -109,8 +110,8 @@ func (windowsDriver) SendHotkey(_ context.Context, ch Chord) error {
 	}
 	inputs = append(inputs, vkInput(ch.WinVK, ch.WinExt, false))
 	inputs = append(inputs, vkInput(ch.WinVK, ch.WinExt, true))
-	for i := len(mods) - 1; i >= 0; i-- {
-		inputs = append(inputs, vkInput(mods[i], false, true))
+	for _, mod := range slices.Backward(mods) {
+		inputs = append(inputs, vkInput(mod, false, true))
 	}
 	return sendWinInputs(inputs)
 }

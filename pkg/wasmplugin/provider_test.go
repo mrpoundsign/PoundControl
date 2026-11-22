@@ -88,6 +88,17 @@ func (f *fakeHostAPI) latestSubtitle(ctxID string) (string, bool) {
 	return "", false
 }
 
+func (f *fakeHostAPI) latestPatch(ctxID string) (plugin.VisualPatch, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, p := range slices.Backward(f.patches) {
+		if p.ctx == ctxID {
+			return p.patch, true
+		}
+	}
+	return plugin.VisualPatch{}, false
+}
+
 func (f *fakeHostAPI) patchCount(ctxID string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -495,5 +506,190 @@ func main() {}
 	statuses := prov.Plugins()
 	if len(statuses) != 1 || statuses[0].State != StatusError || !strings.Contains(strings.ToLower(statuses[0].Error), "deadline") {
 		t.Fatalf("expected timed-out module in StatusError with deadline reason, got %+v", statuses)
+	}
+}
+
+func TestProviderPomodoroSecondsPauseDoneColor(t *testing.T) {
+	tmp := t.TempDir()
+	defaultDir := filepath.Join(tmp, "wasm")
+	if err := os.MkdirAll(defaultDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll error = %v", err)
+	}
+
+	pomodoroSrc := filepath.Join("..", "..", "examples", "wasm-pomodoro")
+	pomodoroWasm := filepath.Join(defaultDir, "pomodoro.wasm")
+	compileWasmFixture(t, pomodoroSrc, pomodoroWasm)
+
+	host := newFakeHostAPI()
+	prov := NewProvider(Options{
+		DefaultPluginsDir: defaultDir,
+	})
+	prov.BindHost(host)
+	t.Cleanup(func() { _ = prov.Close() })
+
+	if err := prov.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	var foundSeconds bool
+	for _, act := range prov.Actions() {
+		if act.UUID != "com.pounddeck.examples.pomodoro" {
+			continue
+		}
+		for _, field := range act.SettingsSchema {
+			if field.Key == "seconds" && field.Type == plugin.FieldNumber {
+				foundSeconds = true
+				break
+			}
+		}
+	}
+	if !foundSeconds {
+		t.Fatalf("expected pomodoro settingsSchema to expose %q number field", "seconds")
+	}
+
+	ctxID := "slot-pomodoro-sec"
+	actionUUID := "com.pounddeck.examples.pomodoro"
+	if err := prov.Dispatch(context.Background(), plugin.ActionEvent{
+		Type:       plugin.EventWillAppear,
+		Context:    ctxID,
+		ActionUUID: actionUUID,
+		Controller: deck.ControllerKeypad,
+		Settings: map[string]any{
+			"minutes":   0,
+			"seconds":   2,
+			"doneColor": "#EF4444",
+		},
+	}); err != nil {
+		t.Fatalf("Dispatch(willAppear) error = %v", err)
+	}
+
+	initPatch, ok := host.latestPatch(ctxID)
+	if !ok || initPatch.Subtitle == nil || *initPatch.Subtitle != "00:02" {
+		t.Fatalf("expected initial subtitle 00:02, got (%+v, %v)", initPatch, ok)
+	}
+	if initPatch.Color == nil || *initPatch.Color != "" {
+		t.Fatalf("expected initial color patch empty to preserve slot Accent Color, got %v", initPatch.Color)
+	}
+	if initPatch.Title != nil {
+		t.Fatalf("expected Title omitted when override label is blank, got %q", *initPatch.Title)
+	}
+
+	// Start countdown and wait for 00:01 tick.
+	if err := prov.Dispatch(context.Background(), plugin.ActionEvent{
+		Type:       plugin.EventKeyDown,
+		Context:    ctxID,
+		ActionUUID: actionUUID,
+		Controller: deck.ControllerKeypad,
+	}); err != nil {
+		t.Fatalf("Dispatch(start keyDown) error = %v", err)
+	}
+	deadline := time.Now().Add(2500 * time.Millisecond)
+	var tickedOne bool
+	for time.Now().Before(deadline) {
+		if sub, ok := host.latestSubtitle(ctxID); ok && sub == "00:01" {
+			tickedOne = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !tickedOne {
+		sub, _ := host.latestSubtitle(ctxID)
+		t.Fatalf("expected timer to tick to 00:01, got %q", sub)
+	}
+
+	// Pause via KeyDown and verify subtitle shows paused state even with blank label.
+	if err := prov.Dispatch(context.Background(), plugin.ActionEvent{
+		Type:       plugin.EventKeyDown,
+		Context:    ctxID,
+		ActionUUID: actionUUID,
+		Controller: deck.ControllerKeypad,
+	}); err != nil {
+		t.Fatalf("Dispatch(pause keyDown) error = %v", err)
+	}
+	if sub, ok := host.latestSubtitle(ctxID); !ok || sub != "00:01 (Paused)" {
+		t.Fatalf("expected paused subtitle %q, got (%q, %v)", "00:01 (Paused)", sub, ok)
+	}
+
+	// Resume via KeyDown and wait for completion at 00:00 with doneColor + flash.
+	if err := prov.Dispatch(context.Background(), plugin.ActionEvent{
+		Type:       plugin.EventKeyDown,
+		Context:    ctxID,
+		ActionUUID: actionUUID,
+		Controller: deck.ControllerKeypad,
+	}); err != nil {
+		t.Fatalf("Dispatch(resume keyDown) error = %v", err)
+	}
+	deadline = time.Now().Add(2500 * time.Millisecond)
+	var finishedPatch plugin.VisualPatch
+	var finished bool
+	for time.Now().Before(deadline) {
+		if p, ok := host.latestPatch(ctxID); ok && p.Subtitle != nil && *p.Subtitle == "00:00" {
+			finishedPatch = p
+			finished = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !finished {
+		sub, _ := host.latestSubtitle(ctxID)
+		t.Fatalf("expected timer to reach 00:00, stayed at %q", sub)
+	}
+	if finishedPatch.Color == nil || *finishedPatch.Color != "#EF4444" {
+		t.Fatalf("expected finished color #EF4444, got %v", finishedPatch.Color)
+	}
+	if finishedPatch.Flash != "ok" {
+		t.Fatalf("expected finished flash %q, got %q", "ok", finishedPatch.Flash)
+	}
+
+	// Reset via DialPress restores 00:02 and clears temporary doneColor override.
+	if err := prov.Dispatch(context.Background(), plugin.ActionEvent{
+		Type:       plugin.EventDialPress,
+		Context:    ctxID,
+		ActionUUID: actionUUID,
+		Controller: deck.ControllerEncoder,
+	}); err != nil {
+		t.Fatalf("Dispatch(dialPress) error = %v", err)
+	}
+	resetPatch, ok := host.latestPatch(ctxID)
+	if !ok || resetPatch.Subtitle == nil || *resetPatch.Subtitle != "00:02" {
+		t.Fatalf("expected reset subtitle 00:02, got (%+v, %v)", resetPatch, ok)
+	}
+	if resetPatch.Color == nil || *resetPatch.Color != "" {
+		t.Fatalf("expected reset color patch empty, got %v", resetPatch.Color)
+	}
+}
+
+func TestProviderRejectsCommandWasmWithoutInitialize(t *testing.T) {
+	tmp := t.TempDir()
+	defaultDir := filepath.Join(tmp, "wasm")
+	if err := os.MkdirAll(defaultDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll error = %v", err)
+	}
+
+	pomodoroSrc := filepath.Join("..", "..", "examples", "wasm-pomodoro")
+	commandWasm := filepath.Join(defaultDir, "command.wasm")
+	cmd := exec.Command("go", "build", "-o", commandWasm, ".")
+	cmd.Dir = pomodoroSrc
+	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("compile command wasm fixture failed: %v\n%s", err, string(out))
+	}
+
+	prov := NewProvider(Options{
+		DefaultPluginsDir: defaultDir,
+	})
+	prov.BindHost(newFakeHostAPI())
+	t.Cleanup(func() { _ = prov.Close() })
+
+	if err := prov.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	statuses := prov.Plugins()
+	if len(statuses) != 1 || statuses[0].State != StatusError {
+		t.Fatalf("expected 1 StatusError entry for WASI command module, got %+v", statuses)
+	}
+	if !strings.Contains(statuses[0].Error, "_initialize") || !strings.Contains(statuses[0].Error, "-buildmode=c-shared") {
+		t.Fatalf("expected error mentioning _initialize and -buildmode=c-shared, got %q", statuses[0].Error)
 	}
 }

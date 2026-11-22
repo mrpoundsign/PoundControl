@@ -55,20 +55,23 @@ func widgetAbsolutePos(obj fyne.CanvasObject, local, fallbackAbs fyne.Position) 
 
 type deckTileWidget struct {
 	widget.BaseWidget
-	coords         deck.Coordinates
-	title          string
-	subtitle       string
-	hotkey         string
-	accentHex      string
-	flash          string
-	imageURI       string
-	decodedImg     image.Image
-	assigned       bool
-	autoBack       bool
-	selected   bool
-	hovered    bool
-	dropTarget bool
-	moveSource bool
+	coords       deck.Coordinates
+	title        string
+	subtitle     string
+	hotkey       string
+	accentHex    string
+	bgColorHex   string
+	bgImageURI   string
+	decodedBgImg image.Image
+	flash        string
+	imageURI     string
+	decodedImg   image.Image
+	assigned     bool
+	autoBack     bool
+	selected     bool
+	hovered      bool
+	dropTarget   bool
+	moveSource   bool
 
 	dragAccumX  float32
 	dragAccumY  float32
@@ -113,6 +116,9 @@ func (t *deckTileWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 		t.subtitle = ""
 		t.hotkey = ""
 		t.accentHex = ""
+		t.bgColorHex = ""
+		t.bgImageURI = ""
+		t.decodedBgImg = nil
 		t.flash = ""
 		t.imageURI = ""
 		t.decodedImg = nil
@@ -127,6 +133,18 @@ func (t *deckTileWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 			t.hotkey = ""
 		}
 		t.accentHex = rendered.Visual.Color
+		t.bgColorHex = strings.TrimSpace(rendered.Visual.BackgroundColor)
+		bgURI := strings.TrimSpace(rendered.Visual.BackgroundImage)
+		if bgURI != t.bgImageURI {
+			t.bgImageURI = bgURI
+			if bgURI == "" {
+				t.decodedBgImg = nil
+			} else if decoded, err := sharedTileCache.GetOrDecode(bgURI, 192); err == nil {
+				t.decodedBgImg = tile.CropSquare(decoded)
+			} else {
+				t.decodedBgImg = nil
+			}
+		}
 		t.flash = rendered.Visual.Flash
 		uri := strings.TrimSpace(rendered.Visual.ImageURI)
 		if uri != t.imageURI {
@@ -207,6 +225,18 @@ func (t *deckTileWidget) CreateRenderer() fyne.WidgetRenderer {
 	bg.StrokeColor = ColorSlateBorder
 	bg.StrokeWidth = 1.5
 
+	bgImg := canvas.NewImageFromImage(t.decodedBgImg)
+	bgImg.FillMode = canvas.ImageFillStretch
+	bgImg.ScaleMode = canvas.ImageScaleSmooth
+	bgImg.SetMinSize(fyne.NewSize(0, 0))
+	if t.decodedBgImg == nil {
+		bgImg.Hide()
+	}
+
+	scrim := canvas.NewRectangle(color.RGBA{R: 10, G: 10, B: 12, A: 125})
+	scrim.CornerRadius = 8
+	scrim.Hide()
+
 	accentBar := canvas.NewRectangle(ColorSlateBorder)
 	accentBar.CornerRadius = 2
 
@@ -233,49 +263,82 @@ func (t *deckTileWidget) CreateRenderer() fyne.WidgetRenderer {
 	coordTxt.Alignment = fyne.TextAlignCenter
 
 	return &deckTileRenderer{
-		tile:         t,
-		bg:           bg,
-		accentBar:    accentBar,
-		artImg:       artImg,
-		titleTxt:     titleTxt,
-		subTxt:       subTxt,
-		coordTxt:     coordTxt,
-		lastImageURI: t.imageURI,
-		hasArt:       t.decodedImg != nil,
+		tile:           t,
+		bg:             bg,
+		bgImg:          bgImg,
+		scrim:          scrim,
+		accentBar:      accentBar,
+		artImg:         artImg,
+		titleTxt:       titleTxt,
+		subTxt:         subTxt,
+		coordTxt:       coordTxt,
+		lastImageURI:   t.imageURI,
+		hasArt:         t.decodedImg != nil,
+		lastBgImageURI: t.bgImageURI,
+		hasBgImg:       t.decodedBgImg != nil,
 	}
 }
 
 type deckTileRenderer struct {
-	tile         *deckTileWidget
-	bg           *canvas.Rectangle
-	accentBar    *canvas.Rectangle
-	artImg       *canvas.Image
-	titleTxt     *canvas.Text
-	subTxt       *canvas.Text
-	coordTxt     *canvas.Text
-	lastImageURI string
-	hasArt       bool
+	tile           *deckTileWidget
+	bg             *canvas.Rectangle
+	bgImg          *canvas.Image
+	scrim          *canvas.Rectangle
+	accentBar      *canvas.Rectangle
+	artImg         *canvas.Image
+	titleTxt       *canvas.Text
+	subTxt         *canvas.Text
+	coordTxt       *canvas.Text
+	lastImageURI   string
+	hasArt         bool
+	lastBgImageURI string
+	hasBgImg       bool
 }
 
 func (r *deckTileRenderer) Layout(size fyne.Size) {
 	r.bg.Move(fyne.NewPos(0, 0))
 	r.bg.Resize(size)
 
+	hasBgImg := r.tile.decodedBgImg != nil
+	hasText := strings.TrimSpace(r.tile.title) != "" || strings.TrimSpace(r.tile.subtitle) != ""
+	if hasBgImg {
+		pad := float32(2)
+		bgPos := fyne.NewPos(pad, pad)
+		bgSz := fyne.NewSize(max(float32(8), size.Width-pad*2), max(float32(8), size.Height-pad*2))
+		r.bgImg.Move(bgPos)
+		r.bgImg.Resize(bgSz)
+		r.bgImg.Show()
+		if hasText {
+			r.scrim.Move(bgPos)
+			r.scrim.Resize(bgSz)
+			r.scrim.Show()
+		} else {
+			r.scrim.Hide()
+		}
+	} else {
+		r.bgImg.Hide()
+		r.scrim.Hide()
+	}
+
 	barW := max(float32(20), size.Width-24)
 	r.accentBar.Move(fyne.NewPos(12, 7))
 	r.accentBar.Resize(fyne.NewSize(barW, 3))
 
 	hasArt := r.tile.decodedImg != nil
-	fullArt := hasArt && strings.TrimSpace(r.tile.title) == "" && strings.TrimSpace(r.tile.subtitle) == ""
+	fullArt := (hasArt || hasBgImg) && !hasText
 	if fullArt {
 		r.accentBar.Hide()
 		r.titleTxt.Hide()
 		r.subTxt.Hide()
 		r.coordTxt.Hide()
-		pad := float32(6)
-		r.artImg.Move(fyne.NewPos(pad, pad))
-		r.artImg.Resize(fyne.NewSize(max(float32(16), size.Width-pad*2), max(float32(16), size.Height-pad*2)))
-		r.artImg.Show()
+		if hasArt {
+			pad := float32(6)
+			r.artImg.Move(fyne.NewPos(pad, pad))
+			r.artImg.Resize(fyne.NewSize(max(float32(16), size.Width-pad*2), max(float32(16), size.Height-pad*2)))
+			r.artImg.Show()
+		} else {
+			r.artImg.Hide()
+		}
 		return
 	}
 
@@ -356,8 +419,15 @@ func (r *deckTileRenderer) Refresh() {
 		r.lastImageURI = r.tile.imageURI
 		r.hasArt = hasDecoded
 	}
+	hasBgImg := r.tile.decodedBgImg != nil
+	if r.lastBgImageURI != r.tile.bgImageURI || r.hasBgImg != hasBgImg {
+		r.bgImg.Image = r.tile.decodedBgImg
+		r.lastBgImageURI = r.tile.bgImageURI
+		r.hasBgImg = hasBgImg
+	}
 
-	fullArt := hasDecoded && strings.TrimSpace(r.tile.title) == "" && strings.TrimSpace(r.tile.subtitle) == ""
+	hasText := strings.TrimSpace(r.tile.title) != "" || strings.TrimSpace(r.tile.subtitle) != ""
+	fullArt := (hasDecoded || hasBgImg) && !hasText
 
 	accentCol := ColorSlateBorder
 	if r.tile.accentHex != "" {
@@ -372,60 +442,83 @@ func (r *deckTileRenderer) Refresh() {
 		r.accentBar.Hide()
 	}
 
+	hasCustomBg := (r.tile.assigned || r.tile.autoBack) && r.tile.bgColorHex != ""
+	fillCol := ColorDarkCharcoal
+	if hasCustomBg {
+		fillCol = parseHexColor(r.tile.bgColorHex, ColorDarkCharcoal)
+	} else if r.tile.dropTarget || r.tile.moveSource || r.tile.selected || r.tile.flash != "" || r.tile.hovered {
+		fillCol = ColorElevatedSlate
+	}
+	r.bg.FillColor = fillCol
+
 	switch {
 	case r.tile.dropTarget:
-		r.bg.FillColor = ColorElevatedSlate
 		r.bg.StrokeColor = ColorSkyBlue
 		r.bg.StrokeWidth = 3.0
-		r.titleTxt.Color = ColorChromeWhite
-		r.coordTxt.Color = ColorSkyBlue
 	case r.tile.moveSource:
-		r.bg.FillColor = ColorElevatedSlate
 		r.bg.StrokeColor = ColorWarning
 		r.bg.StrokeWidth = 2.5
-		r.titleTxt.Color = ColorChromeWhite
-		r.coordTxt.Color = ColorWarning
 	case r.tile.selected:
-		r.bg.FillColor = ColorElevatedSlate
 		r.bg.StrokeColor = ColorSkyBlue
 		r.bg.StrokeWidth = 2.5
-		r.titleTxt.Color = ColorChromeWhite
-		r.coordTxt.Color = ColorSkyBlue
 	case r.tile.flash == "ok":
-		r.bg.FillColor = ColorElevatedSlate
 		r.bg.StrokeColor = ColorSuccess
 		r.bg.StrokeWidth = 2.0
-		r.titleTxt.Color = ColorChromeWhite
-		r.coordTxt.Color = ColorSecondarySlate
 	case r.tile.flash == "alert":
-		r.bg.FillColor = ColorElevatedSlate
 		r.bg.StrokeColor = ColorError
 		r.bg.StrokeWidth = 2.0
-		r.titleTxt.Color = ColorChromeWhite
-		r.coordTxt.Color = ColorSecondarySlate
 	case r.tile.hovered:
-		r.bg.FillColor = ColorElevatedSlate
 		r.bg.StrokeColor = ColorSecondarySlate
 		r.bg.StrokeWidth = 1.5
-		r.titleTxt.Color = ColorChromeWhite
-		r.coordTxt.Color = ColorSecondarySlate
 	case r.tile.assigned || r.tile.autoBack:
-		r.bg.FillColor = ColorDarkCharcoal
 		r.bg.StrokeColor = accentCol
 		r.bg.StrokeWidth = 1.5
-		r.titleTxt.Color = ColorChromeWhite
-		r.coordTxt.Color = ColorSecondarySlate
 	default:
-		r.bg.FillColor = ColorDarkCharcoal
 		r.bg.StrokeColor = ColorSlateBorder
 		r.bg.StrokeWidth = 1.5
-		r.titleTxt.Color = ColorSecondarySlate
-		r.coordTxt.Color = ColorMutedText
 	}
 
-	r.subTxt.Color = accentCol
+	switch {
+	case hasBgImg:
+		r.titleTxt.Color = ColorChromeWhite
+		r.coordTxt.Color = ColorSecondarySlate
+		if contrastRatio(accentCol, ColorDarkCharcoal) < 3.0 {
+			r.subTxt.Color = ColorChromeWhite
+		} else {
+			r.subTxt.Color = accentCol
+		}
+	case hasCustomBg:
+		fg := contrastTextColor(fillCol)
+		r.titleTxt.Color = fg
+		r.coordTxt.Color = secondaryContrastTextColor(fillCol)
+		if contrastRatio(accentCol, fillCol) < 3.0 {
+			r.subTxt.Color = fg
+		} else {
+			r.subTxt.Color = accentCol
+		}
+	default:
+		if r.tile.assigned || r.tile.autoBack || r.tile.dropTarget || r.tile.moveSource || r.tile.selected || r.tile.flash != "" || r.tile.hovered {
+			r.titleTxt.Color = ColorChromeWhite
+		} else {
+			r.titleTxt.Color = ColorSecondarySlate
+		}
+		switch {
+		case r.tile.dropTarget || r.tile.selected:
+			r.coordTxt.Color = ColorSkyBlue
+		case r.tile.moveSource:
+			r.coordTxt.Color = ColorWarning
+		case r.tile.assigned || r.tile.autoBack || r.tile.flash != "" || r.tile.hovered:
+			r.coordTxt.Color = ColorSecondarySlate
+		default:
+			r.coordTxt.Color = ColorMutedText
+		}
+		r.subTxt.Color = accentCol
+	}
+
 	r.Layout(r.tile.Size())
 	r.bg.Refresh()
+	r.bgImg.Refresh()
+	r.scrim.Refresh()
 	r.accentBar.Refresh()
 	r.artImg.Refresh()
 	r.titleTxt.Refresh()
@@ -434,19 +527,20 @@ func (r *deckTileRenderer) Refresh() {
 }
 
 func (r *deckTileRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{r.bg, r.accentBar, r.artImg, r.titleTxt, r.subTxt, r.coordTxt}
+	return []fyne.CanvasObject{r.bg, r.bgImg, r.scrim, r.accentBar, r.artImg, r.titleTxt, r.subTxt, r.coordTxt}
 }
 
 func (r *deckTileRenderer) Destroy() {}
 
 type dialFaceWidget struct {
 	widget.BaseWidget
-	index          int
-	title          string
-	value          string
-	accentHex      string
-	hasIndicator   bool
-	indicatorPct   float64
+	index        int
+	title        string
+	value        string
+	accentHex    string
+	bgColorHex   string
+	hasIndicator bool
+	indicatorPct float64
 	assigned     bool
 	selected     bool
 	hovered      bool
@@ -490,6 +584,7 @@ func (d *dialFaceWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 		d.title = fmt.Sprintf("Dial %d", d.index+1)
 		d.value = "Empty"
 		d.accentHex = ""
+		d.bgColorHex = ""
 		d.hasIndicator = false
 		d.indicatorPct = 0
 		d.assigned = false
@@ -513,6 +608,7 @@ func (d *dialFaceWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 			}
 		}
 		d.accentHex = rendered.Visual.Color
+		d.bgColorHex = strings.TrimSpace(rendered.Visual.BackgroundColor)
 		d.assigned = rendered.Config != nil
 	}
 	d.selected = selected
@@ -742,35 +838,48 @@ func (r *dialFaceRenderer) Refresh() {
 	r.ring.StrokeColor = ringColor
 	r.indFill.FillColor = ringColor
 
+	hasCustomBg := r.face.assigned && r.face.bgColorHex != ""
+	fillCol := ColorDarkCharcoal
+	if hasCustomBg {
+		fillCol = parseHexColor(r.face.bgColorHex, ColorDarkCharcoal)
+	} else if r.face.dropTarget || r.face.moveSource || r.face.selected || r.face.hovered {
+		fillCol = ColorElevatedSlate
+	}
+	r.bg.FillColor = fillCol
+
 	switch {
 	case r.face.dropTarget:
-		r.bg.FillColor = ColorElevatedSlate
 		r.bg.StrokeColor = ColorSkyBlue
 		r.bg.StrokeWidth = 3.0
 	case r.face.moveSource:
-		r.bg.FillColor = ColorElevatedSlate
 		r.bg.StrokeColor = ColorWarning
 		r.bg.StrokeWidth = 2.5
 	case r.face.selected:
-		r.bg.FillColor = ColorElevatedSlate
 		r.bg.StrokeColor = ColorSkyBlue
 		r.bg.StrokeWidth = 2.5
 	case r.face.hovered:
-		r.bg.FillColor = ColorElevatedSlate
 		r.bg.StrokeColor = ColorSecondarySlate
 		r.bg.StrokeWidth = 1.5
 	default:
-		r.bg.FillColor = ColorDarkCharcoal
 		r.bg.StrokeColor = ColorSlateBorder
 		r.bg.StrokeWidth = 1.5
 	}
 
-	if r.face.assigned {
-		r.titleTxt.Color = ColorChromeWhite
-		r.valTxt.Color = ringColor
-	} else {
+	switch {
+	case !r.face.assigned:
 		r.titleTxt.Color = ColorSecondarySlate
 		r.valTxt.Color = ColorMutedText
+	case hasCustomBg:
+		fg := contrastTextColor(fillCol)
+		r.titleTxt.Color = fg
+		if contrastRatio(ringColor, fillCol) < 3.0 {
+			r.valTxt.Color = fg
+		} else {
+			r.valTxt.Color = ringColor
+		}
+	default:
+		r.titleTxt.Color = ColorChromeWhite
+		r.valTxt.Color = ringColor
 	}
 
 	r.Layout(r.face.Size())

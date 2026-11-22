@@ -732,3 +732,117 @@ func TestEngineDialMoveAndCrossProfileCopyPaste(t *testing.T) {
 		t.Fatalf("expected Profile 1 folder child untouched after deleting cloned copy, got %+v", got)
 	}
 }
+
+func TestEngineAppearanceBackgroundsHideTitleAndGlobalPalette(t *testing.T) {
+	eng, _ := newMoveTestEngine(t)
+
+	// 1. Default global palette starts seeded; AddColorSwatch normalizes & deduplicates.
+	if len(eng.ColorPalette()) != len(deck.DefaultColorPalette()) {
+		t.Fatalf("expected default palette length %d, got %d", len(deck.DefaultColorPalette()), len(eng.ColorPalette()))
+	}
+	if err := eng.AddColorSwatch("Brand Teal", "14b8a6"); err != nil {
+		t.Fatalf("AddColorSwatch() error = %v", err)
+	}
+	if err := eng.AddColorSwatch("Ocean Teal", "#14B8A6"); err != nil {
+		t.Fatalf("AddColorSwatch(update) error = %v", err)
+	}
+	if err := eng.AddColorSwatch("Invalid", "not-hex"); err == nil {
+		t.Fatal("expected AddColorSwatch to reject invalid hex")
+	}
+	pal := eng.Snapshot().ColorPalette
+	if len(pal) != len(deck.DefaultColorPalette())+1 || pal[len(pal)-1] != (deck.ColorSwatch{Name: "Ocean Teal", Hex: "#14B8A6"}) {
+		t.Fatalf("unexpected updated palette: %+v", pal)
+	}
+
+	// Empty custom palette persists across SaveColorPalette, then ResetColorPalette restores defaults.
+	if err := eng.SaveColorPalette([]deck.ColorSwatch{}); err != nil {
+		t.Fatalf("SaveColorPalette(empty) error = %v", err)
+	}
+	if len(eng.Snapshot().ColorPalette) != 0 {
+		t.Fatalf("expected empty palette after SaveColorPalette([]), got %+v", eng.Snapshot().ColorPalette)
+	}
+	if err := eng.ResetColorPalette(); err != nil {
+		t.Fatalf("ResetColorPalette() error = %v", err)
+	}
+	if len(eng.Snapshot().ColorPalette) != len(deck.DefaultColorPalette()) {
+		t.Fatalf("expected restored default palette, got %+v", eng.Snapshot().ColorPalette)
+	}
+	if err := eng.AddColorSwatch("Brand Teal", "#14B8A6"); err != nil {
+		t.Fatalf("re-AddColorSwatch() error = %v", err)
+	}
+
+	// 2. Keypad & dial background fill/image + HideTitle + validation + Undo preserving global palette.
+	c00 := deck.Coordinates{Row: 0, Col: 0}
+	if _, err := eng.AssignKeypadAction(c00, "test.lifecycle.action"); err != nil {
+		t.Fatalf("AssignKeypadAction(c00) error = %v", err)
+	}
+	if err := eng.UpdateKeypadSlotAppearance(c00, SlotAppearance{
+		Title:           "Hidden Label",
+		Color:           "#38BDF8",
+		BackgroundColor: "invalid-hex",
+	}, nil); err == nil {
+		t.Fatal("expected UpdateKeypadSlotAppearance to reject invalid background hex")
+	}
+
+	if err := eng.UpdateKeypadSlotAppearance(c00, SlotAppearance{
+		Title:           "Hidden Label",
+		Color:           "38bdf8",
+		BackgroundColor: "fbbf24",
+		BackgroundImage: "/tmp/bg.png",
+		HideTitle:       true,
+		SetHotkey:       true,
+		Hotkey:          "Ctrl+Alt+9",
+	}, map[string]any{"mode": "custom"}); err != nil {
+		t.Fatalf("UpdateKeypadSlotAppearance() error = %v", err)
+	}
+
+	if _, err := eng.AssignDialAction(0, "test.lifecycle.action"); err != nil {
+		t.Fatalf("AssignDialAction(0) error = %v", err)
+	}
+	if err := eng.UpdateDialSlotAppearance(0, SlotAppearance{
+		Title:           "Encoder",
+		Color:           "#22C55E",
+		BackgroundColor: "#1E293B",
+	}, nil); err != nil {
+		t.Fatalf("UpdateDialSlotAppearance() error = %v", err)
+	}
+
+	snap := eng.Snapshot()
+	rKey := snap.Slots[c00.SlotKey()]
+	if rKey.Visual.BackgroundColor != "#FBBF24" || rKey.Visual.BackgroundImage != "/tmp/bg.png" || rKey.Visual.Title != "" {
+		t.Fatalf("unexpected rendered keypad visual with background & HideTitle: %+v", rKey.Visual)
+	}
+	if rKey.Config.Color != "#38BDF8" || rKey.Config.Hotkey != "Ctrl+Alt+9" {
+		t.Fatalf("unexpected normalized keypad config: %+v", rKey.Config)
+	}
+	rDial := snap.DialSlots[0]
+	if rDial.Visual.BackgroundColor != "#1E293B" {
+		t.Fatalf("expected dial BackgroundColor #1E293B, got %+v", rDial.Visual)
+	}
+
+	// Cross-profile PasteSlotConfig preserves BackgroundColor, BackgroundImage, and HideTitle.
+	prof2, err := eng.CreateProfile("Second", deck.GridSize{Cols: 3, Rows: 2}, 1)
+	if err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+	pasted, err := eng.PasteSlotConfig(rKey.Config, snap.ActiveProfileID, SlotLocation{
+		ProfileID:  prof2.ID,
+		PageIndex:  0,
+		Controller: deck.ControllerKeypad,
+		Coords:     c00,
+	})
+	if err != nil {
+		t.Fatalf("PasteSlotConfig() error = %v", err)
+	}
+	if pasted.BackgroundColor != "#FBBF24" || pasted.BackgroundImage != "/tmp/bg.png" || !pasted.HideTitle {
+		t.Fatalf("PasteSlotConfig lost background appearance fields: %+v", pasted)
+	}
+
+	// Undo preserves custom ColorPalette swatches even when reverting earlier slot mutations.
+	if _, err := eng.Undo(); err != nil {
+		t.Fatalf("Undo() error = %v", err)
+	}
+	if pal := eng.Snapshot().ColorPalette; len(pal) != len(deck.DefaultColorPalette())+1 {
+		t.Fatalf("expected Undo to preserve global ColorPalette, got %+v", pal)
+	}
+}

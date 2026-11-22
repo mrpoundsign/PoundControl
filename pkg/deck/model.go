@@ -25,15 +25,84 @@ func NewUUID() string {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// ColorSwatch defines one named hex color entry in the user's reusable global palette.
+type ColorSwatch struct {
+	Name string `json:"name"`
+	Hex  string `json:"hex"`
+}
+
+// DefaultColorPalette returns the built-in Obsidian Slate accent & background swatches.
+func DefaultColorPalette() []ColorSwatch {
+	return []ColorSwatch{
+		{Name: "Sky Blue", Hex: "#38BDF8"},
+		{Name: "Emerald", Hex: "#22C55E"},
+		{Name: "Amber", Hex: "#FBBF24"},
+		{Name: "Rose", Hex: "#EF4444"},
+		{Name: "Violet", Hex: "#A855F7"},
+		{Name: "Slate", Hex: "#94A3B8"},
+	}
+}
+
+// NormalizeHexColor validates a 3- or 6-digit hex color (with or without '#') and returns uppercase #RRGGBB.
+func NormalizeHexColor(raw string) (string, bool) {
+	s := strings.TrimPrefix(strings.TrimSpace(raw), "#")
+	switch len(s) {
+	case 3:
+		s = string([]byte{s[0], s[0], s[1], s[1], s[2], s[2]})
+	case 6:
+	default:
+		return "", false
+	}
+	for i := range len(s) {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return "", false
+		}
+	}
+	return "#" + strings.ToUpper(s), true
+}
+
+// NormalizeColorPalette canonicalizes hex colors, trims names, and deduplicates swatches by hex.
+// A nil slice seeds DefaultColorPalette; an intentionally empty non-nil slice is preserved.
+func NormalizeColorPalette(in []ColorSwatch) []ColorSwatch {
+	if in == nil {
+		return DefaultColorPalette()
+	}
+	out := make([]ColorSwatch, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+	for _, sw := range in {
+		hex, ok := NormalizeHexColor(sw.Hex)
+		if !ok {
+			continue
+		}
+		if _, dup := seen[hex]; dup {
+			continue
+		}
+		seen[hex] = struct{}{}
+		name := strings.TrimSpace(sw.Name)
+		if name == "" {
+			name = hex
+		}
+		out = append(out, ColorSwatch{
+			Name: name,
+			Hex:  hex,
+		})
+	}
+	return out
+}
+
 // SlotConfig holds the persisted action binding and configuration for one keypad slot or dial.
 type SlotConfig struct {
-	Context    string         `json:"context"`
-	ActionUUID string         `json:"actionUuid"`
-	Title      string         `json:"title,omitempty"`
-	Color      string         `json:"color,omitempty"`
-	Hotkey     string         `json:"hotkey,omitempty"`
-	State      int            `json:"state,omitempty"`
-	Settings   map[string]any `json:"settings,omitempty"`
+	Context         string         `json:"context"`
+	ActionUUID      string         `json:"actionUuid"`
+	Title           string         `json:"title,omitempty"`
+	Color           string         `json:"color,omitempty"`
+	BackgroundColor string         `json:"backgroundColor,omitempty"`
+	BackgroundImage string         `json:"backgroundImage,omitempty"`
+	HideTitle       bool           `json:"hideTitle,omitempty"`
+	Hotkey          string         `json:"hotkey,omitempty"`
+	State           int            `json:"state,omitempty"`
+	Settings        map[string]any `json:"settings,omitempty"`
 }
 
 // Clone returns a deep copy of the slot configuration.
@@ -126,6 +195,7 @@ type Config struct {
 	SchemaVersion   int                       `json:"schemaVersion"`
 	ActiveProfileID string                    `json:"activeProfileId"`
 	Profiles        []*Profile                `json:"profiles"`
+	ColorPalette    []ColorSwatch             `json:"colorPalette"`
 	PluginSettings  map[string]map[string]any `json:"pluginSettings,omitempty"`
 }
 
@@ -152,6 +222,7 @@ func DefaultConfig() *Config {
 				Folders: make(map[string]*Folder),
 			},
 		},
+		ColorPalette:   DefaultColorPalette(),
 		PluginSettings: make(map[string]map[string]any),
 	}
 }
@@ -173,6 +244,7 @@ func (c *Config) Clone() *Config {
 		SchemaVersion:   c.SchemaVersion,
 		ActiveProfileID: c.ActiveProfileID,
 		Profiles:        profiles,
+		ColorPalette:    slices.Clone(c.ColorPalette),
 		PluginSettings:  pluginSettings,
 	}
 }
@@ -185,6 +257,7 @@ func (c *Config) Normalize() {
 	if c.SchemaVersion <= 0 {
 		c.SchemaVersion = CurrentSchemaVersion
 	}
+	c.ColorPalette = NormalizeColorPalette(c.ColorPalette)
 	if c.PluginSettings == nil {
 		c.PluginSettings = make(map[string]map[string]any)
 	} else {
@@ -397,6 +470,26 @@ func validateSlotContainer(label string, slots map[string]*SlotConfig, dials map
 	return nil
 }
 
+func normalizeSlotConfig(slot *SlotConfig) {
+	if strings.TrimSpace(slot.Context) == "" {
+		slot.Context = NewUUID()
+	}
+	if slot.Settings == nil {
+		slot.Settings = make(map[string]any)
+	}
+	if hex, ok := NormalizeHexColor(slot.Color); ok {
+		slot.Color = hex
+	} else {
+		slot.Color = strings.TrimSpace(slot.Color)
+	}
+	if hex, ok := NormalizeHexColor(slot.BackgroundColor); ok {
+		slot.BackgroundColor = hex
+	} else {
+		slot.BackgroundColor = strings.TrimSpace(slot.BackgroundColor)
+	}
+	slot.BackgroundImage = strings.TrimSpace(slot.BackgroundImage)
+}
+
 func normalizeSlotMap(src map[string]*SlotConfig) map[string]*SlotConfig {
 	if src == nil {
 		return make(map[string]*SlotConfig)
@@ -406,12 +499,7 @@ func normalizeSlotMap(src map[string]*SlotConfig) map[string]*SlotConfig {
 			delete(src, k)
 			continue
 		}
-		if strings.TrimSpace(slot.Context) == "" {
-			slot.Context = NewUUID()
-		}
-		if slot.Settings == nil {
-			slot.Settings = make(map[string]any)
-		}
+		normalizeSlotConfig(slot)
 	}
 	return src
 }
@@ -425,12 +513,7 @@ func normalizeDialMap(src map[int]*SlotConfig) map[int]*SlotConfig {
 			delete(src, k)
 			continue
 		}
-		if strings.TrimSpace(slot.Context) == "" {
-			slot.Context = NewUUID()
-		}
-		if slot.Settings == nil {
-			slot.Settings = make(map[string]any)
-		}
+		normalizeSlotConfig(slot)
 	}
 	return src
 }

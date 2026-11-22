@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"unsafe"
 )
@@ -21,7 +22,7 @@ type timerState struct {
 	remaining int // seconds
 	total     int // seconds
 	label     string
-	color     string
+	doneColor string
 }
 
 var (
@@ -69,11 +70,26 @@ func bytesPtrLen(b []byte) (uint32, uint32) {
 	return uint32(uintptr(unsafe.Pointer(&b[0]))), uint32(len(b))
 }
 
+func readHostSlice(ptr, size uint32) ([]byte, bool) {
+	allocMu.Lock()
+	buf, ok := allocations[ptr]
+	if !ok || uint32(len(buf)) < size {
+		allocMu.Unlock()
+		return nil, false
+	}
+	cp := make([]byte, size)
+	copy(cp, buf[:size])
+	allocMu.Unlock()
+	return cp, true
+}
+
 func updateVisual(ctxID, title, subtitle, color, flash string, pct *int) {
 	patch := map[string]any{
-		"title":    title,
 		"subtitle": subtitle,
 		"color":    color,
+	}
+	if title != "" {
+		patch["title"] = title
 	}
 	if flash != "" {
 		patch["flash"] = flash
@@ -120,11 +136,11 @@ func pdManifest() uint64 {
 				"controllers":  []string{"Keypad", "Encoder"},
 				"settingsSchema": []map[string]any{
 					{
-						"key":      "label",
-						"label":    "Timer Label",
-						"type":     "text",
-						"default":  "Focus",
-						"required": false,
+						"key":         "label",
+						"label":       "Override Label",
+						"type":        "text",
+						"placeholder": "Uses button Title if blank",
+						"required":    false,
 					},
 					{
 						"key":     "minutes",
@@ -133,10 +149,17 @@ func pdManifest() uint64 {
 						"default": 25,
 					},
 					{
-						"key":     "color",
-						"label":   "Accent Color",
-						"type":    "text",
-						"default": "#38BDF8",
+						"key":     "seconds",
+						"label":   "Duration (seconds)",
+						"type":    "number",
+						"default": 0,
+					},
+					{
+						"key":     "doneColor",
+						"label":   "Finished Color",
+						"type":    "color",
+						"default": "#22C55E",
+						"help":    "Highlights the button when the countdown reaches 00:00",
 					},
 				},
 			},
@@ -148,7 +171,10 @@ func pdManifest() uint64 {
 
 //go:wasmexport pd_handle_event
 func pdHandleEvent(ptr, size uint32) int32 {
-	raw := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(ptr))), size)
+	raw, ok := readHostSlice(ptr, size)
+	if !ok {
+		return -1
+	}
 	var ev struct {
 		Type     string         `json:"event"`
 		Context  string         `json:"context"`
@@ -168,12 +194,12 @@ func pdHandleEvent(ptr, size uint32) int32 {
 
 	switch ev.Type {
 	case "willAppear", "didReceiveSettings":
-		mins, label, col := parseSettings(ev.Settings)
+		totalSec, label, doneCol := parseSettings(ev.Settings)
 		st.label = label
-		st.color = col
+		st.doneColor = doneCol
 		if !st.running {
-			st.total = mins * 60
-			st.remaining = st.total
+			st.total = totalSec
+			st.remaining = totalSec
 		}
 	case "willDisappear":
 		st.running = false
@@ -190,7 +216,7 @@ func pdHandleEvent(ptr, size uint32) int32 {
 		}
 	case "dialRotate":
 		deltaSec := ev.Ticks * 60
-		st.remaining = max(60, min(90*60, st.remaining+deltaSec))
+		st.remaining = max(1, min(90*60, st.remaining+deltaSec))
 		if !st.running || st.remaining > st.total {
 			st.total = st.remaining
 		}
@@ -213,7 +239,10 @@ func pdHandleEvent(ptr, size uint32) int32 {
 
 //go:wasmexport pd_on_timer
 func pdOnTimer(ptr, size uint32) int32 {
-	raw := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(ptr))), size)
+	raw, ok := readHostSlice(ptr, size)
+	if !ok {
+		return -1
+	}
 	var tev struct {
 		TimerID string `json:"timerId"`
 		Context string `json:"context"`
@@ -254,59 +283,73 @@ func ensureState(ctxID string, settings map[string]any) *timerState {
 	if st, ok := states[ctxID]; ok {
 		return st
 	}
-	mins, label, col := parseSettings(settings)
+	totalSec, label, doneCol := parseSettings(settings)
 	st := &timerState{
-		total:     mins * 60,
-		remaining: mins * 60,
+		total:     totalSec,
+		remaining: totalSec,
 		label:     label,
-		color:     col,
+		doneColor: doneCol,
 	}
 	states[ctxID] = st
 	return st
 }
 
-func parseSettings(settings map[string]any) (mins int, label, col string) {
-	mins = 25
-	label = "Focus"
-	col = "#38BDF8"
+func parseNonNegInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		if int(n) >= 0 {
+			return int(n), true
+		}
+	case int:
+		if n >= 0 {
+			return n, true
+		}
+	case string:
+		trimmed := strings.TrimSpace(n)
+		if trimmed != "" {
+			if iv, err := strconv.Atoi(trimmed); err == nil && iv >= 0 {
+				return iv, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func parseSettings(settings map[string]any) (totalSec int, label, doneCol string) {
+	totalSec = 25 * 60
+	label = ""
+	doneCol = "#22C55E"
 	if settings == nil {
-		return mins, label, col
+		return totalSec, label, doneCol
 	}
 	if s, ok := settings["label"].(string); ok && s != "" {
 		label = s
 	}
-	if c, ok := settings["color"].(string); ok && c != "" {
-		col = c
+	if c, ok := settings["doneColor"].(string); ok && c != "" {
+		doneCol = c
 	}
-	switch v := settings["minutes"].(type) {
-	case float64:
-		if int(v) > 0 {
-			mins = int(v)
-		}
-	case int:
-		if v > 0 {
-			mins = v
-		}
-	case string:
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			mins = n
+	mins, hasMins := parseNonNegInt(settings["minutes"])
+	secs, hasSecs := parseNonNegInt(settings["seconds"])
+	if hasMins || hasSecs {
+		combined := mins*60 + secs
+		if combined > 0 {
+			totalSec = min(90*60, combined)
 		}
 	}
-	if mins > 90 {
-		mins = 90
-	}
-	return mins, label, col
+	return totalSec, label, doneCol
 }
 
 func formatVisual(st *timerState) (title, sub, col string, pct int) {
 	mm := st.remaining / 60
 	ss := st.remaining % 60
 	sub = fmt.Sprintf("%02d:%02d", mm, ss)
-	title = st.label
 	if !st.running && st.remaining > 0 && st.remaining < st.total {
-		title += " (Paused)"
+		sub += " (Paused)"
 	}
-	col = st.color
+	title = st.label
+	if !st.running && st.remaining == 0 {
+		col = st.doneColor
+	}
 	if st.total > 0 {
 		pct = (st.remaining * 100) / st.total
 	}

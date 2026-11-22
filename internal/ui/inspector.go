@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -19,33 +20,21 @@ import (
 	"github.com/mrpoundsign/PoundDeck/pkg/plugin"
 )
 
-type colorPreset struct {
-	label string
-	hex   string
-}
-
-var accentColorPresets = []colorPreset{
-	{label: "Default", hex: ""},
-	{label: "Sky Blue (#38BDF8)", hex: "#38BDF8"},
-	{label: "Emerald (#22C55E)", hex: "#22C55E"},
-	{label: "Amber (#FBBF24)", hex: "#FBBF24"},
-	{label: "Rose (#EF4444)", hex: "#EF4444"},
-	{label: "Violet (#A855F7)", hex: "#A855F7"},
-	{label: "Slate (#94A3B8)", hex: "#94A3B8"},
-}
-
 // ActionInspector renders a schema-driven configuration form for the selected slot or dial.
 type ActionInspector struct {
-	win                   fyne.Window
-	engine                *app.Engine
-	onStatus              func(string)
-	onSuspendHotkeys      func(bool)
-	piViewer              PIViewer
-	sdCtrl                SDPluginController
-	onOpenPluginsSettings func()
-	onMoveSelected        func()
-	onCopySelected        func()
-	root                  fyne.CanvasObject
+	win                     fyne.Window
+	engine                  *app.Engine
+	onStatus                func(string)
+	onSuspendHotkeys        func(bool)
+	piViewer                PIViewer
+	sdCtrl                  SDPluginController
+	onOpenPluginsSettings   func()
+	onOpenPaletteSettings   func()
+	onMoveSelected          func()
+	onCopySelected          func()
+	assetsDir               string
+	palette                 []deck.ColorSwatch
+	root                    fyne.CanvasObject
 
 	slotLbl    *widget.Label
 	actionLbl  *widget.Label
@@ -55,7 +44,10 @@ type ActionInspector struct {
 	actionsRow *fyne.Container
 
 	titleEntry         *widget.Entry
-	colorSelect        *widget.Select
+	accentColorCtrl    *colorFieldControl
+	bgColorCtrl        *colorFieldControl
+	bgImageCtrl        *imageFieldControl
+	hideTitleCheck     *widget.Check
 	hotkeyEntry        *widget.Entry
 	hotkeyCaptureBtn   *widget.Button
 	openPIBtn          *widget.Button
@@ -80,9 +72,11 @@ type ActionInspector struct {
 }
 
 type inspectorFieldBinding struct {
-	schema plugin.SettingField
-	widget fyne.CanvasObject
-	optMap map[string]string // label -> option value for FieldSelect
+	schema   plugin.SettingField
+	widget   fyne.CanvasObject
+	control  any
+	getValue func() any
+	optMap   map[string]string // label -> option value for FieldSelect
 }
 
 // NewActionInspector constructs an inspector panel bound to engine.
@@ -169,6 +163,16 @@ func (ins *ActionInspector) SetOnOpenPluginsSettings(fn func()) {
 	ins.onOpenPluginsSettings = fn
 }
 
+// SetOnOpenPaletteSettings registers a callback invoked when the user opens the palette editor.
+func (ins *ActionInspector) SetOnOpenPaletteSettings(fn func()) {
+	ins.onOpenPaletteSettings = fn
+}
+
+// SetAssetsDir configures the directory where imported custom button images are stored.
+func (ins *ActionInspector) SetAssetsDir(dir string) {
+	ins.assetsDir = strings.TrimSpace(dir)
+}
+
 // SetOnMoveSelected registers a callback invoked when the user clicks Move in the inspector.
 func (ins *ActionInspector) SetOnMoveSelected(fn func()) {
 	ins.onMoveSelected = fn
@@ -186,9 +190,28 @@ func (ins *ActionInspector) InvalidateBinding() {
 	ins.boundAutoBack = false
 }
 
+func (ins *ActionInspector) refreshPaletteSwatches(swatches []deck.ColorSwatch) {
+	if slices.Equal(ins.palette, swatches) {
+		return
+	}
+	ins.palette = slices.Clone(swatches)
+	if ins.accentColorCtrl != nil {
+		ins.accentColorCtrl.RefreshPalette(ins.palette)
+	}
+	if ins.bgColorCtrl != nil {
+		ins.bgColorCtrl.RefreshPalette(ins.palette)
+	}
+	for _, b := range ins.fields {
+		if ctrl, ok := b.control.(*colorFieldControl); ok && ctrl != nil {
+			ctrl.RefreshPalette(ins.palette)
+		}
+	}
+}
+
 // SetSelection refreshes the inspector to reflect the currently selected slot or dial.
 // Form controls are rebuilt only when the bound action context or action UUID changes so active input focus is preserved.
 func (ins *ActionInspector) SetSelection(snap app.Snapshot, ctrl deck.ControllerType, coords deck.Coordinates, dial int) {
+	ins.refreshPaletteSwatches(snap.ColorPalette)
 	ins.selCtrl = ctrl
 	ins.selCoords = coords
 	ins.selDial = dial
@@ -263,7 +286,10 @@ func (ins *ActionInspector) clearForm(title, message string, canTrigger bool) {
 	clear(ins.fields)
 	clear(ins.hotkeyFieldButtons)
 	ins.titleEntry = nil
-	ins.colorSelect = nil
+	ins.accentColorCtrl = nil
+	ins.bgColorCtrl = nil
+	ins.bgImageCtrl = nil
+	ins.hideTitleCheck = nil
 	ins.hotkeyEntry = nil
 	ins.hotkeyCaptureBtn = nil
 	ins.openPIBtn = nil
@@ -314,25 +340,49 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 	ins.titleEntry.SetPlaceHolder("Tile label")
 	ins.titleEntry.SetText(cfg.Title)
 
-	presetLabels := make([]string, len(accentColorPresets))
-	selectedPreset := accentColorPresets[0].label
-	for i, p := range accentColorPresets {
-		presetLabels[i] = p.label
-		if strings.EqualFold(p.hex, cfg.Color) {
-			selectedPreset = p.label
+	paletteBtn := widget.NewButton("Palette...", func() {
+		if ins.onOpenPaletteSettings != nil {
+			ins.onOpenPaletteSettings()
 		}
-	}
-	ins.colorSelect = widget.NewSelect(presetLabels, nil)
-	ins.colorSelect.SetSelected(selectedPreset)
+	})
+	accentHeader := container.NewBorder(nil, nil, nil, paletteBtn, widget.NewLabel("Accent Color"))
+	ins.accentColorCtrl = newColorFieldControl(
+		ins.win,
+		"Accent Color",
+		cfg.Color,
+		ins.palette,
+		ins.engine.AddColorSwatch,
+		ins.reportStatus,
+	)
+
+	ins.bgColorCtrl = newColorFieldControl(
+		ins.win,
+		"Background Color",
+		cfg.BackgroundColor,
+		ins.palette,
+		ins.engine.AddColorSwatch,
+		ins.reportStatus,
+	)
 
 	items := []fyne.CanvasObject{
 		widget.NewLabel("Title"),
 		ins.titleEntry,
-		widget.NewLabel("Accent Color"),
-		ins.colorSelect,
+		accentHeader,
+		ins.accentColorCtrl.Object(),
+		widget.NewLabel("Background Color"),
+		ins.bgColorCtrl.Object(),
 	}
 
 	if ins.selCtrl == deck.ControllerKeypad {
+		ins.bgImageCtrl = newImageFieldControl(
+			ins.win,
+			cfg.BackgroundImage,
+			func() string { return ins.assetsDir },
+			ins.reportStatus,
+		)
+		ins.hideTitleCheck = widget.NewCheck("Hide Title on Button", nil)
+		ins.hideTitleCheck.SetChecked(cfg.HideTitle)
+
 		ins.hotkeyEntry = widget.NewEntry()
 		ins.hotkeyEntry.SetPlaceHolder("e.g. Ctrl+Shift+F1 or F13 (global)")
 		ins.hotkeyEntry.SetText(cfg.Hotkey)
@@ -340,8 +390,16 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 			ins.openHotkeyCapture("Capture Global Hotkey", ins.hotkeyEntry, captureModeGlobal)
 		})
 		hotkeyRow := container.NewBorder(nil, nil, nil, ins.hotkeyCaptureBtn, ins.hotkeyEntry)
-		items = append(items, widget.NewLabel("Global Hotkey"), hotkeyRow)
+		items = append(items,
+			widget.NewLabel("Background Image"),
+			ins.bgImageCtrl.Object(),
+			ins.hideTitleCheck,
+			widget.NewLabel("Global Hotkey"),
+			hotkeyRow,
+		)
 	} else {
+		ins.bgImageCtrl = nil
+		ins.hideTitleCheck = nil
 		ins.hotkeyEntry = nil
 		ins.hotkeyCaptureBtn = nil
 	}
@@ -498,7 +556,49 @@ func (ins *ActionInspector) buildSchemaField(field plugin.SettingField, settings
 		ins.fields[field.Key] = inspectorFieldBinding{schema: field, widget: entry}
 		out = append(out, widget.NewLabel(field.Label), container.NewBorder(nil, nil, nil, capBtn, entry))
 
-	default: // FieldText, FieldNumber, FieldColor
+	case plugin.FieldColor:
+		valStr := ""
+		if val != nil {
+			valStr = fmt.Sprint(val)
+		}
+		ctrl := newColorFieldControl(ins.win, field.Label, valStr, ins.palette, ins.engine.AddColorSwatch, ins.reportStatus)
+		ins.fields[field.Key] = inspectorFieldBinding{
+			schema:   field,
+			widget:   ctrl.entry,
+			control:  ctrl,
+			getValue: func() any { return ctrl.Value() },
+		}
+		out = append(out, widget.NewLabel(field.Label), ctrl.Object())
+
+	case plugin.FieldImage:
+		valStr := ""
+		if val != nil {
+			valStr = fmt.Sprint(val)
+		}
+		ctrl := newImageFieldControl(ins.win, valStr, func() string { return ins.assetsDir }, ins.reportStatus)
+		ins.fields[field.Key] = inspectorFieldBinding{
+			schema:   field,
+			widget:   ctrl.entry,
+			control:  ctrl,
+			getValue: func() any { return ctrl.Value() },
+		}
+		out = append(out, widget.NewLabel(field.Label), ctrl.Object())
+
+	case plugin.FieldFile:
+		valStr := ""
+		if val != nil {
+			valStr = fmt.Sprint(val)
+		}
+		ctrl := newFileFieldControl(ins.win, valStr, field.Placeholder)
+		ins.fields[field.Key] = inspectorFieldBinding{
+			schema:   field,
+			widget:   ctrl.entry,
+			control:  ctrl,
+			getValue: func() any { return ctrl.Value() },
+		}
+		out = append(out, widget.NewLabel(field.Label), ctrl.Object())
+
+	default: // FieldText, FieldNumber
 		entry := widget.NewEntry()
 		entry.SetPlaceHolder(field.Placeholder)
 		if val != nil {
@@ -519,6 +619,10 @@ func (ins *ActionInspector) buildSchemaField(field plugin.SettingField, settings
 func (ins *ActionInspector) collectSettings() map[string]any {
 	out := make(map[string]any, len(ins.fields))
 	for key, binding := range ins.fields {
+		if binding.getValue != nil {
+			out[key] = binding.getValue()
+			continue
+		}
 		switch w := binding.widget.(type) {
 		case *widget.Check:
 			out[key] = w.Checked
@@ -561,18 +665,6 @@ func (ins *ActionInspector) RefreshDynamicOptions() {
 	}
 }
 
-func (ins *ActionInspector) selectedColorHex() string {
-	if ins.colorSelect == nil {
-		return ""
-	}
-	for _, p := range accentColorPresets {
-		if p.label == ins.colorSelect.Selected {
-			return p.hex
-		}
-	}
-	return ""
-}
-
 func (ins *ActionInspector) handleSave() {
 	if ins.syncing || ins.boundActionID == "" {
 		return
@@ -581,8 +673,38 @@ func (ins *ActionInspector) handleSave() {
 	if ins.titleEntry != nil {
 		title = strings.TrimSpace(ins.titleEntry.Text)
 	}
-	colHex := ins.selectedColorHex()
+	var colHex string
+	if ins.accentColorCtrl != nil {
+		colHex = ins.accentColorCtrl.Value()
+	}
+	var bgColHex string
+	if ins.bgColorCtrl != nil {
+		bgColHex = ins.bgColorCtrl.Value()
+	}
+	var bgImage string
+	if ins.bgImageCtrl != nil {
+		bgImage = ins.bgImageCtrl.Value()
+	}
+	hideTitle := ins.hideTitleCheck != nil && ins.hideTitleCheck.Checked
+
 	settings := ins.collectSettings()
+	for key, binding := range ins.fields {
+		if binding.schema.Type != plugin.FieldColor {
+			continue
+		}
+		raw, _ := settings[key].(string)
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			settings[key] = ""
+			continue
+		}
+		norm, ok := deck.NormalizeHexColor(trimmed)
+		if !ok {
+			ins.reportStatus(fmt.Sprintf("Invalid color %q for %s (expected #RRGGBB)", raw, binding.schema.Label))
+			return
+		}
+		settings[key] = norm
+	}
 
 	canonicalHotkey := ""
 	if ins.selCtrl == deck.ControllerKeypad && ins.hotkeyEntry != nil {
@@ -598,11 +720,21 @@ func (ins *ActionInspector) handleSave() {
 		}
 	}
 
+	appearance := app.SlotAppearance{
+		Title:           title,
+		Color:           colHex,
+		BackgroundColor: bgColHex,
+		BackgroundImage: bgImage,
+		HideTitle:       hideTitle,
+		SetHotkey:       true,
+		Hotkey:          canonicalHotkey,
+	}
+
 	var err error
 	if ins.selCtrl == deck.ControllerEncoder {
-		err = ins.engine.UpdateDialSlot(ins.selDial, title, colHex, settings)
+		err = ins.engine.UpdateDialSlotAppearance(ins.selDial, appearance, settings)
 	} else {
-		err = ins.engine.UpdateKeypadSlotWithHotkey(ins.selCoords, title, colHex, canonicalHotkey, settings)
+		err = ins.engine.UpdateKeypadSlotAppearance(ins.selCoords, appearance, settings)
 	}
 	if err != nil {
 		ins.reportStatus("Save failed: " + err.Error())

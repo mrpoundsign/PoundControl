@@ -136,3 +136,72 @@ func TestCacheHitAndBoundedEviction(t *testing.T) {
 		t.Fatalf("expected cache bounded to 2 entries, got order=%d items=%d", len(cache.order), len(cache.items))
 	}
 }
+
+func TestImportImageAssetAndCropSquare(t *testing.T) {
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "src")
+	assetsDir := filepath.Join(dir, "assets")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	// Rectangular PNG (20x10) -> ImportImageAsset copies by content hash & dedupes; CropSquare yields 10x10.
+	rectImg := image.NewRGBA(image.Rect(0, 0, 20, 10))
+	for y := range 10 {
+		for x := range 20 {
+			rectImg.SetRGBA(x, y, color.RGBA{R: 56, G: 189, B: 248, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, rectImg); err != nil {
+		t.Fatalf("png.Encode() error = %v", err)
+	}
+	srcPNG := filepath.Join(srcDir, "wide.png")
+	if err := os.WriteFile(srcPNG, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("WriteFile(srcPNG) error = %v", err)
+	}
+
+	imported1, err := ImportImageAsset(assetsDir, srcPNG)
+	if err != nil {
+		t.Fatalf("ImportImageAsset() error = %v", err)
+	}
+	if filepath.Dir(imported1) != assetsDir {
+		t.Fatalf("expected imported path inside %q, got %q", assetsDir, imported1)
+	}
+	// Identical file imported under a different name reuses the same SHA-256 asset file.
+	srcPNG2 := filepath.Join(srcDir, "wide-copy.png")
+	if err := os.WriteFile(srcPNG2, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("WriteFile(srcPNG2) error = %v", err)
+	}
+	imported2, err := ImportImageAsset(assetsDir, srcPNG2)
+	if err != nil {
+		t.Fatalf("ImportImageAsset(dup) error = %v", err)
+	}
+	if imported1 != imported2 {
+		t.Fatalf("expected identical content hash reuse: %q != %q", imported1, imported2)
+	}
+
+	// Empty assetsDir validates & returns source path directly (memory-store test isolation).
+	direct, err := ImportImageAsset("", srcPNG)
+	if err != nil || direct != srcPNG {
+		t.Fatalf("ImportImageAsset(\"\") = (%q, %v), want (%q, nil)", direct, err, srcPNG)
+	}
+
+	// Reject unsupported extension and corrupt image payload.
+	badExt := filepath.Join(srcDir, "notes.txt")
+	_ = os.WriteFile(badExt, []byte("hello"), 0o600)
+	if _, err := ImportImageAsset(assetsDir, badExt); err == nil {
+		t.Fatal("expected error for unsupported .txt image format")
+	}
+	badPNG := filepath.Join(srcDir, "corrupt.png")
+	_ = os.WriteFile(badPNG, []byte("not a png"), 0o600)
+	if _, err := ImportImageAsset(assetsDir, badPNG); err == nil {
+		t.Fatal("expected error for corrupt .png payload")
+	}
+
+	// CropSquare center-crops rectangular image to 10x10.
+	cropped := CropSquare(rectImg)
+	if b := cropped.Bounds(); b.Dx() != 10 || b.Dy() != 10 {
+		t.Fatalf("CropSquare(20x10) bounds = %+v, want 10x10", b)
+	}
+}

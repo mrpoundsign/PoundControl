@@ -596,10 +596,15 @@ func TestServerWSMutualHandshakeSignedFramesAssetsAndRevoke(t *testing.T) {
 	if _, err := eng.AssignKeypadAction(c0, "test.webdeck.key"); err != nil {
 		t.Fatalf("AssignKeypadAction(0,0) error = %v", err)
 	}
-	if err := eng.UpdateKeypadSlot(c0, "Webhook Key", "#38BDF8", map[string]any{
+	if err := eng.UpdateKeypadSlotAppearance(c0, app.SlotAppearance{
+		Title:           "Webhook Key",
+		Color:           "#38BDF8",
+		BackgroundColor: "#FBBF24",
+		BackgroundImage: svgPath,
+	}, map[string]any{
 		"webhook": "https://example.com/hook?token=SUPERSECRET_TOKEN",
 	}); err != nil {
-		t.Fatalf("UpdateKeypadSlot(0,0) error = %v", err)
+		t.Fatalf("UpdateKeypadSlotAppearance(0,0) error = %v", err)
 	}
 
 	c1 := deck.Coordinates{Row: 0, Col: 1}
@@ -618,6 +623,12 @@ func TestServerWSMutualHandshakeSignedFramesAssetsAndRevoke(t *testing.T) {
 	})
 
 	dialSlot, _ := eng.AssignDialAction(0, "test.webdeck.dial")
+	if err := eng.UpdateDialSlotAppearance(0, app.SlotAppearance{
+		Title:           "Vol",
+		BackgroundColor: "#1E293B",
+	}, nil); err != nil {
+		t.Fatalf("UpdateDialSlotAppearance(0) error = %v", err)
+	}
 	prov.host.UpdateVisual(dialSlot.Context, plugin.VisualPatch{
 		Feedback: map[string]any{
 			"value":     "68%",
@@ -662,6 +673,33 @@ func TestServerWSMutualHandshakeSignedFramesAssetsAndRevoke(t *testing.T) {
 	if strings.Contains(string(rawInit), "SUPERSECRET_TOKEN") {
 		t.Fatal("WS snapshot leaked secret SlotConfig.Settings")
 	}
+	if initMsg.Snapshot.Slots["0,0"].BackgroundColor != "#FBBF24" {
+		t.Fatalf("expected custom BackgroundColor #FBBF24 on (0,0), got %+v", initMsg.Snapshot.Slots["0,0"])
+	}
+	if initMsg.Snapshot.DialSlots[0].BackgroundColor != "#1E293B" {
+		t.Fatalf("expected custom BackgroundColor #1E293B on dial 0, got %+v", initMsg.Snapshot.DialSlots[0])
+	}
+	bgAssetURL := initMsg.Snapshot.Slots["0,0"].BackgroundImageURL
+	if !strings.HasPrefix(bgAssetURL, "/api/asset/") || !strings.Contains(bgAssetURL, "?sid="+wsA.sessionID+"&mac=") {
+		t.Fatalf("expected signed /api/asset BackgroundImageURL, got %q", bgAssetURL)
+	}
+	if resp, err := http.Get(baseURL + bgAssetURL); err != nil {
+		t.Fatalf("GET signed bg asset error = %v", err)
+	} else {
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("signed bg asset status = %d, want 200", resp.StatusCode)
+		}
+	}
+	if plainBG, _, _ := strings.Cut(bgAssetURL, "?"); true {
+		if resp, err := http.Get(baseURL + plainBG); err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("unsigned bg asset status = %d, want 401", resp.StatusCode)
+			}
+		}
+	}
+
 	if !strings.HasPrefix(initMsg.Snapshot.Slots["0,1"].ImageURL, "data:image/svg+xml;base64,") {
 		t.Fatalf("expected base64 normalized SVG, got %q", initMsg.Snapshot.Slots["0,1"].ImageURL)
 	}

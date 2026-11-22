@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"image/color"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -152,6 +153,9 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 	mw.inspector = NewActionInspector(win, engine, mw.setStatus)
 	mw.inspector.SetOnOpenPluginsSettings(func() {
 		mw.ShowSettingsDialogTab(settingsTabPlugins)
+	})
+	mw.inspector.SetOnOpenPaletteSettings(func() {
+		mw.ShowSettingsDialogTab(settingsTabGeneral)
 	})
 	mw.inspector.SetOnMoveSelected(mw.StartMoveSelected)
 	mw.inspector.SetOnCopySelected(mw.CopySelected)
@@ -358,6 +362,13 @@ func (mw *MainWindow) OpenPopOutPad() *PopOutPad {
 // SetConfigPath records the config file path displayed in the General settings tab.
 func (mw *MainWindow) SetConfigPath(path string) {
 	mw.cfgPath = path
+	if mw.inspector != nil {
+		if trimmed := strings.TrimSpace(path); trimmed != "" {
+			mw.inspector.SetAssetsDir(filepath.Join(filepath.Dir(trimmed), "assets"))
+		} else {
+			mw.inspector.SetAssetsDir("")
+		}
+	}
 }
 
 // SetHotkeyCountProvider sets a callback returning active OS global hotkey registrations.

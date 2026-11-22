@@ -73,7 +73,7 @@ func buildManifest() plugin.Manifest {
 				{
 					Key:         "command",
 					Label:       "Executable / Script",
-					Type:        plugin.FieldText,
+					Type:        plugin.FieldFile,
 					Placeholder: `C:\Program Files\obs-studio\bin\64bit\obs64.exe`,
 					Required:    true,
 				},

@@ -3,6 +3,41 @@
 
   const C = window.PoundDeckCrypto;
   const HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
+  function parseHexRGB(hex) {
+    if (!HEX_RE.test(hex || '')) return null;
+    let s = hex.slice(1);
+    if (s.length === 3 || s.length === 4) {
+      s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2];
+    } else if (s.length >= 6) {
+      s = s.slice(0, 6);
+    } else {
+      return null;
+    }
+    const r = parseInt(s.slice(0, 2), 16);
+    const g = parseInt(s.slice(2, 4), 16);
+    const b = parseInt(s.slice(4, 6), 16);
+    return Number.isNaN(r + g + b) ? null : [r, g, b];
+  }
+  function relLum(rgb) {
+    const lin = rgb.map((v) => {
+      const n = v / 255;
+      return n <= 0.04045 ? n / 12.92 : Math.pow((n + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+  }
+  function contrastFgHex(bgHex) {
+    const rgb = parseHexRGB(bgHex);
+    if (!rgb) return '';
+    return relLum(rgb) > 0.17913 ? '#0A0A0C' : '#FFFFFF';
+  }
+  function hexContrastRatio(aHex, bHex) {
+    const a = parseHexRGB(aHex);
+    const b = parseHexRGB(bHex);
+    if (!a || !b) return 21;
+    const la = relLum(a);
+    const lb = relLum(b);
+    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+  }
   const nativeBridge =
     window.PoundDeckNative && typeof window.PoundDeckNative.isNativeApp === 'function'
       ? window.PoundDeckNative
@@ -528,8 +563,10 @@
     const title = slot ? (slot.title || '') : '';
     const subtitle = slot ? (slot.subtitle || '') : '';
     const imageUrl = slot ? (slot.imageUrl || '') : '';
+    const bgImageUrl = slot ? (slot.bgImageUrl || '') : '';
     const flash = slot ? (slot.flash || '') : '';
     const color = slot && HEX_RE.test(slot.color || '') ? slot.color : '';
+    const bgColor = slot && HEX_RE.test(slot.bgColor || '') ? slot.bgColor : '';
 
     btn.dataset.assigned = String(assigned);
     btn.dataset.autoback = String(autoBack);
@@ -539,14 +576,38 @@
     if (color) {
       btn.style.setProperty('--tile-accent', color);
     }
+    if (bgColor && (assigned || autoBack)) {
+      btn.dataset.hasBgColor = 'true';
+      btn.style.setProperty('--tile-bg', bgColor);
+      const fg = contrastFgHex(bgColor);
+      if (fg) {
+        btn.style.setProperty('--tile-fg', fg);
+      }
+      const accentEff = color || '#38BDF8';
+      if (hexContrastRatio(accentEff, bgColor) < 3.0 && fg) {
+        btn.style.setProperty('--tile-sub-fg', fg);
+      }
+    }
+    if (bgImageUrl && (assigned || autoBack)) {
+      btn.dataset.hasBgImage = 'true';
+    }
 
-    const fullArt = Boolean(imageUrl && title.trim() === '' && subtitle.trim() === '');
+    const fullArt = Boolean((imageUrl || bgImageUrl) && title.trim() === '' && subtitle.trim() === '');
     if (fullArt) {
       btn.dataset.fullart = 'true';
     }
 
     const ariaLabel = title || subtitle || (assigned ? ('Action key row ' + (row + 1) + ' column ' + (col + 1)) : ('Empty key row ' + (row + 1) + ' column ' + (col + 1)));
     btn.setAttribute('aria-label', ariaLabel);
+
+    if (bgImageUrl && (assigned || autoBack)) {
+      const bgImg = document.createElement('img');
+      bgImg.className = 'key-bg-img';
+      bgImg.alt = '';
+      bgImg.draggable = false;
+      bgImg.src = bgImageUrl;
+      btn.appendChild(bgImg);
+    }
 
     if (!fullArt && (assigned || autoBack)) {
       const bar = document.createElement('span');
@@ -638,13 +699,26 @@
   function buildDialCard(dial) {
     const card = document.createElement('div');
     card.className = 'dial-card';
-    if (dial.color && HEX_RE.test(dial.color)) {
-      card.style.setProperty('--dial-accent', dial.color);
+    const dialAccent = dial.color && HEX_RE.test(dial.color) ? dial.color : '';
+    const dialBg = dial.assigned && dial.bgColor && HEX_RE.test(dial.bgColor) ? dial.bgColor : '';
+    if (dialAccent) {
+      card.style.setProperty('--dial-accent', dialAccent);
     }
 
     const face = document.createElement('div');
     face.className = 'dial-face';
     face.title = 'Drag left or right to rotate';
+    if (dialBg) {
+      face.dataset.hasBgColor = 'true';
+      face.style.setProperty('--dial-bg', dialBg);
+      const fg = contrastFgHex(dialBg);
+      if (fg) {
+        face.style.setProperty('--dial-fg', fg);
+      }
+      if (hexContrastRatio(dialAccent || '#38BDF8', dialBg) < 3.0 && fg) {
+        face.style.setProperty('--dial-sub-fg', fg);
+      }
+    }
 
     const titleEl = document.createElement('span');
     titleEl.className = 'dial-title';

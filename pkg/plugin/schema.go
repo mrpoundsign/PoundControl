@@ -17,6 +17,8 @@ const (
 	FieldBool      FieldType = "bool"
 	FieldSelect    FieldType = "select"
 	FieldColor     FieldType = "color"
+	FieldImage     FieldType = "image"
+	FieldFile      FieldType = "file"
 	FieldHotkey    FieldType = "hotkey"
 )
 

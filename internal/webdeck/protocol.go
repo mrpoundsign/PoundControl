@@ -21,24 +21,27 @@ type ClientProfile struct {
 // ClientSlot is the sanitized visual representation of a single keypad button.
 // Action configuration settings and secrets are intentionally omitted.
 type ClientSlot struct {
-	Assigned bool   `json:"assigned"`
-	AutoBack bool   `json:"autoBack,omitempty"`
-	Title    string `json:"title"`
-	Subtitle string `json:"subtitle,omitempty"`
-	Color    string `json:"color,omitempty"`
-	ImageURL string `json:"imageUrl,omitempty"`
-	Flash    string `json:"flash,omitempty"`
+	Assigned           bool   `json:"assigned"`
+	AutoBack           bool   `json:"autoBack,omitempty"`
+	Title              string `json:"title"`
+	Subtitle           string `json:"subtitle,omitempty"`
+	Color              string `json:"color,omitempty"`
+	BackgroundColor    string `json:"bgColor,omitempty"`
+	BackgroundImageURL string `json:"bgImageUrl,omitempty"`
+	ImageURL           string `json:"imageUrl,omitempty"`
+	Flash              string `json:"flash,omitempty"`
 }
 
 // ClientDial is the sanitized visual representation of a virtual rotary encoder dial.
 type ClientDial struct {
-	Index        int     `json:"index"`
-	Assigned     bool    `json:"assigned"`
-	Title        string  `json:"title"`
-	Value        string  `json:"value"`
-	Color        string  `json:"color,omitempty"`
-	HasIndicator bool    `json:"hasIndicator,omitempty"`
-	IndicatorPct float64 `json:"indicatorPct,omitempty"`
+	Index           int     `json:"index"`
+	Assigned        bool    `json:"assigned"`
+	Title           string  `json:"title"`
+	Value           string  `json:"value"`
+	Color           string  `json:"color,omitempty"`
+	BackgroundColor string  `json:"bgColor,omitempty"`
+	HasIndicator    bool    `json:"hasIndicator,omitempty"`
+	IndicatorPct    float64 `json:"indicatorPct,omitempty"`
 }
 
 // ClientSnapshot is the sanitized live deck state broadcast over WebSocket.
@@ -108,6 +111,20 @@ type WSSignedFrame struct {
 	MAC     string `json:"mac"`
 }
 
+func resolveClientImageURL(rawURI string, mapImage func(string) string) string {
+	trimmed := strings.TrimSpace(rawURI)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(trimmed), "data:") {
+		return NormalizeDataImageURI(trimmed)
+	}
+	if mapImage != nil {
+		return mapImage(trimmed)
+	}
+	return ""
+}
+
 func buildClientSnapshot(snap app.Snapshot, mapImage func(string) string) ClientSnapshot {
 	profiles := make([]ClientProfile, len(snap.Profiles))
 	for i, p := range snap.Profiles {
@@ -122,22 +139,16 @@ func buildClientSnapshot(snap app.Snapshot, mapImage func(string) string) Client
 
 	slots := make(map[string]ClientSlot, len(snap.Slots))
 	for key, r := range snap.Slots {
-		var imgURL string
-		if rawURI := strings.TrimSpace(r.Visual.ImageURI); rawURI != "" {
-			if strings.HasPrefix(strings.ToLower(rawURI), "data:") {
-				imgURL = NormalizeDataImageURI(rawURI)
-			} else if mapImage != nil {
-				imgURL = mapImage(rawURI)
-			}
-		}
 		slots[key] = ClientSlot{
-			Assigned: r.Config != nil,
-			AutoBack: r.AutoBack,
-			Title:    r.Visual.Title,
-			Subtitle: r.Visual.Subtitle,
-			Color:    r.Visual.Color,
-			ImageURL: imgURL,
-			Flash:    r.Visual.Flash,
+			Assigned:           r.Config != nil,
+			AutoBack:           r.AutoBack,
+			Title:              r.Visual.Title,
+			Subtitle:           r.Visual.Subtitle,
+			Color:              r.Visual.Color,
+			BackgroundColor:    r.Visual.BackgroundColor,
+			BackgroundImageURL: resolveClientImageURL(r.Visual.BackgroundImage, mapImage),
+			ImageURL:           resolveClientImageURL(r.Visual.ImageURI, mapImage),
+			Flash:              r.Visual.Flash,
 		}
 	}
 
@@ -168,6 +179,7 @@ func buildClientSnapshot(snap app.Snapshot, mapImage func(string) string) Client
 				}
 			}
 			d.Color = r.Visual.Color
+			d.BackgroundColor = r.Visual.BackgroundColor
 			if pct, hasInd := parseDialIndicator(r.Visual.Feedback["indicator"]); hasInd {
 				d.HasIndicator = true
 				d.IndicatorPct = pct

@@ -435,6 +435,11 @@ func (p *Provider) loadInstance(path string) *wasmInstance {
 	}
 
 	inst.mod = mod
+	if mod.ExportedFunction("_initialize") == nil && mod.ExportedFunction("_start") != nil {
+		inst.errMsg = "wasm module exports WASI command _start instead of reactor _initialize (for Go plugins, build with: GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared)"
+		inst.closeInstance()
+		return inst
+	}
 	inst.allocFn = mod.ExportedFunction("pd_alloc")
 	inst.freeFn = mod.ExportedFunction("pd_free")
 	manifestFn := mod.ExportedFunction("pd_manifest")

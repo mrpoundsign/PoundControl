@@ -3,11 +3,13 @@ package ui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/mrpoundsign/PoundDeck/internal/app"
 	"github.com/mrpoundsign/PoundDeck/internal/version"
+	"github.com/mrpoundsign/PoundDeck/pkg/deck"
 	"github.com/mrpoundsign/PoundDeck/pkg/sdplugin"
 	"github.com/mrpoundsign/PoundDeck/pkg/wasmplugin"
 )
@@ -56,6 +59,7 @@ func showSettingsDialog(
 	})
 	popOutBtn.Importance = widget.HighImportance
 
+	paletteSection, generalCleanup := buildPaletteSettingsSection(win, engine, onStatus)
 	generalTab := container.NewVBox(
 		widget.NewForm(
 			widget.NewFormItem("Application", widget.NewLabel(version.AppName+" v"+version.Version)),
@@ -66,6 +70,8 @@ func showSettingsDialog(
 		),
 		widget.NewSeparator(),
 		popOutBtn,
+		widget.NewSeparator(),
+		paletteSection,
 	)
 
 	// OBS Studio Tab
@@ -78,7 +84,7 @@ func showSettingsDialog(
 	webTab, webCleanup := buildWebDeckSettingsTab(webCtrl, onStatus)
 
 	tabs := container.NewAppTabs(
-		container.NewTabItem("General", container.NewPadded(generalTab)),
+		container.NewTabItem("General", container.NewVScroll(container.NewPadded(generalTab))),
 		container.NewTabItem("OBS Studio", container.NewPadded(obsContent)),
 		container.NewTabItem("Plugins", pluginsTab),
 		container.NewTabItem("Web Deck", webTab),
@@ -88,8 +94,11 @@ func showSettingsDialog(
 	}
 
 	dlg := dialog.NewCustom("PoundDeck Settings", "Close", tabs, win)
-	dlg.Resize(fyne.NewSize(660, 560))
+	dlg.Resize(fyne.NewSize(680, 600))
 	dlg.SetOnClosed(func() {
+		if generalCleanup != nil {
+			generalCleanup()
+		}
 		if obsCleanup != nil {
 			obsCleanup()
 		}
@@ -102,6 +111,142 @@ func showSettingsDialog(
 	})
 	dlg.Show()
 	return dlg
+}
+
+func buildPaletteSettingsSection(
+	win fyne.Window,
+	engine *app.Engine,
+	onStatus func(string),
+) (fyne.CanvasObject, func()) {
+	listBox := container.NewVBox()
+	var lastPalette []deck.ColorSwatch
+
+	var openEditSwatch func(idx int, sw deck.ColorSwatch)
+	rebuildList := func(swatches []deck.ColorSwatch) {
+		if len(listBox.Objects) > 0 && slices.Equal(lastPalette, swatches) {
+			return
+		}
+		lastPalette = slices.Clone(swatches)
+		listBox.Objects = nil
+		if len(swatches) == 0 {
+			emptyLbl := widget.NewLabel("No custom swatches saved. Add a color below or click Reset Defaults.")
+			emptyLbl.Wrapping = fyne.TextWrapWord
+			listBox.Add(emptyLbl)
+		} else {
+			for i, sw := range swatches {
+				idx := i
+				entry := sw
+				chip := canvas.NewRectangle(parseHexColor(entry.Hex, ColorDarkCharcoal))
+				chip.CornerRadius = 4
+				chip.StrokeColor = ColorSlateBorder
+				chip.StrokeWidth = 1
+				chip.SetMinSize(fyne.NewSize(22, 22))
+
+				lbl := widget.NewLabel(fmt.Sprintf("%s (%s)", entry.Name, entry.Hex))
+				editBtn := widget.NewButton("Edit", func() {
+					openEditSwatch(idx, entry)
+				})
+				delBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
+					cur := engine.ColorPalette()
+					if idx < 0 || idx >= len(cur) {
+						return
+					}
+					next := slices.Delete(cur, idx, idx+1)
+					if err := engine.SaveColorPalette(next); err != nil && onStatus != nil {
+						onStatus("Remove swatch failed: " + err.Error())
+					}
+				})
+				row := container.NewBorder(nil, nil, container.NewCenter(chip), container.NewHBox(editBtn, delBtn), lbl)
+				listBox.Add(row)
+			}
+		}
+		listBox.Refresh()
+	}
+
+	openEditSwatch = func(idx int, sw deck.ColorSwatch) {
+		if win == nil {
+			return
+		}
+		nameEntry := widget.NewEntry()
+		nameEntry.SetText(sw.Name)
+		hexCtrl := newColorFieldControl(win, "Edit Swatch Color", sw.Hex, nil, nil, onStatus)
+		items := []*widget.FormItem{
+			widget.NewFormItem("Name", nameEntry),
+			widget.NewFormItem("Color", hexCtrl.Object()),
+		}
+		editDlg := dialog.NewForm("Edit Palette Swatch", "Save", "Cancel", items, func(confirmed bool) {
+			if !confirmed {
+				return
+			}
+			normHex, ok := deck.NormalizeHexColor(hexCtrl.Value())
+			if !ok {
+				if onStatus != nil {
+					onStatus("Invalid hex color (expected #RRGGBB)")
+				}
+				return
+			}
+			cur := engine.ColorPalette()
+			if idx < 0 || idx >= len(cur) {
+				return
+			}
+			cur[idx].Name = strings.TrimSpace(nameEntry.Text)
+			cur[idx].Hex = normHex
+			if err := engine.SaveColorPalette(cur); err != nil && onStatus != nil {
+				onStatus("Update swatch failed: " + err.Error())
+			}
+		}, win)
+		editDlg.Resize(fyne.NewSize(420, 220))
+		editDlg.Show()
+	}
+
+	nameEntry := widget.NewEntry()
+	nameEntry.SetPlaceHolder("Swatch name (optional)")
+	hexCtrl := newColorFieldControl(win, "Add Palette Swatch", "#38BDF8", nil, nil, onStatus)
+
+	addBtn := widget.NewButtonWithIcon("Add Swatch", theme.ContentAddIcon(), func() {
+		if err := engine.AddColorSwatch(nameEntry.Text, hexCtrl.Value()); err != nil {
+			if onStatus != nil {
+				onStatus(err.Error())
+			}
+			return
+		}
+		nameEntry.SetText("")
+		if onStatus != nil {
+			onStatus("Added color swatch to palette")
+		}
+	})
+	addBtn.Importance = widget.HighImportance
+
+	resetBtn := widget.NewButton("Reset Defaults", func() {
+		if err := engine.ResetColorPalette(); err != nil {
+			if onStatus != nil {
+				onStatus("Reset palette failed: " + err.Error())
+			}
+			return
+		}
+		if onStatus != nil {
+			onStatus("Reset color palette to defaults")
+		}
+	})
+
+	rebuildList(engine.ColorPalette())
+	unsub := engine.Subscribe(func(snap app.Snapshot) {
+		dispatchUI(func() {
+			rebuildList(snap.ColorPalette)
+		})
+	})
+
+	section := container.NewVBox(
+		widget.NewLabelWithStyle("Custom Color Palette", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		listBox,
+		widget.NewSeparator(),
+		widget.NewForm(
+			widget.NewFormItem("Name", nameEntry),
+			widget.NewFormItem("Hex", hexCtrl.Object()),
+		),
+		container.NewHBox(addBtn, resetBtn),
+	)
+	return section, unsub
 }
 
 func buildPluginsSettingsTab(
