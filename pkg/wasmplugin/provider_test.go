@@ -531,20 +531,32 @@ func TestProviderPomodoroSecondsPauseDoneColor(t *testing.T) {
 		t.Fatalf("Start() error = %v", err)
 	}
 
+	wantSections := map[string]string{
+		"minutes":   "Timer",
+		"seconds":   "Timer",
+		"doneColor": plugin.SectionAppearance,
+		"label":     plugin.SectionAdvanced,
+	}
+	gotSections := make(map[string]string, len(wantSections))
 	var foundSeconds bool
 	for _, act := range prov.Actions() {
 		if act.UUID != "com.pounddeck.examples.pomodoro" {
 			continue
 		}
 		for _, field := range act.SettingsSchema {
+			gotSections[field.Key] = field.Section
 			if field.Key == "seconds" && field.Type == plugin.FieldNumber {
 				foundSeconds = true
-				break
 			}
 		}
 	}
 	if !foundSeconds {
 		t.Fatalf("expected pomodoro settingsSchema to expose %q number field", "seconds")
+	}
+	for k, wantSec := range wantSections {
+		if gotSections[k] != wantSec {
+			t.Fatalf("pomodoro field %q Section = %q, want %q", k, gotSections[k], wantSec)
+		}
 	}
 
 	ctxID := "slot-pomodoro-sec"

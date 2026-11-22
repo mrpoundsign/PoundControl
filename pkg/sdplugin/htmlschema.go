@@ -2,6 +2,7 @@ package sdplugin
 
 import (
 	"bytes"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -23,7 +24,7 @@ func ExtractHTMLSchema(htmlBytes []byte, actionUUID string) []plugin.SettingFiel
 		fields []plugin.SettingField
 		seen   = make(map[string]struct{})
 	)
-	walkHTMLNode(doc, actionUUID, "", &fields, seen)
+	walkHTMLNode(doc, actionUUID, "", "", &fields, seen)
 	return fields
 }
 
@@ -31,6 +32,7 @@ func walkHTMLNode(
 	n *html.Node,
 	targetAction string,
 	activeScope string,
+	section string,
 	fields *[]plugin.SettingField,
 	seen map[string]struct{},
 ) {
@@ -39,13 +41,29 @@ func walkHTMLNode(
 	}
 
 	if n.Type == html.ElementNode {
-		if scope, ok := attrVal(n, "data-action"); ok {
-			activeScope = strings.TrimSpace(scope)
-		}
 		if hasAttr(n, "global") {
 			return
 		}
-		if field, ok := parseControlNode(n, targetAction, activeScope); ok {
+		if scope, ok := attrVal(n, "data-action"); ok {
+			activeScope = strings.TrimSpace(scope)
+			section = ""
+		}
+		if secAttr, ok := attrVal(n, "data-section"); ok {
+			if trimmed := strings.TrimSpace(secAttr); trimmed != "" {
+				section = trimmed
+			}
+		}
+		switch strings.ToLower(n.Data) {
+		case "details":
+			if hdr := firstDirectChildText(n, "summary"); hdr != "" {
+				section = hdr
+			}
+		case "fieldset":
+			if hdr := firstDirectChildText(n, "legend"); hdr != "" {
+				section = hdr
+			}
+		}
+		if field, ok := parseControlNode(n, targetAction, activeScope, section); ok {
 			if _, dup := seen[field.Key]; !dup {
 				seen[field.Key] = struct{}{}
 				*fields = append(*fields, field)
@@ -53,12 +71,22 @@ func walkHTMLNode(
 		}
 	}
 
+	runningSection := section
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		walkHTMLNode(c, targetAction, activeScope, fields, seen)
+		if c.Type == html.ElementNode {
+			if hasAttr(c, "global") {
+				continue
+			}
+			if hdr := extractSiblingHeading(c); hdr != "" {
+				runningSection = hdr
+				continue
+			}
+		}
+		walkHTMLNode(c, targetAction, activeScope, runningSection, fields, seen)
 	}
 }
 
-func parseControlNode(n *html.Node, targetAction, activeScope string) (plugin.SettingField, bool) {
+func parseControlNode(n *html.Node, targetAction, activeScope, section string) (plugin.SettingField, bool) {
 	if activeScope != "" && targetAction != "" && !strings.EqualFold(activeScope, targetAction) {
 		return plugin.SettingField{}, false
 	}
@@ -70,8 +98,9 @@ func parseControlNode(n *html.Node, targetAction, activeScope string) (plugin.Se
 	}
 
 	field := plugin.SettingField{
-		Key:   key,
-		Label: inferControlLabel(n, key),
+		Key:     key,
+		Label:   inferControlLabel(n, key),
+		Section: section,
 	}
 	if ph, hasPH := attrVal(n, "placeholder"); hasPH {
 		field.Placeholder = strings.TrimSpace(ph)
@@ -288,6 +317,61 @@ func extractSelectOptions(selectNode *html.Node) ([]plugin.SelectOption, string)
 	}
 	walk(selectNode)
 	return opts, defaultVal
+}
+
+func extractSiblingHeading(n *html.Node) string {
+	if n == nil || n.Type != html.ElementNode {
+		return ""
+	}
+	if _, hasAction := attrVal(n, "data-action"); hasAction {
+		return ""
+	}
+	if containsFormControl(n) {
+		return ""
+	}
+	isHeading := false
+	switch strings.ToLower(n.Data) {
+	case "h1", "h2", "h3", "h4", "h5", "h6":
+		isHeading = true
+	default:
+		if cls, ok := attrVal(n, "class"); ok {
+			tokens := strings.Fields(strings.ToLower(cls))
+			if slices.Contains(tokens, "sdpi-heading") || slices.Contains(tokens, "sdpi-item-heading") {
+				isHeading = true
+			}
+		}
+	}
+	if !isHeading {
+		return ""
+	}
+	return strings.TrimSpace(nodeText(n))
+}
+
+func containsFormControl(root *html.Node) bool {
+	for c := root.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type != html.ElementNode {
+			continue
+		}
+		tag := strings.ToLower(c.Data)
+		if strings.HasPrefix(tag, "sdpi-") || tag == "input" || tag == "select" || tag == "textarea" {
+			return true
+		}
+		if containsFormControl(c) {
+			return true
+		}
+	}
+	return false
+}
+
+func firstDirectChildText(parent *html.Node, childTag string) string {
+	for c := parent.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && strings.EqualFold(c.Data, childTag) {
+			if txt := strings.TrimSpace(nodeText(c)); txt != "" {
+				return txt
+			}
+		}
+	}
+	return ""
 }
 
 func attrVal(n *html.Node, name string) (string, bool) {

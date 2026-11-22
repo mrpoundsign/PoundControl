@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1043,10 +1044,19 @@ func TestMainWindowWasmPluginReloadAndSettings(t *testing.T) {
 	test.Tap(pomoBtn)
 	drainUI()
 
-	for _, key := range []string{"label", "minutes", "doneColor"} {
+	for _, key := range []string{"label", "minutes", "seconds", "doneColor"} {
 		if _, ok := mw.inspector.fields[key]; !ok {
 			t.Fatalf("expected inspector field %q for pomodoro action, got %+v", key, mw.inspector.fields)
 		}
+	}
+	if mw.inspector.accordion == nil {
+		t.Fatal("expected collapsible accordion in inspector")
+	}
+	gotPomoSections, gotPomoOpen := accordionSnapshot(mw.inspector.accordion)
+	wantPomoSections := []string{"General", "Timer", "Appearance", "Trigger", "Advanced"}
+	wantPomoOpen := []bool{true, true, true, true, false}
+	if !slices.Equal(gotPomoSections, wantPomoSections) || !slices.Equal(gotPomoOpen, wantPomoOpen) {
+		t.Fatalf("pomodoro sections = (%v, %v), want (%v, %v)", gotPomoSections, gotPomoOpen, wantPomoSections, wantPomoOpen)
 	}
 	if _, isColorCtrl := mw.inspector.fields["doneColor"].control.(*colorFieldControl); !isColorCtrl {
 		t.Fatalf("expected *colorFieldControl for pomodoro doneColor, got %T", mw.inspector.fields["doneColor"].control)
@@ -1544,4 +1554,204 @@ func TestMainWindowCustomPaletteBackgroundsAndSchemaWidgets(t *testing.T) {
 	drainUI()
 	genDlg.Hide()
 	drainUI()
+}
+
+type sectionTestProvider struct{}
+
+func (p *sectionTestProvider) Kind() plugin.ProviderKind { return plugin.ProviderWasm }
+func (p *sectionTestProvider) Name() string              { return "Section Test Provider" }
+func (p *sectionTestProvider) Manifests() []plugin.Manifest {
+	return []plugin.Manifest{{
+		UUID:     "com.test.ui.sections",
+		Name:     "Section Test",
+		Version:  "1.0.0",
+		Provider: plugin.ProviderWasm,
+		Actions:  p.Actions(),
+	}}
+}
+
+func (p *sectionTestProvider) Actions() []plugin.ActionDescriptor {
+	return []plugin.ActionDescriptor{{
+		UUID:        "test.ui.sections",
+		PluginUUID:  "com.test.ui.sections",
+		Name:        "Grouped Sections Action",
+		Category:    "Test",
+		Controllers: []deck.ControllerType{deck.ControllerKeypad},
+		Provider:    plugin.ProviderWasm,
+		SettingsSchema: []plugin.SettingField{
+			{Key: "rawColor", Label: "Raw Color", Type: plugin.FieldColor, Default: "#EF4444"},
+			{Key: "warnAt", Label: "Warn At", Type: plugin.FieldNumber, Section: "Thresholds", Default: 75},
+			{Key: "critAt", Label: "Critical At", Type: plugin.FieldNumber, Section: "thresholds", Default: 90},
+			{Key: "activeColor", Label: "Active Color", Type: plugin.FieldColor, Section: "appearance", Default: "#22C55E"},
+			{Key: "repeatMs", Label: "Repeat Interval (ms)", Type: plugin.FieldNumber, Section: "Trigger", Default: 250},
+			{Key: "debug", Label: "Debug Logging", Type: plugin.FieldBool, Section: "Advanced", Default: false},
+		},
+	}}
+}
+
+func (p *sectionTestProvider) BindHost(plugin.HostAPI)                  {}
+func (p *sectionTestProvider) Dispatch(context.Context, plugin.ActionEvent) error { return nil }
+func (p *sectionTestProvider) Close() error                             { return nil }
+
+func canvasContains(root, target fyne.CanvasObject) bool {
+	if root == nil || target == nil {
+		return false
+	}
+	if root == target {
+		return true
+	}
+	if c, ok := root.(*fyne.Container); ok {
+		for _, child := range c.Objects {
+			if canvasContains(child, target) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func accordionSnapshot(acc *widget.Accordion) ([]string, []bool) {
+	if acc == nil {
+		return nil, nil
+	}
+	titles := make([]string, len(acc.Items))
+	opens := make([]bool, len(acc.Items))
+	for i, item := range acc.Items {
+		titles[i] = item.Title
+		opens[i] = item.Open
+	}
+	return titles, opens
+}
+
+func TestMainWindowInspectorSectionGroupingAndPersistence(t *testing.T) {
+	drainUI()
+	testApp := test.NewApp()
+	t.Cleanup(func() {
+		drainUI()
+		testApp.Quit()
+	})
+	testApp.Settings().SetTheme(&StudioTheme{})
+
+	reg := plugin.NewRegistry()
+	if err := reg.RegisterProvider(core.New()); err != nil {
+		t.Fatalf("RegisterProvider(core) error = %v", err)
+	}
+	if err := reg.RegisterProvider(&sectionTestProvider{}); err != nil {
+		t.Fatalf("RegisterProvider(sectionTestProvider) error = %v", err)
+	}
+	eng, err := app.NewEngine(deck.NewMemoryStore(nil), reg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = eng.Close()
+		drainUI()
+	})
+
+	mw := NewMainWindow(testApp, eng)
+	drainUI()
+
+	c00 := deck.Coordinates{Row: 0, Col: 0}
+	c01 := deck.Coordinates{Row: 0, Col: 1}
+	c02 := deck.Coordinates{Row: 0, Col: 2}
+
+	mw.SelectSlot(c00)
+	drainUI()
+	btn := mw.catalogButtons["test.ui.sections"]
+	if btn == nil {
+		t.Fatal("expected test.ui.sections in Action Catalog")
+	}
+	test.Tap(btn)
+	drainUI()
+
+	titles, opens := accordionSnapshot(mw.inspector.accordion)
+	wantTitles := []string{"General", "Thresholds", "Appearance", "Trigger", "Advanced"}
+	wantOpens := []bool{true, true, true, true, false}
+	if !slices.Equal(titles, wantTitles) || !slices.Equal(opens, wantOpens) {
+		t.Fatalf("initial sections = (%v, %v), want (%v, %v)", titles, opens, wantTitles, wantOpens)
+	}
+
+	// Verify explicit opt-in placement across sections.
+	itemByTitle := make(map[string]*widget.AccordionItem, len(mw.inspector.accordion.Items))
+	for _, item := range mw.inspector.accordion.Items {
+		itemByTitle[item.Title] = item
+	}
+	if !canvasContains(itemByTitle["General"].Detail, mw.inspector.fields["rawColor"].widget) {
+		t.Fatal("expected uncategorized FieldColor rawColor to remain in General")
+	}
+	if canvasContains(itemByTitle["Appearance"].Detail, mw.inspector.fields["rawColor"].widget) {
+		t.Fatal("expected uncategorized FieldColor rawColor NOT to auto-move to Appearance")
+	}
+	if !canvasContains(itemByTitle["Thresholds"].Detail, mw.inspector.fields["warnAt"].widget) ||
+		!canvasContains(itemByTitle["Thresholds"].Detail, mw.inspector.fields["critAt"].widget) {
+		t.Fatal("expected warnAt and critAt merged case-insensitively into Thresholds section")
+	}
+	if !canvasContains(itemByTitle["Appearance"].Detail, mw.inspector.fields["activeColor"].widget) {
+		t.Fatal("expected activeColor in Appearance section")
+	}
+	if !canvasContains(itemByTitle["Trigger"].Detail, mw.inspector.fields["repeatMs"].widget) {
+		t.Fatal("expected repeatMs in Trigger section")
+	}
+	if !canvasContains(itemByTitle["Advanced"].Detail, mw.inspector.fields["debug"].widget) {
+		t.Fatal("expected debug in Advanced section")
+	}
+
+	// Toggle section open state, switch away (empty slot -> another action -> back), and verify state persists.
+	mw.inspector.accordion.Close(2) // Collapse Appearance
+	mw.inspector.accordion.Open(4)  // Expand Advanced
+
+	mw.SelectSlot(c02) // Empty slot -> clearForm saves state
+	drainUI()
+
+	mw.SelectSlot(c01)
+	drainUI()
+	counterBtn := mw.catalogButtons[core.ActionCounter]
+	if counterBtn == nil {
+		t.Fatal("expected Counter action in catalog")
+	}
+	test.Tap(counterBtn)
+	drainUI()
+
+	cTitles, cOpens := accordionSnapshot(mw.inspector.accordion)
+	wantCounterTitles := []string{"General", "Appearance", "Trigger"} // No Advanced fields -> omitted
+	wantCounterOpens := []bool{true, false, true}
+	if !slices.Equal(cTitles, wantCounterTitles) || !slices.Equal(cOpens, wantCounterOpens) {
+		t.Fatalf("counter keypad sections = (%v, %v), want (%v, %v)", cTitles, cOpens, wantCounterTitles, wantCounterOpens)
+	}
+
+	mw.SelectSlot(c00)
+	drainUI()
+	_, backOpens := accordionSnapshot(mw.inspector.accordion)
+	wantBackOpens := []bool{true, true, false, true, true}
+	if !slices.Equal(backOpens, wantBackOpens) {
+		t.Fatalf("persisted section open state = %v, want %v", backOpens, wantBackOpens)
+	}
+
+	// Saving while Appearance is collapsed must still collect and persist Appearance controls/fields.
+	activeCtrl := mw.inspector.fields["activeColor"].control.(*colorFieldControl)
+	activeCtrl.SetValue("#A855F7")
+	mw.inspector.bgColorCtrl.SetValue("#1E293B")
+	test.Tap(mw.inspector.saveBtn)
+	drainUI()
+
+	saved00 := eng.Snapshot().Slots["0,0"].Config
+	if saved00 == nil || saved00.BackgroundColor != "#1E293B" || saved00.Settings["activeColor"] != "#A855F7" {
+		t.Fatalf("expected collapsed Appearance controls saved cleanly, got %+v", saved00)
+	}
+
+	// Counter assigned to an Encoder dial without Trigger/Advanced omits both Trigger and Advanced sections.
+	if _, err := eng.CreateProfile("Dial Sections", deck.GridSize{Cols: 3, Rows: 2}, 2); err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+	drainUI()
+	mw.SelectDial(0)
+	drainUI()
+	test.Tap(mw.catalogButtons[core.ActionCounter])
+	drainUI()
+
+	dTitles, _ := accordionSnapshot(mw.inspector.accordion)
+	wantDialTitles := []string{"General", "Appearance"}
+	if !slices.Equal(dTitles, wantDialTitles) {
+		t.Fatalf("counter dial sections = %v, want %v", dTitles, wantDialTitles)
+	}
 }

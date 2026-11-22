@@ -163,6 +163,7 @@ func buildManifest() plugin.Manifest {
 					Key:         "folderId",
 					Label:       "Folder ID (optional)",
 					Type:        plugin.FieldText,
+					Section:     plugin.SectionAdvanced,
 					Placeholder: "Leave empty to auto-link by slot",
 				},
 			},

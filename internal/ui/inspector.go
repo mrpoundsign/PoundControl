@@ -41,7 +41,10 @@ type ActionInspector struct {
 	metaLbl    *widget.Label
 	formScroll *container.Scroll
 	formBox    *fyne.Container
+	accordion  *widget.Accordion
 	actionsRow *fyne.Container
+
+	sectionOpen map[string]bool // keyed by strings.ToLower(sectionTitle)
 
 	titleEntry         *widget.Entry
 	accentColorCtrl    *colorFieldControl
@@ -85,6 +88,7 @@ func NewActionInspector(win fyne.Window, engine *app.Engine, onStatus func(strin
 		win:                win,
 		engine:             engine,
 		onStatus:           onStatus,
+		sectionOpen:        make(map[string]bool),
 		hotkeyFieldButtons: make(map[string]*widget.Button),
 		fields:             make(map[string]inspectorFieldBinding),
 	}
@@ -281,6 +285,8 @@ func (ins *ActionInspector) SetSelection(snap app.Snapshot, ctrl deck.Controller
 }
 
 func (ins *ActionInspector) clearForm(title, message string, canTrigger bool) {
+	ins.saveSectionOpenState()
+	ins.accordion = nil
 	ins.actionLbl.SetText(title)
 	ins.metaLbl.SetText(message)
 	clear(ins.fields)
@@ -317,6 +323,8 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 	ins.syncing = true
 	defer func() { ins.syncing = false }()
 
+	ins.saveSectionOpenState()
+	ins.accordion = nil
 	clear(ins.fields)
 	clear(ins.hotkeyFieldButtons)
 	ins.hotkeyCaptureBtn = nil
@@ -364,15 +372,7 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 		ins.reportStatus,
 	)
 
-	items := []fyne.CanvasObject{
-		widget.NewLabel("Title"),
-		ins.titleEntry,
-		accentHeader,
-		ins.accentColorCtrl.Object(),
-		widget.NewLabel("Background Color"),
-		ins.bgColorCtrl.Object(),
-	}
-
+	var hotkeyRow fyne.CanvasObject
 	if ins.selCtrl == deck.ControllerKeypad {
 		ins.bgImageCtrl = newImageFieldControl(
 			ins.win,
@@ -389,14 +389,7 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 		ins.hotkeyCaptureBtn = widget.NewButton("Capture", func() {
 			ins.openHotkeyCapture("Capture Global Hotkey", ins.hotkeyEntry, captureModeGlobal)
 		})
-		hotkeyRow := container.NewBorder(nil, nil, nil, ins.hotkeyCaptureBtn, ins.hotkeyEntry)
-		items = append(items,
-			widget.NewLabel("Background Image"),
-			ins.bgImageCtrl.Object(),
-			ins.hideTitleCheck,
-			widget.NewLabel("Global Hotkey"),
-			hotkeyRow,
-		)
+		hotkeyRow = container.NewBorder(nil, nil, nil, ins.hotkeyCaptureBtn, ins.hotkeyEntry)
 	} else {
 		ins.bgImageCtrl = nil
 		ins.hideTitleCheck = nil
@@ -404,6 +397,7 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 		ins.hotkeyCaptureBtn = nil
 	}
 
+	var items []fyne.CanvasObject
 	if ins.sdCtrl != nil {
 		if reqMajor, needsNode := ins.sdCtrl.NeedsNodeForAction(cfg.ActionUUID); needsNode {
 			warnLbl := widget.NewLabel(fmt.Sprintf(
@@ -418,17 +412,55 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 				}
 			})
 			installBtn.Importance = widget.HighImportance
-			items = append(items, widget.NewSeparator(), warnLbl, installBtn)
+			items = append(items, warnLbl, installBtn, widget.NewSeparator())
 		}
 	}
 
-	if len(schema) > 0 {
-		items = append(items, widget.NewSeparator())
+	grouped := groupSchemaFields(schema)
+	var accItems []*widget.AccordionItem
+
+	genObjs := make([]fyne.CanvasObject, 0, 2+len(grouped.general)*2)
+	genObjs = append(genObjs, widget.NewLabel("Title"), ins.titleEntry)
+	genObjs = append(genObjs, ins.buildSchemaObjects(grouped.general, cfg.Settings)...)
+	accItems = append(accItems, ins.makeAccordionSection(plugin.SectionGeneral, genObjs))
+
+	for _, cg := range grouped.custom {
+		accItems = append(accItems, ins.makeAccordionSection(cg.title, ins.buildSchemaObjects(cg.fields, cfg.Settings)))
 	}
 
-	for _, field := range schema {
-		items = append(items, ins.buildSchemaField(field, cfg.Settings)...)
+	appObjs := []fyne.CanvasObject{
+		accentHeader,
+		ins.accentColorCtrl.Object(),
+		widget.NewLabel("Background Color"),
+		ins.bgColorCtrl.Object(),
 	}
+	if ins.selCtrl == deck.ControllerKeypad {
+		appObjs = append(appObjs,
+			widget.NewLabel("Background Image"),
+			ins.bgImageCtrl.Object(),
+			ins.hideTitleCheck,
+		)
+	}
+	appObjs = append(appObjs, ins.buildSchemaObjects(grouped.appearance, cfg.Settings)...)
+	accItems = append(accItems, ins.makeAccordionSection(plugin.SectionAppearance, appObjs))
+
+	if ins.selCtrl == deck.ControllerKeypad || len(grouped.trigger) > 0 {
+		var trigObjs []fyne.CanvasObject
+		if ins.selCtrl == deck.ControllerKeypad {
+			trigObjs = append(trigObjs, widget.NewLabel("Global Hotkey"), hotkeyRow)
+		}
+		trigObjs = append(trigObjs, ins.buildSchemaObjects(grouped.trigger, cfg.Settings)...)
+		accItems = append(accItems, ins.makeAccordionSection(plugin.SectionTrigger, trigObjs))
+	}
+
+	if len(grouped.advanced) > 0 {
+		advObjs := ins.buildSchemaObjects(grouped.advanced, cfg.Settings)
+		accItems = append(accItems, ins.makeAccordionSection(plugin.SectionAdvanced, advObjs))
+	}
+
+	ins.accordion = widget.NewAccordion(accItems...)
+	ins.accordion.MultiOpen = true
+	items = append(items, ins.accordion)
 
 	if _, ok := ins.engine.PropertyInspectorSession(ins.selCtrl, ins.selCoords, ins.selDial); ok {
 		ins.openPIBtn = widget.NewButtonWithIcon("Open Full Property Inspector", theme.DocumentCreateIcon(), func() {
@@ -471,6 +503,86 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 	if ins.copyBtn != nil {
 		ins.copyBtn.Enable()
 	}
+}
+
+type customFieldGroup struct {
+	title  string
+	fields []plugin.SettingField
+}
+
+type groupedSchemaFields struct {
+	general    []plugin.SettingField
+	custom     []customFieldGroup
+	appearance []plugin.SettingField
+	trigger    []plugin.SettingField
+	advanced   []plugin.SettingField
+}
+
+func groupSchemaFields(schema []plugin.SettingField) groupedSchemaFields {
+	var out groupedSchemaFields
+	customIdx := make(map[string]int)
+	for _, field := range schema {
+		canon, isCanon := plugin.NormalizeSection(field.Section)
+		if !isCanon {
+			key := strings.ToLower(canon)
+			if idx, ok := customIdx[key]; ok {
+				out.custom[idx].fields = append(out.custom[idx].fields, field)
+			} else {
+				customIdx[key] = len(out.custom)
+				out.custom = append(out.custom, customFieldGroup{
+					title:  canon,
+					fields: []plugin.SettingField{field},
+				})
+			}
+			continue
+		}
+		switch canon {
+		case plugin.SectionGeneral:
+			out.general = append(out.general, field)
+		case plugin.SectionAppearance:
+			out.appearance = append(out.appearance, field)
+		case plugin.SectionTrigger:
+			out.trigger = append(out.trigger, field)
+		case plugin.SectionAdvanced:
+			out.advanced = append(out.advanced, field)
+		}
+	}
+	return out
+}
+
+func (ins *ActionInspector) saveSectionOpenState() {
+	if ins.accordion == nil {
+		return
+	}
+	if ins.sectionOpen == nil {
+		ins.sectionOpen = make(map[string]bool)
+	}
+	for _, item := range ins.accordion.Items {
+		if item != nil {
+			ins.sectionOpen[strings.ToLower(item.Title)] = item.Open
+		}
+	}
+}
+
+func (ins *ActionInspector) isSectionOpen(title string) bool {
+	if open, ok := ins.sectionOpen[strings.ToLower(title)]; ok {
+		return open
+	}
+	return !strings.EqualFold(title, plugin.SectionAdvanced)
+}
+
+func (ins *ActionInspector) makeAccordionSection(title string, objs []fyne.CanvasObject) *widget.AccordionItem {
+	item := widget.NewAccordionItem(title, container.NewPadded(container.NewVBox(objs...)))
+	item.Open = ins.isSectionOpen(title)
+	return item
+}
+
+func (ins *ActionInspector) buildSchemaObjects(fields []plugin.SettingField, settings map[string]any) []fyne.CanvasObject {
+	out := make([]fyne.CanvasObject, 0, len(fields)*2)
+	for _, field := range fields {
+		out = append(out, ins.buildSchemaField(field, settings)...)
+	}
+	return out
 }
 
 func (ins *ActionInspector) buildSchemaField(field plugin.SettingField, settings map[string]any) []fyne.CanvasObject {

@@ -1,6 +1,8 @@
 package plugin
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mrpoundsign/PoundDeck/pkg/deck"
@@ -113,5 +115,51 @@ func TestActionDescriptorSupportsController(t *testing.T) {
 	}
 	if !dialAct.SupportsController(deck.ControllerKeypad) || !dialAct.SupportsController(deck.ControllerEncoder) {
 		t.Error("expected dual controller action to support both Keypad and Encoder")
+	}
+}
+
+func TestNormalizeSectionAndSchemaJSON(t *testing.T) {
+	cases := []struct {
+		raw       string
+		wantTitle string
+		wantCanon bool
+	}{
+		{"", SectionGeneral, true},
+		{"   ", SectionGeneral, true},
+		{"general", SectionGeneral, true},
+		{" General ", SectionGeneral, true},
+		{"APPEARANCE", SectionAppearance, true},
+		{"trigger", SectionTrigger, true},
+		{"Advanced", SectionAdvanced, true},
+		{"  Timer  ", "Timer", false},
+		{"Thresholds", "Thresholds", false},
+	}
+	for _, tc := range cases {
+		gotTitle, gotCanon := NormalizeSection(tc.raw)
+		if gotTitle != tc.wantTitle || gotCanon != tc.wantCanon {
+			t.Errorf("NormalizeSection(%q) = (%q, %v), want (%q, %v)", tc.raw, gotTitle, gotCanon, tc.wantTitle, tc.wantCanon)
+		}
+	}
+
+	withoutSec := SettingField{Key: "x", Label: "X", Type: FieldText}
+	rawNoSec, err := json.Marshal(withoutSec)
+	if err != nil {
+		t.Fatalf("Marshal(withoutSec) error = %v", err)
+	}
+	if strings.Contains(string(rawNoSec), "section") {
+		t.Fatalf("expected omitempty on empty Section, got %s", rawNoSec)
+	}
+
+	withSec := SettingField{Key: "doneColor", Label: "Done", Type: FieldColor, Section: SectionAppearance}
+	rawWithSec, err := json.Marshal(withSec)
+	if err != nil {
+		t.Fatalf("Marshal(withSec) error = %v", err)
+	}
+	var decoded SettingField
+	if err := json.Unmarshal(rawWithSec, &decoded); err != nil {
+		t.Fatalf("Unmarshal error = %v", err)
+	}
+	if decoded.Section != SectionAppearance {
+		t.Fatalf("round-trip Section = %q, want %q", decoded.Section, SectionAppearance)
 	}
 }

@@ -68,3 +68,58 @@ func TestExtractHTMLSchemaScopedAndSDPI(t *testing.T) {
 		t.Fatalf("unexpected sdpi fields: %+v", sdpiFields)
 	}
 }
+
+func TestExtractHTMLSchemaSections(t *testing.T) {
+	htmlDoc := []byte(`<!DOCTYPE html>
+	<html><body>
+	  <div class="sdpi-wrapper" data-action="com.example.action.a">
+	    <input type="text" data-setting="mainText" />
+	    <div class="sdpi-heading">Appearance</div>
+	    <sdpi-item label="Active Color">
+	      <sdpi-color setting="activeColor" default="#38BDF8"></sdpi-color>
+	    </sdpi-item>
+	    <details>
+	      <summary>Advanced</summary>
+	      <sdpi-item label="Retries">
+	        <input type="number" data-setting="retries" value="3" />
+	      </sdpi-item>
+	    </details>
+	    <sdpi-item label="Idle Label">
+	      <sdpi-textfield setting="idleLabel"></sdpi-textfield>
+	    </sdpi-item>
+	    <fieldset>
+	      <legend>Thresholds</legend>
+	      <input type="number" data-setting="warnAt" value="80" />
+	    </fieldset>
+	    <div data-section="Custom Group">
+	      <input type="checkbox" data-setting="flag" />
+	    </div>
+	  </div>
+	  <div data-action="com.example.action.b">
+	    <input type="text" data-setting="other" />
+	  </div>
+	</body></html>`)
+
+	fieldsA := ExtractHTMLSchema(htmlDoc, "com.example.action.a")
+	wantA := map[string]string{
+		"mainText":    "",
+		"activeColor": "Appearance",
+		"retries":     "Advanced",
+		"idleLabel":   "Appearance",
+		"warnAt":      "Thresholds",
+		"flag":        "Custom Group",
+	}
+	if len(fieldsA) != len(wantA) {
+		t.Fatalf("expected %d fields for action A, got %+v", len(wantA), fieldsA)
+	}
+	for _, f := range fieldsA {
+		if want, ok := wantA[f.Key]; !ok || f.Section != want {
+			t.Errorf("field %q Section = %q, want %q", f.Key, f.Section, want)
+		}
+	}
+
+	fieldsB := ExtractHTMLSchema(htmlDoc, "com.example.action.b")
+	if len(fieldsB) != 1 || fieldsB[0].Key != "other" || fieldsB[0].Section != "" {
+		t.Fatalf("expected action B heading state reset (Section empty), got %+v", fieldsB)
+	}
+}
