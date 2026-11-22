@@ -86,6 +86,12 @@ type MainWindow struct {
 	statusBarLbl   *widget.Label
 	confirmDlg     *dialog.ConfirmDialog
 	shortcuts      fyne.ShortcutHandler
+
+	activePairAttemptID string
+	pairDialog          *dialog.CustomDialog
+	pairStatusLbl       *widget.Label
+	pairApproveBtn      *widget.Button
+	lastPairedCount     int
 }
 
 // NewMainWindow constructs and initializes the PoundDeck studio window wired to engine.
@@ -173,6 +179,10 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 		}
 		if mw.piViewer != nil {
 			mw.piViewer.CloseAll()
+		}
+		if mw.pairDialog != nil {
+			mw.pairDialog.Hide()
+			mw.pairDialog = nil
 		}
 	})
 
@@ -425,6 +435,99 @@ func (mw *MainWindow) applyWebDeckStatus(st webdeck.Status) {
 		mw.webBtn.Importance = widget.MediumImportance
 	}
 	mw.webBtn.Refresh()
+	mw.syncPendingPairDialog(st)
+	mw.lastPairedCount = st.PairedDevices
+}
+
+func (mw *MainWindow) syncPendingPairDialog(st webdeck.Status) {
+	p := st.PendingPair
+	if p == nil {
+		if mw.pairDialog != nil {
+			mw.pairDialog.Hide()
+			mw.pairDialog = nil
+			mw.activePairAttemptID = ""
+			mw.pairStatusLbl = nil
+			mw.pairApproveBtn = nil
+			if st.PairedDevices > mw.lastPairedCount {
+				mw.setStatus("Paired remote Touch Deck device")
+			}
+		}
+		return
+	}
+
+	if mw.activePairAttemptID != p.AttemptID || mw.pairDialog == nil {
+		if mw.pairDialog != nil {
+			mw.pairDialog.Hide()
+			mw.pairDialog = nil
+		}
+		attemptID := p.AttemptID
+		devName := p.DeviceName
+
+		intro := widget.NewLabel("A remote device is requesting pairing. Verify this code matches your device screen before approving:")
+		intro.Wrapping = fyne.TextWrapWord
+
+		sasLbl := widget.NewLabelWithStyle("Verification Code: "+p.SAS, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+		mw.pairStatusLbl = widget.NewLabel("")
+		mw.pairStatusLbl.Wrapping = fyne.TextWrapWord
+
+		mw.pairApproveBtn = widget.NewButtonWithIcon("Approve Device", theme.ConfirmIcon(), func() {
+			if mw.webCtrl == nil {
+				return
+			}
+			if err := mw.webCtrl.ResolvePendingPair(attemptID, true); err != nil {
+				mw.setStatus("Approve pairing failed: " + err.Error())
+				return
+			}
+			mw.setStatus("Approved pairing for " + devName)
+		})
+		mw.pairApproveBtn.Importance = widget.HighImportance
+
+		denyBtn := widget.NewButtonWithIcon("Deny", theme.CancelIcon(), func() {
+			if mw.webCtrl == nil {
+				return
+			}
+			if err := mw.webCtrl.ResolvePendingPair(attemptID, false); err != nil {
+				mw.setStatus("Deny pairing failed: " + err.Error())
+				return
+			}
+			mw.setStatus("Denied pairing request from " + devName)
+		})
+		denyBtn.Importance = widget.DangerImportance
+
+		content := container.NewVBox(
+			intro,
+			widget.NewSeparator(),
+			sasLbl,
+			widget.NewForm(
+				widget.NewFormItem("Device", widget.NewLabel(p.DeviceName)),
+				widget.NewFormItem("IP Address", widget.NewLabel(p.RemoteAddr)),
+				widget.NewFormItem("Device Key", widget.NewLabel(p.ClientFingerprint)),
+			),
+			mw.pairStatusLbl,
+			container.NewHBox(layout.NewSpacer(), denyBtn, mw.pairApproveBtn),
+		)
+
+		dlg := dialog.NewCustomWithoutButtons("Confirm Touch Deck Pairing", content, mw.win)
+		dlg.Resize(fyne.NewSize(460, 320))
+		mw.activePairAttemptID = attemptID
+		mw.pairDialog = dlg
+		dlg.Show()
+	}
+
+	if mw.pairStatusLbl == nil || mw.pairApproveBtn == nil {
+		return
+	}
+	switch {
+	case p.HostApproved && !p.ClientConfirmed:
+		mw.pairApproveBtn.Disable()
+		mw.pairStatusLbl.SetText("Approved on PC — waiting for Confirm Match on device...")
+	case !p.HostApproved && p.ClientConfirmed:
+		mw.pairApproveBtn.Enable()
+		mw.pairStatusLbl.SetText("Device confirmed code — click Approve Device to finish.")
+	default:
+		mw.pairApproveBtn.Enable()
+		mw.pairStatusLbl.SetText("Verify the code matches both screens, then approve on both devices.")
+	}
 }
 
 func (mw *MainWindow) setStatus(msg string) {

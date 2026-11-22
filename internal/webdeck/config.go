@@ -1,12 +1,13 @@
-// Package webdeck provides an authenticated local HTTP and WebSocket touch deck server
+// Package webdeck provides a mutually authenticated local HTTP and WebSocket touch deck server
 // and embedded Obsidian Slate web UI synchronized with the PoundDeck engine.
 package webdeck
 
 import (
 	"cmp"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -24,7 +25,7 @@ const (
 	// DefaultPort is the default TCP port for the LAN web touch deck server.
 	DefaultPort = 9120
 
-	maxPersistedSessions = 32
+	maxPairedDevices = 32
 )
 
 // BindMode controls whether the web deck accepts LAN traffic or restricts to loopback.
@@ -35,15 +36,25 @@ const (
 	BindLocalhost BindMode = "localhost"
 )
 
-// Config holds persisted LAN touch deck server settings and active session digests.
+// PairedDevice holds a paired remote device's verified Ed25519 identity and audit metadata.
+type PairedDevice struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	PublicKey   string `json:"publicKey"`
+	Fingerprint string `json:"fingerprint"`
+	PairedAt    string `json:"pairedAt"`
+	LastSeen    string `json:"lastSeen,omitempty"`
+}
+
+// Config holds persisted LAN touch deck server settings, host identity, and paired device public keys.
 type Config struct {
-	Enabled       bool     `json:"enabled"`
-	Port          int      `json:"port"`
-	BindMode      BindMode `json:"bindMode"`
-	PreferredHost string   `json:"preferredHost,omitempty"`
-	PIN           string   `json:"pin"`
-	PairToken     string   `json:"pairToken"`
-	Sessions      []string `json:"sessions,omitempty"`
+	Enabled       bool           `json:"enabled"`
+	Port          int            `json:"port"`
+	BindMode      BindMode       `json:"bindMode"`
+	PreferredHost string         `json:"preferredHost,omitempty"`
+	HostID        string         `json:"hostId,omitempty"`
+	HostPublicKey string         `json:"hostPublicKey,omitempty"`
+	Devices       []PairedDevice `json:"devices,omitempty"`
 }
 
 // InterfaceAddress describes a selectable local IPv4 address for pairing URLs and QR codes.
@@ -71,28 +82,62 @@ func (c Config) normalized() Config {
 		out.BindMode = BindLAN
 	}
 	out.PreferredHost = strings.TrimSpace(out.PreferredHost)
-	out.PIN = strings.TrimSpace(out.PIN)
-	out.PairToken = strings.TrimSpace(out.PairToken)
-	if len(out.Sessions) > 0 {
-		dedup := make([]string, 0, min(len(out.Sessions), maxPersistedSessions))
-		seen := make(map[string]struct{}, len(out.Sessions))
-		for _, s := range out.Sessions {
-			s = strings.TrimSpace(s)
-			if s == "" {
+	out.HostID = strings.TrimSpace(out.HostID)
+	out.HostPublicKey = strings.TrimSpace(out.HostPublicKey)
+
+	if len(out.Devices) > 0 {
+		dedup := make([]PairedDevice, 0, min(len(out.Devices), maxPairedDevices))
+		seenID := make(map[string]struct{}, len(out.Devices))
+		seenPub := make(map[string]struct{}, len(out.Devices))
+		for _, dev := range out.Devices {
+			dev.ID = strings.TrimSpace(dev.ID)
+			dev.Name = sanitizeDeviceName(dev.Name)
+			dev.PublicKey = strings.TrimSpace(dev.PublicKey)
+			dev.PairedAt = strings.TrimSpace(dev.PairedAt)
+			dev.LastSeen = strings.TrimSpace(dev.LastSeen)
+			if dev.ID == "" || dev.PublicKey == "" {
 				continue
 			}
-			if _, ok := seen[s]; ok {
+			pubBytes, err := base64.StdEncoding.DecodeString(dev.PublicKey)
+			if err != nil || len(pubBytes) != ed25519.PublicKeySize {
 				continue
 			}
-			seen[s] = struct{}{}
-			dedup = append(dedup, s)
+			dev.PublicKey = base64.StdEncoding.EncodeToString(pubBytes)
+			dev.Fingerprint = PublicKeyFingerprint(pubBytes)
+			if _, ok := seenID[dev.ID]; ok {
+				continue
+			}
+			if _, ok := seenPub[dev.PublicKey]; ok {
+				continue
+			}
+			seenID[dev.ID] = struct{}{}
+			seenPub[dev.PublicKey] = struct{}{}
+			dedup = append(dedup, dev)
 		}
-		if len(dedup) > maxPersistedSessions {
-			dedup = dedup[len(dedup)-maxPersistedSessions:]
+		if len(dedup) > maxPairedDevices {
+			dedup = dedup[len(dedup)-maxPairedDevices:]
 		}
-		out.Sessions = dedup
+		out.Devices = dedup
 	}
 	return out
+}
+
+func sanitizeDeviceName(raw string) string {
+	clean := strings.TrimSpace(raw)
+	clean = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return ' '
+		}
+		return r
+	}, clean)
+	clean = strings.Join(strings.Fields(clean), " ")
+	if len(clean) > 48 {
+		clean = strings.TrimSpace(clean[:48])
+	}
+	if clean == "" {
+		return "Touch Deck"
+	}
+	return clean
 }
 
 func configFromSettings(raw map[string]any) (cfg Config, needsSave bool) {
@@ -110,43 +155,34 @@ func configFromSettings(raw map[string]any) (cfg Config, needsSave bool) {
 		if ph, ok := raw["preferredHost"].(string); ok {
 			cfg.PreferredHost = ph
 		}
-		if pin, ok := raw["pin"].(string); ok {
-			cfg.PIN = pin
+		if hid, ok := raw["hostId"].(string); ok {
+			cfg.HostID = hid
 		}
-		if pt, ok := raw["pairToken"].(string); ok {
-			cfg.PairToken = pt
+		if hpk, ok := raw["hostPublicKey"].(string); ok {
+			cfg.HostPublicKey = hpk
 		}
-		cfg.Sessions = parseStringSlice(raw["sessions"])
-	}
-	cfg = cfg.normalized()
-
-	if !isValidPIN(cfg.PIN) {
-		if pin, err := generatePIN(); err == nil {
-			cfg.PIN = pin
+		cfg.Devices = parsePairedDevices(raw["devices"])
+		if _, hasLegacy := raw["sessions"]; hasLegacy {
+			needsSave = true
+		}
+		if _, hasLegacyPIN := raw["pin"]; hasLegacyPIN {
 			needsSave = true
 		}
 	}
-	if len(cfg.PairToken) < 16 {
-		if tok, err := generateRandomHex(16); err == nil {
-			cfg.PairToken = tok
-			needsSave = true
-		}
-	}
-	return cfg, needsSave
+	return cfg.normalized(), needsSave
 }
 
 func configToSettings(cfg Config) map[string]any {
 	norm := cfg.normalized()
-	sessions := make([]string, len(norm.Sessions))
-	copy(sessions, norm.Sessions)
+	devices := slices.Clone(norm.Devices)
 	return map[string]any{
 		"enabled":       norm.Enabled,
 		"port":          norm.Port,
 		"bindMode":      string(norm.BindMode),
 		"preferredHost": norm.PreferredHost,
-		"pin":           norm.PIN,
-		"pairToken":     norm.PairToken,
-		"sessions":      sessions,
+		"hostId":        norm.HostID,
+		"hostPublicKey": norm.HostPublicKey,
+		"devices":       devices,
 	}
 }
 
@@ -175,24 +211,28 @@ func parseIntValue(raw any) (int, bool) {
 	}
 }
 
-func parseStringSlice(raw any) []string {
+func parsePairedDevices(raw any) []PairedDevice {
 	switch v := raw.(type) {
-	case []string:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			if t := strings.TrimSpace(item); t != "" {
-				out = append(out, t)
-			}
+	case []PairedDevice:
+		return slices.Clone(v)
+	case []any:
+		rawBytes, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		var out []PairedDevice
+		if err := json.Unmarshal(rawBytes, &out); err != nil {
+			return nil
 		}
 		return out
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				if t := strings.TrimSpace(s); t != "" {
-					out = append(out, t)
-				}
-			}
+	case []map[string]any:
+		rawBytes, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		var out []PairedDevice
+		if err := json.Unmarshal(rawBytes, &out); err != nil {
+			return nil
 		}
 		return out
 	default:
@@ -220,17 +260,20 @@ func generatePIN() (string, error) {
 	return fmt.Sprintf("%06d", n.Int64()), nil
 }
 
-func generateRandomHex(numBytes int) (string, error) {
+func generateRandomBytes(numBytes int) ([]byte, error) {
 	buf := make([]byte, numBytes)
 	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("generate token: %w", err)
+		return nil, fmt.Errorf("generate random bytes: %w", err)
 	}
-	return hex.EncodeToString(buf), nil
+	return buf, nil
 }
 
-func hashToken(raw string) string {
-	sum := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(sum[:])
+func generateRandomHex(numBytes int) (string, error) {
+	buf, err := generateRandomBytes(numBytes)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 func constantTimeEqual(a, b string) bool {

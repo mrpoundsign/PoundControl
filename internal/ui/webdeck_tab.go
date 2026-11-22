@@ -5,6 +5,8 @@ import (
 	"image"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -26,7 +28,10 @@ type WebDeckController interface {
 	SaveConfig(cfg webdeck.Config) error
 	Start() error
 	Stop() error
-	RegeneratePairing(revokeSessions bool) (webdeck.Config, error)
+	OpenPairingWindow(ttl time.Duration) (webdeck.Status, error)
+	ClosePairingWindow()
+	ResolvePendingPair(attemptID string, approve bool) error
+	RevokeDevice(deviceID string) error
 	RevokeAllSessions() error
 	Status() webdeck.Status
 	SubscribeStatus(fn func(webdeck.Status)) func()
@@ -139,8 +144,8 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 	})
 	applyBtn.Importance = widget.HighImportance
 
-	pinLbl := widget.NewLabel("")
-	pinLbl.TextStyle = fyne.TextStyle{Bold: true}
+	hostFpLbl := widget.NewLabel(initSt.HostFingerprint)
+	hostFpLbl.TextStyle = fyne.TextStyle{Bold: true}
 
 	urlLbl := widget.NewLabel("")
 	urlLbl.Wrapping = fyne.TextWrapBreak
@@ -155,6 +160,17 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 			}
 		}
 	})
+
+	pinLbl := widget.NewLabel("")
+	pinLbl.TextStyle = fyne.TextStyle{Bold: true}
+
+	expiryLbl := widget.NewLabel("")
+
+	qrImg := canvas.NewImageFromImage(nil)
+	qrImg.ScaleMode = canvas.ImageScalePixels
+	qrImg.FillMode = canvas.ImageFillContain
+	qrImg.SetMinSize(fyne.NewSize(180, 180))
+
 	copyPairBtn := widget.NewButtonWithIcon("Copy Pair Link", theme.ContentCopyIcon(), func() {
 		if curApp := fyne.CurrentApp(); curApp != nil && curApp.Clipboard() != nil && curPairURL != "" {
 			curApp.Clipboard().SetContent(curPairURL)
@@ -164,27 +180,52 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 		}
 	})
 
-	qrImg := canvas.NewImageFromImage(nil)
-	qrImg.ScaleMode = canvas.ImageScalePixels
-	qrImg.FillMode = canvas.ImageFillContain
-	qrImg.SetMinSize(fyne.NewSize(180, 180))
+	openPairBtn := widget.NewButtonWithIcon("Pair New Device", theme.VisibilityIcon(), func() {
+		if _, err := ctrl.OpenPairingWindow(webdeck.DefaultPairingTTL); err != nil {
+			if onStatus != nil {
+				onStatus("Failed to open pairing window: " + err.Error())
+			}
+			return
+		}
+		if onStatus != nil {
+			onStatus("Pairing window open for 2 minutes")
+		}
+	})
+	openPairBtn.Importance = widget.HighImportance
 
-	regenBtn := widget.NewButtonWithIcon("Regenerate PIN & QR", theme.ViewRefreshIcon(), func() {
-		if _, err := ctrl.RegeneratePairing(false); err != nil {
+	regenBtn := widget.NewButtonWithIcon("New PIN & QR", theme.ViewRefreshIcon(), func() {
+		if _, err := ctrl.OpenPairingWindow(webdeck.DefaultPairingTTL); err != nil {
 			if onStatus != nil {
 				onStatus("Regenerate pairing failed: " + err.Error())
 			}
 			return
 		}
 		if onStatus != nil {
-			onStatus("Generated new 6-digit PIN and pairing QR code")
+			onStatus("Generated new 2-minute 6-digit PIN and pairing QR code")
 		}
 	})
 
-	revokeBtn := widget.NewButtonWithIcon("Revoke All Devices", theme.LogoutIcon(), func() {
+	closePairBtn := widget.NewButtonWithIcon("Close Pairing", theme.CancelIcon(), func() {
+		ctrl.ClosePairingWindow()
+		if onStatus != nil {
+			onStatus("Closed Web Deck pairing window")
+		}
+	})
+
+	activePairBox := container.NewVBox(
+		pinLbl,
+		expiryLbl,
+		container.NewHBox(copyPairBtn, regenBtn, closePairBtn),
+		container.NewCenter(qrImg),
+	)
+	closedPairLbl := widget.NewLabel("Pairing window is closed. Click Pair New Device to generate a temporary 6-digit PIN & QR code.")
+	closedPairLbl.Wrapping = fyne.TextWrapWord
+
+	devicesBox := container.NewVBox()
+	revokeAllBtn := widget.NewButtonWithIcon("Revoke All Devices", theme.LogoutIcon(), func() {
 		if err := ctrl.RevokeAllSessions(); err != nil {
 			if onStatus != nil {
-				onStatus("Revoke sessions failed: " + err.Error())
+				onStatus("Revoke devices failed: " + err.Error())
 			}
 			return
 		}
@@ -193,7 +234,27 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 		}
 	})
 
-	var lastPairURL string
+	var (
+		lastPairURL  string
+		pairExpAt    time.Time
+		pairingIsOpn bool
+		closedFlag   atomic.Bool
+	)
+
+	updateCountdown := func() {
+		if !pairingIsOpn || pairExpAt.IsZero() {
+			expiryLbl.SetText("")
+			return
+		}
+		rem := time.Until(pairExpAt)
+		if rem <= 0 {
+			expiryLbl.SetText("Expires in 0:00")
+			return
+		}
+		secs := int(rem.Round(time.Second).Seconds())
+		expiryLbl.SetText(fmt.Sprintf("Expires in %d:%02d", secs/60, secs%60))
+	}
+
 	applyStatus := func(st webdeck.Status) {
 		syncing = true
 		if wantChecked := ctrl.Config().Enabled; enabledCheck.Checked != wantChecked {
@@ -203,6 +264,8 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 
 		curAccessURL = st.AccessURL
 		curPairURL = st.PairURL
+		pairingIsOpn = st.PairingOpen
+		pairExpAt = st.PairingExpiresAt
 
 		switch {
 		case st.Running:
@@ -214,24 +277,110 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 			statusLbl.SetText(fmt.Sprintf("Stopped (%d paired devices)", st.PairedDevices))
 		}
 
-		pinLbl.SetText("Pairing PIN: " + st.PIN)
+		hostFpLbl.SetText(st.HostFingerprint)
 		urlLbl.SetText(st.AccessURL)
 
-		if st.PairURL != lastPairURL && st.PairURL != "" {
-			if img, err := ctrl.QRImage(180); err == nil {
-				qrImg.Image = img
-				qrImg.Refresh()
-				lastPairURL = st.PairURL
+		if st.PairingOpen && st.PIN != "" {
+			pinLbl.SetText("Pairing PIN: " + st.PIN)
+			updateCountdown()
+			activePairBox.Show()
+			closedPairLbl.Hide()
+			openPairBtn.Hide()
+			if st.PairURL != lastPairURL && st.PairURL != "" {
+				if img, err := ctrl.QRImage(180); err == nil {
+					qrImg.Image = img
+					qrImg.Refresh()
+					lastPairURL = st.PairURL
+				}
+			}
+		} else {
+			lastPairURL = ""
+			activePairBox.Hide()
+			closedPairLbl.Show()
+			openPairBtn.Show()
+		}
+
+		devicesBox.Objects = nil
+		if len(st.Devices) == 0 {
+			noneLbl := widget.NewLabel("No paired devices yet.")
+			noneLbl.Wrapping = fyne.TextWrapWord
+			devicesBox.Add(noneLbl)
+			revokeAllBtn.Disable()
+		} else {
+			revokeAllBtn.Enable()
+			for _, dev := range st.Devices {
+				devID := dev.ID
+				devName := dev.Name
+				title := dev.Name
+				if dev.Connected {
+					title += " (Connected)"
+				}
+				titleLbl := widget.NewLabel(title)
+				titleLbl.TextStyle = fyne.TextStyle{Bold: true}
+
+				meta := "Key: " + dev.Fingerprint
+				if dev.LastSeen != "" {
+					meta += " • Last seen " + dev.LastSeen
+				} else if dev.PairedAt != "" {
+					meta += " • Paired " + dev.PairedAt
+				}
+				metaLbl := widget.NewLabel(meta)
+				metaLbl.Wrapping = fyne.TextWrapBreak
+
+				revBtn := widget.NewButtonWithIcon("Revoke", theme.DeleteIcon(), func() {
+					if err := ctrl.RevokeDevice(devID); err != nil {
+						if onStatus != nil {
+							onStatus("Revoke device failed: " + err.Error())
+						}
+						return
+					}
+					if onStatus != nil {
+						onStatus("Revoked device: " + devName)
+					}
+				})
+				row := container.NewBorder(nil, nil, nil, revBtn, container.NewVBox(titleLbl, metaLbl))
+				devicesBox.Add(row)
 			}
 		}
+		devicesBox.Refresh()
 	}
 
 	applyStatus(initSt)
 	unsub := ctrl.SubscribeStatus(func(st webdeck.Status) {
 		dispatchUI(func() {
+			if closedFlag.Load() {
+				return
+			}
 			applyStatus(st)
 		})
 	})
+
+	stopTick := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopTick:
+				return
+			case <-ticker.C:
+				dispatchUI(func() {
+					if closedFlag.Load() {
+						return
+					}
+					updateCountdown()
+				})
+			}
+		}
+	}()
+
+	cleanup := func() {
+		closedFlag.Store(true)
+		close(stopTick)
+		if unsub != nil {
+			unsub()
+		}
+	}
 
 	content := container.NewVBox(
 		widget.NewLabelWithStyle("LAN Touch Deck Server", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -244,13 +393,19 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 		),
 		container.NewHBox(applyBtn),
 		widget.NewSeparator(),
-		widget.NewLabelWithStyle("Mobile & Tablet Pairing", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		pinLbl,
-		widget.NewForm(widget.NewFormItem("Deck URL", urlLbl)),
-		container.NewHBox(copyURLBtn, copyPairBtn),
-		container.NewCenter(qrImg),
-		container.NewHBox(regenBtn, revokeBtn),
+		widget.NewLabelWithStyle("Host Identity & Mutual Pairing", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewForm(
+			widget.NewFormItem("Host Key", hostFpLbl),
+			widget.NewFormItem("Deck URL", urlLbl),
+		),
+		container.NewHBox(copyURLBtn, openPairBtn),
+		closedPairLbl,
+		activePairBox,
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Paired Devices", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		devicesBox,
+		container.NewHBox(revokeAllBtn),
 	)
 
-	return container.NewVScroll(container.NewPadded(content)), unsub
+	return container.NewVScroll(container.NewPadded(content)), cleanup
 }

@@ -46,8 +46,9 @@ object DeckUrlValidator {
         val portPart = if (port > 0) ":$port" else ""
         val path = uri.rawPath?.takeIf { it.isNotEmpty() } ?: "/"
         val queryPart = uri.rawQuery?.takeIf { it.isNotEmpty() }?.let { "?$it" } ?: ""
+        val fragmentPart = uri.rawFragment?.takeIf { it.isNotEmpty() }?.let { "#$it" } ?: ""
 
-        return "$scheme://$formattedHost$portPart$path$queryPart"
+        return "$scheme://$formattedHost$portPart$path$queryPart$fragmentPart"
     }
 
     fun baseOriginUrl(fullUrl: String): String? {

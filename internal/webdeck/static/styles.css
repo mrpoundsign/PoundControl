@@ -225,6 +225,113 @@ body[data-view="deck"] .app-shell {
   text-wrap: pretty;
 }
 
+.pair-step-entry,
+.confirm-view {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.pair-window-hint {
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  color: var(--accent-sky);
+  border-radius: 10px;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.pair-window-hint[data-open="false"] {
+  background: rgba(251, 191, 36, 0.12);
+  border-color: rgba(251, 191, 36, 0.45);
+  color: var(--status-warn);
+}
+
+.field-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: -0.45rem;
+}
+
+.device-name-input {
+  width: 100%;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-slate);
+  border-radius: 10px;
+  padding: 0.55rem 0.8rem;
+  font-size: 0.95rem;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.sas-box {
+  background: var(--bg-deep);
+  border: 2px solid var(--accent-sky);
+  border-radius: 14px;
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.sas-label {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.sas-code {
+  font-size: 2rem;
+  letter-spacing: 0.18em;
+  color: var(--accent-sky);
+  font-variant-numeric: tabular-nums;
+}
+
+.fp-list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-slate);
+  border-radius: 12px;
+  padding: 0.65rem 0.8rem;
+}
+
+.fp-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.65rem;
+  font-size: 0.84rem;
+}
+
+.fp-row dt {
+  color: var(--text-muted);
+}
+
+.fp-row dd {
+  margin: 0;
+  font-weight: 600;
+  text-align: right;
+  word-break: break-word;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.confirm-status {
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  text-align: center;
+  line-height: 1.4;
+}
+
 .pair-form {
   display: flex;
   flex-direction: column;

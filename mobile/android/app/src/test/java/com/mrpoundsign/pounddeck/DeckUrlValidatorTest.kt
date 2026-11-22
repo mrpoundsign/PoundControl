@@ -11,8 +11,12 @@ class DeckUrlValidatorTest {
     @Test
     fun normalizeAcceptsValidHttpAndBareLanIp() {
         assertEquals(
-            "http://192.168.1.42:9120/?pair=abc123",
-            DeckUrlValidator.normalizeUrl("http://192.168.1.42:9120/?pair=abc123#frag"),
+            "http://192.168.1.42:9120/#pair=123456&fp=A1B2-C3D4-E5F6",
+            DeckUrlValidator.normalizeUrl("http://192.168.1.42:9120/#pair=123456&fp=A1B2-C3D4-E5F6"),
+        )
+        assertEquals(
+            "http://192.168.1.42:9120/?q=1#frag",
+            DeckUrlValidator.normalizeUrl("http://192.168.1.42:9120/?q=1#frag"),
         )
         assertEquals(
             "http://192.168.1.42:9120/",
@@ -43,6 +47,10 @@ class DeckUrlValidatorTest {
     fun baseOriginUrlStripsPairTokensAndIsSameHostEnforcesPort() {
         val base = DeckUrlValidator.baseOriginUrl("http://192.168.1.42:9120/?pair=secret_token")
         assertEquals("http://192.168.1.42:9120/", base)
+        assertEquals(
+            "http://192.168.1.42:9120/",
+            DeckUrlValidator.baseOriginUrl("http://192.168.1.42:9120/#pair=123456&fp=A1B2-C3D4-E5F6"),
+        )
 
         assertTrue(DeckUrlValidator.isSameHost("http://192.168.1.42:9120/api/auth/status", base!!))
         assertFalse(DeckUrlValidator.isSameHost("http://192.168.1.42:9999/", base))

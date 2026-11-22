@@ -26,42 +26,77 @@
 
     <main id="pair-view" class="pair-view">
       <section class="pair-card" aria-labelledby="pair-heading">
-        <h2 id="pair-heading">Pair Touch Deck</h2>
-        <p class="pair-help">Enter the 6-digit PIN shown in PoundDeck Settings &rarr; Web Deck, or scan the pairing QR code from your desktop studio.</p>
+        <div id="pair-step-entry" class="pair-step-entry">
+          <h2 id="pair-heading">Pair Touch Deck</h2>
+          <p class="pair-help">Click <strong>Pair New Device</strong> in PoundDeck Settings &rarr; Web Deck, then enter the 6-digit PIN or scan the QR code.</p>
+          <div id="pair-window-hint" class="pair-window-hint" hidden></div>
 
-        <form id="pair-form" class="pair-form">
-          <label class="sr-only" for="pin-input">6-digit pairing PIN</label>
-          <input
-            id="pin-input"
-            class="pin-input"
-            type="text"
-            inputmode="numeric"
-            autocomplete="one-time-code"
-            pattern="[0-9]{6}"
-            maxlength="6"
-            placeholder="000000"
-            aria-label="6-digit pairing PIN"
-          >
-          <div id="pair-error" class="pair-error" role="alert" hidden></div>
+          <form id="pair-form" class="pair-form">
+            <label class="field-label" for="device-name-input">Device Name</label>
+            <input
+              id="device-name-input"
+              class="device-name-input"
+              type="text"
+              maxlength="48"
+              placeholder="My Phone"
+              aria-label="Device name"
+            >
 
-          <div class="keypad-digits" role="group" aria-label="PIN numeric keypad">
-            <button type="button" class="digit-btn" data-digit="1">1</button>
-            <button type="button" class="digit-btn" data-digit="2">2</button>
-            <button type="button" class="digit-btn" data-digit="3">3</button>
-            <button type="button" class="digit-btn" data-digit="4">4</button>
-            <button type="button" class="digit-btn" data-digit="5">5</button>
-            <button type="button" class="digit-btn" data-digit="6">6</button>
-            <button type="button" class="digit-btn" data-digit="7">7</button>
-            <button type="button" class="digit-btn" data-digit="8">8</button>
-            <button type="button" class="digit-btn" data-digit="9">9</button>
-            <button type="button" class="digit-btn digit-muted" id="pin-clear-btn">Clear</button>
-            <button type="button" class="digit-btn" data-digit="0">0</button>
-            <button type="button" class="digit-btn digit-muted" id="pin-back-btn" aria-label="Backspace">&larr;</button>
+            <label class="sr-only" for="pin-input">6-digit pairing PIN</label>
+            <input
+              id="pin-input"
+              class="pin-input"
+              type="text"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              pattern="[0-9]{6}"
+              maxlength="6"
+              placeholder="000000"
+              aria-label="6-digit pairing PIN"
+            >
+            <div id="pair-error" class="pair-error" role="alert" hidden></div>
+
+            <div class="keypad-digits" role="group" aria-label="PIN numeric keypad">
+              <button type="button" class="digit-btn" data-digit="1">1</button>
+              <button type="button" class="digit-btn" data-digit="2">2</button>
+              <button type="button" class="digit-btn" data-digit="3">3</button>
+              <button type="button" class="digit-btn" data-digit="4">4</button>
+              <button type="button" class="digit-btn" data-digit="5">5</button>
+              <button type="button" class="digit-btn" data-digit="6">6</button>
+              <button type="button" class="digit-btn" data-digit="7">7</button>
+              <button type="button" class="digit-btn" data-digit="8">8</button>
+              <button type="button" class="digit-btn" data-digit="9">9</button>
+              <button type="button" class="digit-btn digit-muted" id="pin-clear-btn">Clear</button>
+              <button type="button" class="digit-btn" data-digit="0">0</button>
+              <button type="button" class="digit-btn digit-muted" id="pin-back-btn" aria-label="Backspace">&larr;</button>
+            </div>
+
+            <button id="pair-submit-btn" type="submit" class="primary-btn">Verify PIN</button>
+          </form>
+          <button id="native-scan-pair-btn" type="button" class="tool-btn" hidden>Scan QR Code</button>
+        </div>
+
+        <div id="confirm-view" class="confirm-view" hidden>
+          <h2>Confirm Both Devices</h2>
+          <p class="pair-help">Verify that this 6-digit security code matches the prompt shown on your PoundDeck PC.</p>
+
+          <div class="sas-box" aria-live="polite">
+            <span class="sas-label">Verification Code</span>
+            <strong id="sas-code" class="sas-code">000-000</strong>
           </div>
 
-          <button id="pair-submit-btn" type="submit" class="primary-btn">Connect to Deck</button>
-        </form>
-        <button id="native-scan-pair-btn" type="button" class="tool-btn" hidden>Scan QR Code</button>
+          <dl class="fp-list">
+            <div class="fp-row"><dt>Host PC</dt><dd id="confirm-host-name">-</dd></div>
+            <div class="fp-row"><dt>Host Key</dt><dd id="confirm-host-fp" class="mono">-</dd></div>
+            <div class="fp-row"><dt>This Device</dt><dd id="confirm-client-fp" class="mono">-</dd></div>
+          </dl>
+
+          <div id="confirm-status" class="confirm-status" role="status" aria-live="polite">Waiting for confirmation on both devices...</div>
+          <div id="confirm-error" class="pair-error" role="alert" hidden></div>
+
+          <button id="confirm-approve-btn" type="button" class="primary-btn">Confirm Match</button>
+          <button id="confirm-cancel-btn" type="button" class="tool-btn tool-btn-danger">Cancel</button>
+        </div>
       </section>
     </main>
 
@@ -117,6 +152,7 @@
       </div>
     </aside>
   </div>
+  <script src="/crypto.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

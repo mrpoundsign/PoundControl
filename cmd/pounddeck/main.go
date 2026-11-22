@@ -120,7 +120,7 @@ func main() {
 	win.SetWasmPluginController(wasmHost)
 	win.SetPIViewer(ui.NewDefaultPIViewer())
 
-	webSrv := webdeck.NewServer(eng)
+	webSrv := webdeck.NewServer(eng, secretStore)
 	defer func() {
 		if closeErr := webSrv.Close(); closeErr != nil {
 			log.Printf("close web deck server: %v", closeErr)

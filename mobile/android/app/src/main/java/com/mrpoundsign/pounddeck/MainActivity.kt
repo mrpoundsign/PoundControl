@@ -40,6 +40,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val PREFS_NAME = "pounddeck_prefs"
+        private const val AUTH_PREFS_NAME = "pounddeck_auth"
         private const val KEY_BASE_URL = "last_base_url"
         private const val KEY_ORIENTATION = "orientation_mode"
         private const val USER_AGENT_SUFFIX = "PoundDeckAndroid/1.0"
@@ -520,6 +521,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun prefs() = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
 
+    private fun authPrefs() = getSharedPreferences(AUTH_PREFS_NAME, MODE_PRIVATE)
+
     private fun makeActionButton(label: String, bgHex: String, fgColor: Int, onClick: () -> Unit): Button {
         return Button(this).apply {
             text = label
@@ -586,6 +589,36 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun setOrientation(mode: String) {
             runOnUiThread { updateOrientation(mode) }
+        }
+
+        @JavascriptInterface
+        fun getAuthRecord(origin: String): String {
+            val clean = DeckUrlValidator.baseOriginUrl(origin) ?: return ""
+            return authPrefs().getString(clean, "") ?: ""
+        }
+
+        @JavascriptInterface
+        fun saveAuthRecord(origin: String, json: String) {
+            val clean = DeckUrlValidator.baseOriginUrl(origin) ?: return
+            authPrefs().edit().putString(clean, json).apply()
+        }
+
+        @JavascriptInterface
+        fun clearAuthRecord(origin: String) {
+            val clean = DeckUrlValidator.baseOriginUrl(origin) ?: return
+            authPrefs().edit().remove(clean).apply()
+        }
+
+        @JavascriptInterface
+        fun getDeviceName(): String {
+            val man = Build.MANUFACTURER.orEmpty().trim()
+            val mod = Build.MODEL.orEmpty().trim()
+            val raw = when {
+                mod.isEmpty() -> "Android Companion"
+                man.isNotEmpty() && !mod.startsWith(man, ignoreCase = true) -> "$man $mod"
+                else -> mod
+            }
+            return raw.take(48)
         }
     }
 }

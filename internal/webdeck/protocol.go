@@ -65,6 +65,7 @@ type ServerMessage struct {
 }
 
 // ClientCommand is an inbound interactive command received over WebSocket.
+// Supported types include ping, keyDown, keyUp, dialRotate, dialPress, prevPage, nextPage, closeFolder, switchProfile, and unpair.
 type ClientCommand struct {
 	Type      string `json:"type"`
 	Row       int    `json:"row"`
@@ -72,6 +73,39 @@ type ClientCommand struct {
 	Dial      int    `json:"dial"`
 	Ticks     int    `json:"ticks"`
 	ProfileID string `json:"profileId,omitempty"`
+}
+
+// WSAuthHello is sent by the host immediately after WebSocket upgrade to initiate mutual authentication.
+type WSAuthHello struct {
+	Type          string `json:"type"`
+	HostID        string `json:"hostId"`
+	HostName      string `json:"hostName"`
+	HostPublicKey string `json:"hostPublicKey"`
+	ServerNonce   string `json:"serverNonce"`
+}
+
+// WSAuthResponse is sent by the client proving its paired Ed25519 identity and ephemeral X25519 key share.
+type WSAuthResponse struct {
+	Type         string `json:"type"`
+	DeviceID     string `json:"deviceId"`
+	ClientNonce  string `json:"clientNonce"`
+	ClientEphPub string `json:"clientEphPub"`
+	ClientSig    string `json:"clientSig"`
+}
+
+// WSAuthOK is returned by the host proving host Ed25519 identity and completing session MAC key agreement.
+type WSAuthOK struct {
+	Type         string `json:"type"`
+	SessionID    string `json:"sessionId"`
+	ServerEphPub string `json:"serverEphPub"`
+	HostSig      string `json:"hostSig"`
+}
+
+// WSSignedFrame wraps an authenticated plaintext JSON payload with monotonic sequence number and HMAC-SHA256 tag.
+type WSSignedFrame struct {
+	Seq     uint64 `json:"seq"`
+	Payload string `json:"payload"`
+	MAC     string `json:"mac"`
 }
 
 func buildClientSnapshot(snap app.Snapshot, mapImage func(string) string) ClientSnapshot {

@@ -860,7 +860,7 @@ func TestMainWindowSDPluginArtworkDialFeedbackAndPI(t *testing.T) {
 
 func TestMainWindowWebDeckSettingsAndHeaderBadge(t *testing.T) {
 	eng, _, mw := newTestStudio(t)
-	webSrv := webdeck.NewServer(eng)
+	webSrv := webdeck.NewServer(eng, nil)
 	t.Cleanup(func() {
 		_ = webSrv.Close()
 		drainUI()
@@ -891,16 +891,47 @@ func TestMainWindowWebDeckSettingsAndHeaderBadge(t *testing.T) {
 	dlg := mw.ShowSettingsDialogTab(settingsTabWeb)
 	drainUI()
 
+	openSt, err := webSrv.OpenPairingWindow(webdeck.DefaultPairingTTL)
+	if err != nil || !openSt.PairingOpen || len(openSt.PIN) != 6 || openSt.HostFingerprint == "" {
+		t.Fatalf("OpenPairingWindow() = (%+v, %v), want open window with 6-digit PIN & host fingerprint", openSt, err)
+	}
+	drainUI()
+
 	qrImg, err := webSrv.QRImage(180)
 	if err != nil || qrImg.Bounds().Dx() != 180 {
 		t.Fatalf("QRImage(180) = (%#v, %v), want 180x180", qrImg, err)
 	}
 
-	nextCfg, err := webSrv.RegeneratePairing(true)
-	if err != nil || len(nextCfg.PIN) != 6 {
-		t.Fatalf("RegeneratePairing() = (%+v, %v), want valid 6-digit PIN", nextCfg, err)
-	}
+	dlg.Hide()
 	drainUI()
+
+	// Verify incoming SPAKE2-verified pairing request opens and clears Studio's mutual confirmation modal.
+	pendingSt := webSrv.Status()
+	pendingSt.PendingPair = &webdeck.PendingPairInfo{
+		AttemptID:         "att-ui-1",
+		DeviceName:        "Pixel Companion",
+		RemoteAddr:        "127.0.0.1",
+		ClientFingerprint: "AAAA-BBBB-CCCC",
+		SAS:               "482-915",
+		ExpiresAt:         time.Now().Add(time.Minute),
+	}
+	mw.applyWebDeckStatus(pendingSt)
+	drainUI()
+	if mw.pairDialog == nil || mw.activePairAttemptID != "att-ui-1" || mw.pairApproveBtn == nil {
+		t.Fatalf("expected active Studio pairing approval dialog, got dlg=%v id=%q btn=%v",
+			mw.pairDialog, mw.activePairAttemptID, mw.pairApproveBtn)
+	}
+	pendingSt.PendingPair = nil
+	mw.applyWebDeckStatus(pendingSt)
+	drainUI()
+	if mw.pairDialog != nil || mw.activePairAttemptID != "" {
+		t.Fatalf("expected Studio pairing approval dialog cleared, got dlg=%v id=%q", mw.pairDialog, mw.activePairAttemptID)
+	}
+
+	webSrv.ClosePairingWindow()
+	if err := webSrv.RevokeAllSessions(); err != nil {
+		t.Fatalf("webSrv.RevokeAllSessions() error = %v", err)
+	}
 
 	if err := webSrv.Stop(); err != nil {
 		t.Fatalf("webSrv.Stop() error = %v", err)
@@ -909,8 +940,6 @@ func TestMainWindowWebDeckSettingsAndHeaderBadge(t *testing.T) {
 	if mw.webBtn.Text != "Web Deck: Off" {
 		t.Fatalf("expected badge back to \"Web Deck: Off\" after Stop, got %q", mw.webBtn.Text)
 	}
-
-	dlg.Hide()
 	drainUI()
 
 	// Verify buildGridDimensionControls supports 5x2 presets, custom dimensions, and bounds validation.

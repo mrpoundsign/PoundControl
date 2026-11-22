@@ -1,6 +1,7 @@
 (() => {
   'use strict';
 
+  const C = window.PoundDeckCrypto;
   const HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
   const nativeBridge =
     window.PoundDeckNative && typeof window.PoundDeckNative.isNativeApp === 'function'
@@ -33,11 +34,24 @@
     fullscreenBtn: document.getElementById('fullscreen-btn'),
     logoutBtn: document.getElementById('logout-btn'),
     pairView: document.getElementById('pair-view'),
+    pairStepEntry: document.getElementById('pair-step-entry'),
+    pairWindowHint: document.getElementById('pair-window-hint'),
     pairForm: document.getElementById('pair-form'),
+    deviceNameInput: document.getElementById('device-name-input'),
     pinInput: document.getElementById('pin-input'),
     pairError: document.getElementById('pair-error'),
+    pairSubmitBtn: document.getElementById('pair-submit-btn'),
     pinClearBtn: document.getElementById('pin-clear-btn'),
     pinBackBtn: document.getElementById('pin-back-btn'),
+    confirmView: document.getElementById('confirm-view'),
+    sasCode: document.getElementById('sas-code'),
+    confirmHostName: document.getElementById('confirm-host-name'),
+    confirmHostFp: document.getElementById('confirm-host-fp'),
+    confirmClientFp: document.getElementById('confirm-client-fp'),
+    confirmStatus: document.getElementById('confirm-status'),
+    confirmError: document.getElementById('confirm-error'),
+    confirmApproveBtn: document.getElementById('confirm-approve-btn'),
+    confirmCancelBtn: document.getElementById('confirm-cancel-btn'),
     deckView: document.getElementById('deck-view'),
     folderBanner: document.getElementById('folder-banner'),
     keyGrid: document.getElementById('key-grid'),
@@ -46,12 +60,106 @@
   };
 
   let ws = null;
+  let wsSession = null;
   let reconnectTimer = null;
   let heartbeatTimer = null;
+  let pairPollTimer = null;
   let reconnectDelayMs = 600;
   let shouldReconnect = false;
   let wakeLock = null;
   let lastSnapshot = null;
+  let expectedHostFp = '';
+  let activePair = null;
+
+  function storageKey() {
+    return 'pounddeck_auth_v2_' + window.location.origin;
+  }
+
+  function loadAuthRecord() {
+    let raw = '';
+    if (nativeBridge && typeof nativeBridge.getAuthRecord === 'function') {
+      try {
+        raw = nativeBridge.getAuthRecord(window.location.origin) || '';
+      } catch {
+        raw = '';
+      }
+    }
+    if (!raw) {
+      try {
+        raw = window.localStorage.getItem(storageKey()) || '';
+      } catch {
+        raw = '';
+      }
+    }
+    if (!raw) {
+      return null;
+    }
+    try {
+      const rec = JSON.parse(raw);
+      if (
+        !rec ||
+        typeof rec.hostId !== 'string' ||
+        typeof rec.hostPublicKey !== 'string' ||
+        typeof rec.deviceId !== 'string' ||
+        typeof rec.clientSeed !== 'string' ||
+        typeof rec.clientPublicKey !== 'string'
+      ) {
+        return null;
+      }
+      return rec;
+    } catch {
+      return null;
+    }
+  }
+
+  function saveAuthRecord(rec) {
+    const serialized = JSON.stringify(rec);
+    if (nativeBridge && typeof nativeBridge.saveAuthRecord === 'function') {
+      try {
+        nativeBridge.saveAuthRecord(window.location.origin, serialized);
+      } catch {
+        // Fall through to localStorage fallback.
+      }
+    }
+    try {
+      window.localStorage.setItem(storageKey(), serialized);
+    } catch {
+      // Ignore restricted storage modes.
+    }
+  }
+
+  function clearAuthRecord() {
+    if (nativeBridge && typeof nativeBridge.clearAuthRecord === 'function') {
+      try {
+        nativeBridge.clearAuthRecord(window.location.origin);
+      } catch {
+        // Ignore bridge failure.
+      }
+    }
+    try {
+      window.localStorage.removeItem(storageKey());
+    } catch {
+      // Ignore storage error.
+    }
+  }
+
+  function defaultDeviceName() {
+    if (nativeBridge && typeof nativeBridge.getDeviceName === 'function') {
+      try {
+        const nativeName = (nativeBridge.getDeviceName() || '').trim();
+        if (nativeName) {
+          return nativeName.slice(0, 48);
+        }
+      } catch {
+        // Ignore bridge failure.
+      }
+    }
+    const ua = navigator.userAgent || '';
+    if (/iPad/i.test(ua)) return 'iPad Browser';
+    if (/iPhone/i.test(ua)) return 'iPhone Browser';
+    if (/Android/i.test(ua)) return 'Android Browser';
+    return 'Web Touch Deck';
+  }
 
   function setStatusBadge(state, label) {
     if (els.connBadge) {
@@ -71,10 +179,34 @@
     els.menuBtn.setAttribute('aria-expanded', String(open));
   }
 
+  function stopPairPoll() {
+    if (pairPollTimer) {
+      clearInterval(pairPollTimer);
+      pairPollTimer = null;
+    }
+  }
+
+  function showConfirmView(pairCtx) {
+    activePair = pairCtx;
+    els.pairStepEntry.hidden = true;
+    els.confirmView.hidden = false;
+    els.confirmError.hidden = true;
+    els.confirmApproveBtn.disabled = false;
+    els.sasCode.textContent = pairCtx.mat.sas;
+    els.confirmHostName.textContent = pairCtx.info.hostName || 'PoundDeck Studio';
+    els.confirmHostFp.textContent = pairCtx.info.hostFingerprint;
+    els.confirmClientFp.textContent = C.ed25519.fingerprint(pairCtx.clientPub);
+    els.confirmStatus.textContent = 'Check the verification code on your PoundDeck PC and tap Confirm Match.';
+    setStatusBadge('connecting', 'Verify Both Devices');
+  }
+
   function showPairView(errorMsg) {
     shouldReconnect = false;
     stopHeartbeat();
+    stopPairPoll();
+    activePair = null;
     clearTimeout(reconnectTimer);
+    wsSession = null;
     if (ws) {
       ws.close();
       ws = null;
@@ -84,28 +216,71 @@
     els.pairHeader.hidden = false;
     els.deckView.hidden = true;
     els.pairView.hidden = false;
+    els.pairStepEntry.hidden = false;
+    els.confirmView.hidden = true;
+    els.confirmError.hidden = true;
     setStatusBadge('offline', 'Not Paired');
+
+    if (els.deviceNameInput && !els.deviceNameInput.value.trim()) {
+      els.deviceNameInput.value = defaultDeviceName();
+    }
     if (errorMsg) {
       els.pairError.textContent = errorMsg;
       els.pairError.hidden = false;
     } else {
       els.pairError.hidden = true;
     }
+    refreshPairInfo();
   }
 
   function showDeckView() {
+    stopPairPoll();
+    activePair = null;
     document.body.dataset.view = 'deck';
     els.pairError.hidden = true;
+    els.confirmError.hidden = true;
     els.pairHeader.hidden = true;
     els.pairView.hidden = true;
     els.deckView.hidden = false;
   }
 
+  async function refreshPairInfo() {
+    if (!els.pairWindowHint) {
+      return null;
+    }
+    try {
+      const res = await fetch('/api/pair/info', { cache: 'no-store' });
+      if (!res.ok) {
+        return null;
+      }
+      const info = await res.json();
+      if (info.pairingOpen) {
+        els.pairWindowHint.dataset.open = 'true';
+        els.pairWindowHint.textContent = 'Pairing window open on ' + (info.hostName || 'PC') + ' (Key ' + (info.hostFingerprint || '') + ').';
+      } else {
+        els.pairWindowHint.dataset.open = 'false';
+        els.pairWindowHint.textContent = 'Pairing is currently closed on ' + (info.hostName || 'PC') + '. Click Pair New Device in Settings.';
+      }
+      els.pairWindowHint.hidden = false;
+      return info;
+    } catch {
+      els.pairWindowHint.hidden = true;
+      return null;
+    }
+  }
+
   function sendCmd(cmd) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !wsSession) {
       return;
     }
-    ws.send(JSON.stringify(cmd));
+    wsSession.txSeq += 1;
+    const payload = JSON.stringify(cmd);
+    const mac = C.toBase64(C.wsAuth.frameMAC(wsSession.clientMacKey, 'c2s', wsSession.txSeq, payload));
+    ws.send(JSON.stringify({
+      seq: wsSession.txSeq,
+      payload,
+      mac,
+    }));
   }
 
   function startHeartbeat() {
@@ -123,59 +298,174 @@
   }
 
   function connectWS() {
+    const auth = loadAuthRecord();
+    if (!auth) {
+      showPairView('');
+      return;
+    }
+
     clearTimeout(reconnectTimer);
     shouldReconnect = true;
+    wsSession = null;
     showDeckView();
-    setStatusBadge('connecting', 'Connecting...');
+    setStatusBadge('connecting', 'Authenticating...');
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = proto + '//' + window.location.host + '/ws';
     const socket = new WebSocket(url);
     ws = socket;
 
-    socket.addEventListener('open', () => {
-      reconnectDelayMs = 600;
-      setStatusBadge('online', 'Live');
-      startHeartbeat();
-    });
+    let handshaked = false;
+    let pendingHandshake = null;
 
     socket.addEventListener('message', (ev) => {
+      if (ws !== socket) {
+        return;
+      }
       let msg;
       try {
         msg = JSON.parse(ev.data);
       } catch {
         return;
       }
-      if (!msg || typeof msg.type !== 'string') {
+      if (!msg) {
         return;
       }
-      if (msg.type === 'snapshot' && msg.snapshot) {
-        lastSnapshot = msg.snapshot;
-        renderSnapshot(msg.snapshot);
-      } else if (msg.type === 'auth_revoked') {
-        showPairView(msg.message || 'Session expired. Enter pairing PIN to reconnect.');
+
+      if (!handshaked) {
+        if (msg.type === 'auth_error') {
+          shouldReconnect = false;
+          clearAuthRecord();
+          socket.close();
+          showPairView(msg.message || 'Device pairing revoked on host. Re-pair to continue.');
+          return;
+        }
+        if (msg.type === 'auth_hello') {
+          if (msg.hostId !== auth.hostId || msg.hostPublicKey !== auth.hostPublicKey) {
+            shouldReconnect = false;
+            socket.close();
+            showPairView('Security alert: Host public key mismatch. Re-pair if this PC was reset.');
+            return;
+          }
+          try {
+            const hostPub = C.fromBase64(auth.hostPublicKey);
+            const clientSeed = C.fromBase64(auth.clientSeed);
+            const clientPub = C.fromBase64(auth.clientPublicKey);
+            const serverNonce = C.fromBase64(msg.serverNonce);
+            const clientNonce = C.randomBytes(32);
+            const eph = C.x25519.generateKeypair();
+            const t1 = C.wsAuth.buildTranscript1(
+              auth.hostId,
+              auth.deviceId,
+              hostPub,
+              clientPub,
+              serverNonce,
+              clientNonce,
+              eph.publicKey
+            );
+            const clientSig = C.ed25519.sign(clientSeed, t1);
+            pendingHandshake = { hostPub, t1, ephPriv: eph.privateKey };
+            socket.send(JSON.stringify({
+              type: 'auth_response',
+              deviceId: auth.deviceId,
+              clientNonce: C.toBase64(clientNonce),
+              clientEphPub: C.toBase64(eph.publicKey),
+              clientSig: C.toBase64(clientSig),
+            }));
+          } catch {
+            shouldReconnect = false;
+            socket.close();
+            showPairView('Client cryptographic identity error. Please re-pair.');
+          }
+          return;
+        }
+        if (msg.type === 'auth_ok' && pendingHandshake) {
+          try {
+            const serverEphPub = C.fromBase64(msg.serverEphPub);
+            const hostSig = C.fromBase64(msg.hostSig);
+            const t2 = C.wsAuth.buildTranscript2(pendingHandshake.t1, serverEphPub);
+            if (!C.ed25519.verify(pendingHandshake.hostPub, t2, hostSig)) {
+              shouldReconnect = false;
+              socket.close();
+              showPairView('Security alert: Host authentication signature failed.');
+              return;
+            }
+            const shared = C.x25519.sharedSecret(pendingHandshake.ephPriv, serverEphPub);
+            const keys = C.wsAuth.deriveSessionKeys(shared, t2);
+            wsSession = {
+              sessionId: msg.sessionId,
+              clientMacKey: keys.clientMacKey,
+              serverMacKey: keys.serverMacKey,
+              assetMacKey: keys.assetMacKey,
+              txSeq: 0,
+              rxSeq: 0,
+            };
+            handshaked = true;
+            pendingHandshake = null;
+            reconnectDelayMs = 600;
+            setStatusBadge('online', 'Live');
+            startHeartbeat();
+          } catch {
+            shouldReconnect = false;
+            socket.close();
+            showPairView('Host key exchange failed.');
+          }
+          return;
+        }
+        return;
+      }
+
+      // Signed post-handshake frame verification.
+      if (
+        !wsSession ||
+        typeof msg.seq !== 'number' ||
+        msg.seq <= wsSession.rxSeq ||
+        typeof msg.payload !== 'string' ||
+        typeof msg.mac !== 'string'
+      ) {
+        shouldReconnect = false;
+        socket.close();
+        showPairView('Security alert: Invalid or replayed host frame rejected.');
+        return;
+      }
+      const expectedMac = C.wsAuth.frameMAC(wsSession.serverMacKey, 's2c', msg.seq, msg.payload);
+      if (!C.constantTimeEqual(C.fromBase64(msg.mac), expectedMac)) {
+        shouldReconnect = false;
+        socket.close();
+        showPairView('Security alert: Host frame MAC verification failed.');
+        return;
+      }
+      wsSession.rxSeq = msg.seq;
+
+      let inner;
+      try {
+        inner = JSON.parse(msg.payload);
+      } catch {
+        return;
+      }
+      if (!inner || typeof inner.type !== 'string') {
+        return;
+      }
+      if (inner.type === 'snapshot' && inner.snapshot) {
+        lastSnapshot = inner.snapshot;
+        renderSnapshot(inner.snapshot);
+      } else if (inner.type === 'auth_revoked') {
+        shouldReconnect = false;
+        clearAuthRecord();
+        showPairView(inner.message || 'Device access revoked on host. Re-pair to continue.');
       }
     });
 
-    socket.addEventListener('close', async () => {
+    socket.addEventListener('close', () => {
       stopHeartbeat();
       if (ws === socket) {
         ws = null;
+        wsSession = null;
       }
       if (!shouldReconnect) {
         return;
       }
       setStatusBadge('offline', 'Reconnecting...');
-      try {
-        const res = await fetch('/api/auth/status', { cache: 'no-store' });
-        const data = await res.json();
-        if (!data || !data.authenticated) {
-          showPairView('Session expired or revoked on host.');
-          return;
-        }
-      } catch {
-        // Offline retry below.
-      }
       reconnectTimer = setTimeout(connectWS, reconnectDelayMs);
       reconnectDelayMs = Math.min(5000, Math.round(reconnectDelayMs * 1.5));
     });
@@ -187,7 +477,6 @@
     document.documentElement.style.setProperty('--cols', String(cols));
     document.documentElement.style.setProperty('--rows', String(rows));
 
-    // Profiles dropdown
     els.profileSelect.replaceChildren();
     for (const p of snap.profiles || []) {
       const opt = document.createElement('option');
@@ -208,7 +497,6 @@
       els.folderBanner.hidden = true;
     }
 
-    // Keypad tiles
     const keyNodes = [];
     const slots = snap.slots || {};
     for (let r = 0; r < rows; r++) {
@@ -219,7 +507,6 @@
     }
     els.keyGrid.replaceChildren(...keyNodes);
 
-    // Virtual encoder dials
     const dialCount = snap.dials || 0;
     if (dialCount > 0 && Array.isArray(snap.dialSlots)) {
       const dialNodes = snap.dialSlots.map((d) => buildDialCard(d));
@@ -443,7 +730,75 @@
     return card;
   }
 
-  // Pairing keypad & submission
+  function applyPairStatusUpdate(data) {
+    if (!activePair || data.attemptId !== activePair.attemptId) {
+      return;
+    }
+    const expected = C.spake2.pairStatusRespMAC(activePair.mat.kcB, data.attemptId, data.status, data.deviceId);
+    if (!C.constantTimeEqual(C.fromBase64(data.mac), expected)) {
+      stopPairPoll();
+      showPairView('Security alert: Pairing status verification failed.');
+      return;
+    }
+
+    if (data.status === 'approved' && data.deviceId) {
+      stopPairPoll();
+      saveAuthRecord({
+        hostId: activePair.info.hostId,
+        hostName: activePair.info.hostName,
+        hostPublicKey: activePair.info.hostPublicKey,
+        deviceId: data.deviceId,
+        deviceName: activePair.deviceName,
+        clientSeed: C.toBase64(activePair.clientSeed),
+        clientPublicKey: C.toBase64(activePair.clientPub),
+      });
+      expectedHostFp = '';
+      els.pinInput.value = '';
+      connectWS();
+      return;
+    }
+
+    if (data.status === 'denied' || data.status === 'expired') {
+      stopPairPoll();
+      const msg = data.status === 'denied'
+        ? 'Pairing request was denied on PoundDeck PC.'
+        : 'Pairing window expired before confirmation.';
+      showPairView(msg);
+      return;
+    }
+
+    if (data.hostApproved && !activePair.clientConfirmed) {
+      els.confirmStatus.textContent = 'PoundDeck PC approved! Tap Confirm Match on this device to finish.';
+    } else if (activePair.clientConfirmed && !data.hostApproved) {
+      els.confirmStatus.textContent = 'Confirmed on this device — tap Approve Device on your PoundDeck PC to finish.';
+    }
+  }
+
+  function startPairPolling(pairCtx) {
+    stopPairPoll();
+    pairPollTimer = setInterval(async () => {
+      if (!activePair || activePair.attemptId !== pairCtx.attemptId) {
+        stopPairPoll();
+        return;
+      }
+      try {
+        const proof = C.toBase64(C.spake2.pairStatusReqMAC(pairCtx.mat.kcA, pairCtx.attemptId));
+        const res = await fetch('/api/pair/status/' + encodeURIComponent(pairCtx.attemptId), {
+          cache: 'no-store',
+          headers: { 'X-Pair-Proof': proof },
+        });
+        if (!res.ok) {
+          return;
+        }
+        const data = await res.json();
+        applyPairStatusUpdate(data);
+      } catch {
+        // Ignore transient LAN poll failure until expiry.
+      }
+    }, 750);
+  }
+
+  // Pairing keypad & SPAKE2 submission
   document.querySelectorAll('.digit-btn[data-digit]').forEach((btn) => {
     btn.addEventListener('click', () => {
       if (els.pinInput.value.length < 6) {
@@ -469,24 +824,143 @@
       els.pairError.hidden = false;
       return;
     }
+    const deviceName = (els.deviceNameInput?.value || '').trim() || defaultDeviceName();
+
+    els.pairError.hidden = true;
+    els.pairSubmitBtn.disabled = true;
     try {
-      const res = await fetch('/api/pair', {
+      const info = await refreshPairInfo();
+      if (!info) {
+        throw new Error('Could not reach PoundDeck server.');
+      }
+      if (!info.pairingOpen || !info.windowId) {
+        throw new Error('Pairing is closed on PoundDeck PC. Click Pair New Device in Settings.');
+      }
+
+      const hostPub = C.fromBase64(info.hostPublicKey);
+      const computedFp = C.ed25519.fingerprint(hostPub);
+      if (computedFp !== info.hostFingerprint) {
+        throw new Error('Server key fingerprint verification failed.');
+      }
+      if (expectedHostFp && computedFp.toUpperCase() !== expectedHostFp.toUpperCase()) {
+        throw new Error('Host fingerprint does not match the scanned QR code.');
+      }
+
+      const kp = C.ed25519.generateKeypair();
+      const clientPub = kp.publicKey;
+      const clientSeed = kp.seed;
+      const st = C.spake2.clientStart(pin, info.windowId);
+
+      const startRes = await fetch('/api/pair/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin }),
+        body: JSON.stringify({
+          windowId: info.windowId,
+          deviceName,
+          clientPublicKey: C.toBase64(clientPub),
+          pA: C.toBase64(st.pA),
+        }),
+      });
+      const startData = await startRes.json().catch(() => ({}));
+      if (!startRes.ok) {
+        throw new Error(startData.error || 'Pairing initialization failed.');
+      }
+
+      const pB = C.fromBase64(startData.pB);
+      const mat = C.spake2.clientFinish(st, clientPub, hostPub, pB);
+      const clientSig = C.ed25519.sign(clientSeed, C.spake2.clientSigPayload(mat.hashTT));
+
+      const verifyRes = await fetch('/api/pair/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          attemptId: startData.attemptId,
+          cA: C.toBase64(mat.cA),
+          clientSig: C.toBase64(clientSig),
+        }),
+      });
+      const verifyData = await verifyRes.json().catch(() => ({}));
+      if (!verifyRes.ok) {
+        throw new Error(verifyData.error || 'Invalid pairing PIN.');
+      }
+      if (!C.constantTimeEqual(C.fromBase64(verifyData.cB), mat.cB)) {
+        throw new Error('Host SPAKE2 confirmation tag mismatch.');
+      }
+      if (!C.ed25519.verify(hostPub, C.spake2.hostSigPayload(mat.hashTT), C.fromBase64(verifyData.hostSig))) {
+        throw new Error('Host identity signature verification failed.');
+      }
+
+      const pairCtx = {
+        attemptId: startData.attemptId,
+        info,
+        hostPub,
+        clientSeed,
+        clientPub,
+        deviceName,
+        mat,
+        clientConfirmed: false,
+      };
+      showConfirmView(pairCtx);
+      startPairPolling(pairCtx);
+    } catch (err) {
+      els.pairError.textContent = err && err.message ? err.message : 'Pairing failed.';
+      els.pairError.hidden = false;
+    } finally {
+      els.pairSubmitBtn.disabled = false;
+    }
+  });
+
+  els.confirmApproveBtn.addEventListener('click', async () => {
+    if (!activePair) {
+      return;
+    }
+    const pairCtx = activePair;
+    els.confirmError.hidden = true;
+    els.confirmApproveBtn.disabled = true;
+    try {
+      const mac = C.toBase64(C.spake2.pairConfirmMAC(pairCtx.mat.kcA, pairCtx.attemptId, true));
+      const res = await fetch('/api/pair/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          attemptId: pairCtx.attemptId,
+          confirm: true,
+          mac,
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        els.pairError.textContent = data.error || 'Pairing failed.';
-        els.pairError.hidden = false;
-        return;
+        throw new Error(data.error || 'Confirmation failed.');
       }
-      els.pinInput.value = '';
-      connectWS();
-    } catch {
-      els.pairError.textContent = 'Could not reach PoundDeck server.';
-      els.pairError.hidden = false;
+      pairCtx.clientConfirmed = true;
+      applyPairStatusUpdate(data);
+    } catch (err) {
+      els.confirmApproveBtn.disabled = false;
+      els.confirmError.textContent = err && err.message ? err.message : 'Could not confirm pairing.';
+      els.confirmError.hidden = false;
     }
+  });
+
+  els.confirmCancelBtn.addEventListener('click', async () => {
+    const pairCtx = activePair;
+    stopPairPoll();
+    if (pairCtx) {
+      try {
+        const mac = C.toBase64(C.spake2.pairConfirmMAC(pairCtx.mat.kcA, pairCtx.attemptId, false));
+        await fetch('/api/pair/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            attemptId: pairCtx.attemptId,
+            confirm: false,
+            mac,
+          }),
+        });
+      } catch {
+        // Ignore network failure during cancel.
+      }
+    }
+    showPairView('');
   });
 
   // Compact deck controls & floating menu
@@ -558,12 +1032,13 @@
     });
   }
 
-  els.logoutBtn.addEventListener('click', async () => {
-    try {
-      await fetch('/api/logout', { method: 'POST' });
-    } finally {
-      showPairView('');
+  els.logoutBtn.addEventListener('click', () => {
+    shouldReconnect = false;
+    if (ws && ws.readyState === WebSocket.OPEN && wsSession) {
+      sendCmd({ type: 'unpair' });
     }
+    clearAuthRecord();
+    showPairView('');
   });
 
   if (nativeBridge) {
@@ -593,17 +1068,38 @@
     });
   }
 
-  async function init() {
-    setStatusBadge('connecting', 'Checking...');
+  function handleHashPair() {
+    if (!window.location.hash || window.location.hash.length <= 1) {
+      return false;
+    }
+    const hashParams = new URLSearchParams(window.location.hash.slice(1));
+    const qrPin = (hashParams.get('pair') || '').trim();
+    const qrFp = (hashParams.get('fp') || '').trim();
     try {
-      const res = await fetch('/api/auth/status', { cache: 'no-store' });
-      const data = await res.json();
-      if (data && data.authenticated) {
-        connectWS();
-        return;
-      }
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
     } catch {
-      // Fall back to pairing view.
+      // Ignore history restriction.
+    }
+    if (/^[0-9]{6}$/.test(qrPin)) {
+      expectedHostFp = qrFp;
+      showPairView('');
+      els.pinInput.value = qrPin;
+      return true;
+    }
+    return false;
+  }
+
+  window.addEventListener('hashchange', handleHashPair);
+
+  function init() {
+    if (handleHashPair()) {
+      return;
+    }
+
+    const auth = loadAuthRecord();
+    if (auth) {
+      connectWS();
+      return;
     }
     showPairView('');
   }
