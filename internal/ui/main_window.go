@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"image/color"
+	"image/png"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,6 +26,8 @@ import (
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/obs"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 	"github.com/mrpoundsign/PoundControl/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/sdplugin"
+	"github.com/mrpoundsign/PoundControl/pkg/tile"
 )
 
 // dispatchUI marshals UI state updates onto the Fyne main thread.
@@ -55,19 +59,26 @@ const (
 	clipCopy
 )
 
+const (
+	mainTabControl  = 0
+	mainTabPlugins  = 1
+	mainTabSettings = 2
+)
+
 // MainWindow hosts the PoundControl desktop studio and interactive virtual macro deck.
 type MainWindow struct {
 	app          fyne.App
 	win          fyne.Window
 	engine       *app.Engine
 	unsub        func()
-	obsCtrl     OBSController
-	obsUnsub    func()
-	sdCtrl      SDPluginController
-	wasmCtrl    WasmPluginController
-	webCtrl     WebDeckController
-	webUnsub    func()
-	piViewer    PIViewer
+	obsCtrl         OBSController
+	obsUnsub        func()
+	sdCtrl          SDPluginController
+	wasmCtrl        WasmPluginController
+	webCtrl         WebDeckController
+	webUnsub        func()
+	catalogueClient *sdplugin.CatalogueClient
+	piViewer        PIViewer
 	popOut      *PopOutPad
 	cfgPath     string
 	hotkeyCount func() int
@@ -88,10 +99,21 @@ type MainWindow struct {
 	redoBtn        *widget.Button
 	obsBtn         *widget.Button
 	webBtn         *widget.Button
-	runModeCheck   *widget.Check
-	catalogList    *fyne.Container
-	catalogButtons map[string]*widget.Button
-	surface        *deckSurfaceView
+	runModeCheck        *widget.Check
+	mainTabs            *container.AppTabs
+	pluginsTabItem      *container.TabItem
+	settingsTabItem     *container.TabItem
+	settingsTabs        *container.AppTabs
+	pluginsCleanup      func()
+	settingsCleanup     func()
+	catalogSearch       *widget.Entry
+	catalogClearBtn     *widget.Button
+	catalogList         *fyne.Container
+	catalogButtons      map[string]*widget.Button
+	catalogGroupHeaders map[string]*widget.Button
+	catalogCollapsed    map[string]bool
+	catalogIconCache    map[string]fyne.Resource
+	surface             *deckSurfaceView
 	deckTitle      *canvas.Text
 	deckHint       *canvas.Text
 	inspector      *ActionInspector
@@ -145,17 +167,20 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 		engine:             engine,
 		selectedController: deck.ControllerKeypad,
 		selectedSlot:       deck.Coordinates{Row: 0, Col: 0},
-		statusNote:         "Ready",
-		catalogButtons:     make(map[string]*widget.Button),
-		hoverPageIdx:       -1,
+		statusNote:          "Ready",
+		catalogButtons:      make(map[string]*widget.Button),
+		catalogGroupHeaders: make(map[string]*widget.Button),
+		catalogCollapsed:    make(map[string]bool),
+		catalogIconCache:    make(map[string]fyne.Resource),
+		hoverPageIdx:        -1,
 	}
 
 	mw.inspector = NewActionInspector(win, engine, mw.setStatus)
 	mw.inspector.SetOnOpenPluginsSettings(func() {
-		mw.ShowSettingsDialogTab(settingsTabPlugins)
+		mw.ShowSettingsTab(settingsTabPlugins)
 	})
 	mw.inspector.SetOnOpenPaletteSettings(func() {
-		mw.ShowSettingsDialogTab(settingsTabGeneral)
+		mw.ShowSettingsTab(settingsTabGeneral)
 	})
 	mw.inspector.SetOnMoveSelected(mw.StartMoveSelected)
 	mw.inspector.SetOnCopySelected(mw.CopySelected)
@@ -187,16 +212,32 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 	splitMain := container.NewHSplit(catalog, splitRight)
 	splitMain.SetOffset(0.23)
 
-	root := container.NewBorder(header, statusBar, nil, nil, splitMain)
+	mw.pluginsTabItem = container.NewTabItemWithIcon("Plugins", theme.FileApplicationIcon(), container.NewVBox())
+	mw.settingsTabItem = container.NewTabItemWithIcon("Settings", theme.SettingsIcon(), container.NewVBox())
+	mw.mainTabs = container.NewAppTabs(
+		container.NewTabItemWithIcon("Control", theme.GridIcon(), splitMain),
+		mw.pluginsTabItem,
+		mw.settingsTabItem,
+	)
+	mw.mainTabs.OnSelected = func(item *container.TabItem) {
+		switch item {
+		case mw.pluginsTabItem:
+			mw.rebuildPluginsTab()
+		case mw.settingsTabItem:
+			mw.rebuildSettingsTab(settingsSubTabGeneral)
+		}
+	}
+
+	root := container.NewBorder(header, statusBar, nil, nil, mw.mainTabs)
 	win.SetContent(root)
 
 	mw.addCanvasShortcut(&fyne.ShortcutUndo{}, func(fyne.Shortcut) {
-		if len(mw.win.Canvas().Overlays().List()) == 0 {
+		if mw.isControlTabActive() && len(mw.win.Canvas().Overlays().List()) == 0 {
 			mw.handleUndo()
 		}
 	})
 	mw.addCanvasShortcut(&fyne.ShortcutRedo{}, func(fyne.Shortcut) {
-		if len(mw.win.Canvas().Overlays().List()) == 0 {
+		if mw.isControlTabActive() && len(mw.win.Canvas().Overlays().List()) == 0 {
 			mw.handleRedo()
 		}
 	})
@@ -204,35 +245,35 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 		KeyName:  fyne.KeyZ,
 		Modifier: fyne.KeyModifierShortcutDefault | fyne.KeyModifierShift,
 	}, func(fyne.Shortcut) {
-		if len(mw.win.Canvas().Overlays().List()) == 0 {
+		if mw.isControlTabActive() && len(mw.win.Canvas().Overlays().List()) == 0 {
 			mw.handleRedo()
 		}
 	})
 	mw.addCanvasShortcut(&fyne.ShortcutCut{}, func(s fyne.Shortcut) {
-		if mw.forwardShortcutToFocused(s) || len(mw.win.Canvas().Overlays().List()) > 0 {
+		if mw.forwardShortcutToFocused(s) || !mw.isControlTabActive() || len(mw.win.Canvas().Overlays().List()) > 0 {
 			return
 		}
 		mw.StartMoveSelected()
 	})
 	mw.addCanvasShortcut(&fyne.ShortcutCopy{}, func(s fyne.Shortcut) {
-		if mw.forwardShortcutToFocused(s) || len(mw.win.Canvas().Overlays().List()) > 0 {
+		if mw.forwardShortcutToFocused(s) || !mw.isControlTabActive() || len(mw.win.Canvas().Overlays().List()) > 0 {
 			return
 		}
 		mw.CopySelected()
 	})
 	mw.addCanvasShortcut(&fyne.ShortcutPaste{}, func(s fyne.Shortcut) {
-		if mw.forwardShortcutToFocused(s) || len(mw.win.Canvas().Overlays().List()) > 0 {
+		if mw.forwardShortcutToFocused(s) || !mw.isControlTabActive() || len(mw.win.Canvas().Overlays().List()) > 0 {
 			return
 		}
 		mw.PasteSelected()
 	})
 	mw.addCanvasShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyEscape}, func(fyne.Shortcut) {
-		if len(mw.win.Canvas().Overlays().List()) == 0 && mw.clipMode != clipNone {
+		if mw.isControlTabActive() && len(mw.win.Canvas().Overlays().List()) == 0 && mw.clipMode != clipNone {
 			mw.ClearClipboard()
 		}
 	})
 	win.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) {
-		if ev.Name == fyne.KeyEscape && len(mw.win.Canvas().Overlays().List()) == 0 && mw.clipMode != clipNone {
+		if ev.Name == fyne.KeyEscape && mw.isControlTabActive() && len(mw.win.Canvas().Overlays().List()) == 0 && mw.clipMode != clipNone {
 			mw.ClearClipboard()
 		}
 	})
@@ -246,6 +287,14 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 
 	win.SetOnClosed(func() {
 		mw.cancelHoverPageTimer()
+		if mw.pluginsCleanup != nil {
+			mw.pluginsCleanup()
+			mw.pluginsCleanup = nil
+		}
+		if mw.settingsCleanup != nil {
+			mw.settingsCleanup()
+			mw.settingsCleanup = nil
+		}
 		if mw.obsUnsub != nil {
 			mw.obsUnsub()
 			mw.obsUnsub = nil
@@ -383,31 +432,108 @@ func (mw *MainWindow) SetHotkeySuspender(fn func(bool)) {
 	}
 }
 
-// ShowSettingsDialog opens the tabbed PoundControl Settings modal dialog on the General tab.
-func (mw *MainWindow) ShowSettingsDialog() *dialog.CustomDialog {
-	return mw.ShowSettingsDialogTab(settingsTabGeneral)
+func (mw *MainWindow) isControlTabActive() bool {
+	if mw.mainTabs == nil {
+		return true
+	}
+	return mw.mainTabs.SelectedIndex() == mainTabControl
 }
 
-// ShowSettingsDialogTab opens the tabbed PoundControl Settings modal dialog pre-selected to tab.
-func (mw *MainWindow) ShowSettingsDialogTab(tab int) *dialog.CustomDialog {
+// ShowControlTab switches the main Studio view to the Control (Virtual Deck) tab.
+func (mw *MainWindow) ShowControlTab() {
+	if mw.mainTabs != nil {
+		mw.mainTabs.SelectIndex(mainTabControl)
+	}
+}
+
+// ShowPluginsTab switches the main Studio view to the Plugins tab and refreshes its contents.
+func (mw *MainWindow) ShowPluginsTab() {
+	mw.rebuildPluginsTab()
+	if mw.mainTabs != nil {
+		mw.mainTabs.SelectIndex(mainTabPlugins)
+	}
+}
+
+// ShowSettingsTab switches the main Studio view to the Plugins or Settings tab (selecting the requested sub-tab).
+func (mw *MainWindow) ShowSettingsTab(tab int) {
+	if tab == settingsTabPlugins {
+		mw.ShowPluginsTab()
+		return
+	}
+	sub := settingsSubTabGeneral
+	switch tab {
+	case settingsTabOBS:
+		sub = settingsSubTabOBS
+	case settingsTabWeb:
+		sub = settingsSubTabWeb
+	}
+	mw.rebuildSettingsTab(sub)
+	if mw.mainTabs != nil {
+		mw.mainTabs.SelectIndex(mainTabSettings)
+	}
+}
+
+func (mw *MainWindow) rebuildPluginsTab() {
+	if mw.pluginsTabItem == nil {
+		return
+	}
+	if mw.pluginsCleanup != nil {
+		mw.pluginsCleanup()
+		mw.pluginsCleanup = nil
+	}
+	content, cleanup := buildPluginsSettingsTab(
+		mw.win,
+		mw.engine,
+		mw.sdCtrl,
+		mw.wasmCtrl,
+		mw.catalogueClient,
+		mw.piViewer,
+		mw.ReloadExternalPlugins,
+		mw.setStatus,
+	)
+	mw.pluginsCleanup = cleanup
+	mw.pluginsTabItem.Content = content
+	if mw.mainTabs != nil {
+		mw.mainTabs.Refresh()
+	}
+}
+
+func (mw *MainWindow) rebuildSettingsTab(subTab int) {
+	if mw.settingsTabItem == nil {
+		return
+	}
+	if mw.settingsCleanup != nil {
+		mw.settingsCleanup()
+		mw.settingsCleanup = nil
+	}
 	hotkeys := 0
 	if mw.hotkeyCount != nil {
 		hotkeys = mw.hotkeyCount()
 	}
-	return showSettingsDialog(
+	tabs, cleanup := buildSettingsTabsView(
 		mw.win,
 		mw.engine,
 		mw.obsCtrl,
-		mw.sdCtrl,
-		mw.wasmCtrl,
 		mw.webCtrl,
 		mw.cfgPath,
 		hotkeys,
-		tab,
 		func() { mw.OpenPopOutPad() },
-		mw.ReloadExternalPlugins,
 		mw.setStatus,
 	)
+	if subTab >= 0 && subTab < len(tabs.Items) {
+		tabs.SelectIndex(subTab)
+	}
+	mw.settingsTabs = tabs
+	mw.settingsCleanup = cleanup
+	mw.settingsTabItem.Content = tabs
+	if mw.mainTabs != nil {
+		mw.mainTabs.Refresh()
+	}
+}
+
+// SetCatalogueClient sets an OpenAction Marketplace CatalogueClient (primarily for testing or custom endpoints).
+func (mw *MainWindow) SetCatalogueClient(client *sdplugin.CatalogueClient) {
+	mw.catalogueClient = client
 }
 
 // SetSDPluginController attaches an external .sdPlugin host controller and refreshes inspector hints.
@@ -991,12 +1117,12 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 	mw.redoBtn.Disable()
 
 	mw.obsBtn = widget.NewButton("OBS: Off", func() {
-		showOBSConnectionDialog(mw.win, mw.obsCtrl, mw.setStatus)
+		mw.ShowSettingsTab(settingsTabOBS)
 	})
 	mw.obsBtn.Hide()
 
 	mw.webBtn = widget.NewButton("Web Deck: Off", func() {
-		mw.ShowSettingsDialogTab(settingsTabWeb)
+		mw.ShowSettingsTab(settingsTabWeb)
 	})
 	mw.webBtn.Hide()
 
@@ -1004,10 +1130,6 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 		mw.OpenPopOutPad()
 	})
 	popOutBtn.Importance = widget.HighImportance
-
-	settingsBtn := widget.NewButtonWithIcon("Settings", theme.SettingsIcon(), func() {
-		mw.ShowSettingsDialog()
-	})
 
 	row := container.NewHBox(
 		title,
@@ -1030,7 +1152,6 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 		mw.webBtn,
 		mw.runModeCheck,
 		popOutBtn,
-		settingsBtn,
 	)
 
 	bg := canvas.NewRectangle(ColorHeaderSurface)
@@ -1047,6 +1168,25 @@ func (mw *MainWindow) buildActionCatalog() fyne.CanvasObject {
 	sub := widget.NewLabel("Click an action to assign to the selected slot")
 	sub.Wrapping = fyne.TextWrapWord
 
+	mw.catalogSearch = widget.NewEntry()
+	mw.catalogSearch.SetPlaceHolder("Search plugins or actions...")
+	mw.catalogClearBtn = widget.NewButtonWithIcon("", theme.CancelIcon(), func() {
+		mw.catalogSearch.SetText("")
+	})
+	mw.catalogClearBtn.Importance = widget.LowImportance
+	mw.catalogClearBtn.Hide()
+
+	mw.catalogSearch.OnChanged = func(text string) {
+		if strings.TrimSpace(text) == "" {
+			mw.catalogClearBtn.Hide()
+		} else {
+			mw.catalogClearBtn.Show()
+		}
+		mw.RefreshActionCatalog()
+	}
+
+	searchRow := container.NewBorder(nil, nil, nil, mw.catalogClearBtn, mw.catalogSearch)
+
 	mw.catalogList = container.NewVBox()
 	mw.RefreshActionCatalog()
 
@@ -1054,55 +1194,242 @@ func (mw *MainWindow) buildActionCatalog() fyne.CanvasObject {
 	return container.NewStack(
 		panelBg,
 		container.NewBorder(
-			container.NewPadded(container.NewVBox(heading, sub, widget.NewSeparator())),
+			container.NewPadded(container.NewVBox(heading, sub, searchRow, widget.NewSeparator())),
 			nil, nil, nil,
 			container.NewVScroll(container.NewPadded(mw.catalogList)),
 		),
 	)
 }
 
-// RefreshActionCatalog rebuilds the left-hand Action Catalog from currently registered plugin providers.
+// RefreshActionCatalog rebuilds the left-hand Action Catalog from currently registered plugin providers,
+// applying any active search filter and preserving category fold states.
 func (mw *MainWindow) RefreshActionCatalog() {
 	if mw.catalogList == nil {
 		return
 	}
 	clear(mw.catalogButtons)
+	clear(mw.catalogGroupHeaders)
 
-	var items []fyne.CanvasObject
 	actions := mw.engine.Registry().Actions()
+	manifests := mw.engine.Registry().Manifests()
+	manifestByUUID := make(map[string]plugin.Manifest, len(manifests))
+	for _, m := range manifests {
+		manifestByUUID[m.UUID] = m
+	}
 
-	var currentCategory string
+	type catalogGroup struct {
+		category    string
+		pluginNames []string
+		iconURI     string
+		actions     []plugin.ActionDescriptor
+	}
+
+	groupIndex := make(map[string]int)
+	var groups []catalogGroup
+
 	for _, act := range actions {
-		cat := act.Category
+		cat := strings.TrimSpace(act.Category)
 		if cat == "" {
 			cat = "General"
 		}
-		if cat != currentCategory {
-			if currentCategory != "" {
-				items = append(items, widget.NewSeparator())
+		idx, ok := groupIndex[cat]
+		if !ok {
+			idx = len(groups)
+			groupIndex[cat] = idx
+			groups = append(groups, catalogGroup{category: cat})
+		}
+		g := &groups[idx]
+		g.actions = append(g.actions, act)
+		if m, hasM := manifestByUUID[act.PluginUUID]; hasM {
+			if m.Name != "" && !strings.EqualFold(m.Name, cat) {
+				g.pluginNames = append(g.pluginNames, m.Name)
 			}
-			currentCategory = cat
-			groupTitle := canvas.NewText(cat, ColorSkyBlue)
-			groupTitle.TextSize = 12
-			groupTitle.TextStyle = fyne.TextStyle{Bold: true}
-			items = append(items, groupTitle)
+			if g.iconURI == "" {
+				if m.CategoryIcon != "" {
+					g.iconURI = m.CategoryIcon
+				} else if m.Icon != "" {
+					g.iconURI = m.Icon
+				}
+			}
+		}
+	}
+
+	query := ""
+	if mw.catalogSearch != nil {
+		query = strings.ToLower(strings.TrimSpace(mw.catalogSearch.Text))
+	}
+
+	var items []fyne.CanvasObject
+	for _, g := range groups {
+		var visibleActions []plugin.ActionDescriptor
+		if query == "" {
+			visibleActions = g.actions
+		} else {
+			catMatches := strings.Contains(strings.ToLower(g.category), query)
+			if !catMatches {
+				for _, pn := range g.pluginNames {
+					if strings.Contains(strings.ToLower(pn), query) {
+						catMatches = true
+						break
+					}
+				}
+			}
+			if catMatches {
+				visibleActions = g.actions
+			} else {
+				for _, act := range g.actions {
+					if strings.Contains(strings.ToLower(act.Name), query) ||
+						strings.Contains(strings.ToLower(act.Tooltip), query) {
+						visibleActions = append(visibleActions, act)
+					}
+				}
+			}
+		}
+		if len(visibleActions) == 0 {
+			continue
 		}
 
-		uuid := act.UUID
-		label := act.Name
-		if act.SupportsController(deck.ControllerEncoder) {
-			label += " (Key / Dial)"
+		if len(items) > 0 {
+			items = append(items, widget.NewSeparator())
 		}
-		btn := widget.NewButton(label, func() {
-			mw.assignAction(uuid)
+
+		catName := g.category
+		collapsed := query == "" && mw.catalogCollapsed[catName]
+		chevron := "▾"
+		if collapsed {
+			chevron = "▸"
+		}
+		headerLabel := fmt.Sprintf("%s %s (%d)", chevron, catName, len(visibleActions))
+		catIcon := mw.resolveCategoryIcon(catName, g.iconURI, visibleActions)
+		headerBtn := widget.NewButtonWithIcon(headerLabel, catIcon, func() {
+			if query != "" {
+				return
+			}
+			mw.catalogCollapsed[catName] = !mw.catalogCollapsed[catName]
+			mw.RefreshActionCatalog()
 		})
-		btn.Alignment = widget.ButtonAlignLeading
-		mw.catalogButtons[uuid] = btn
-		items = append(items, btn)
+		headerBtn.Alignment = widget.ButtonAlignLeading
+		headerBtn.Importance = widget.LowImportance
+		mw.catalogGroupHeaders[catName] = headerBtn
+		items = append(items, headerBtn)
+
+		if collapsed {
+			continue
+		}
+
+		for _, act := range visibleActions {
+			uuid := act.UUID
+			label := act.Name
+			if act.SupportsController(deck.ControllerEncoder) {
+				label += " (Key / Dial)"
+			}
+			actIcon := mw.resolveActionIcon(act)
+			btn := widget.NewButtonWithIcon(label, actIcon, func() {
+				mw.assignAction(uuid)
+			})
+			btn.Alignment = widget.ButtonAlignLeading
+			mw.catalogButtons[uuid] = btn
+			items = append(items, btn)
+		}
+	}
+
+	if len(items) == 0 && query != "" {
+		emptyLbl := widget.NewLabel(fmt.Sprintf("No actions match %q", strings.TrimSpace(mw.catalogSearch.Text)))
+		emptyLbl.Wrapping = fyne.TextWrapWord
+		items = append(items, emptyLbl)
 	}
 
 	mw.catalogList.Objects = items
 	mw.catalogList.Refresh()
+}
+
+func (mw *MainWindow) loadCatalogIconResource(uri string) fyne.Resource {
+	key := strings.TrimSpace(uri)
+	if key == "" {
+		return nil
+	}
+	if res, ok := mw.catalogIconCache[key]; ok {
+		return res
+	}
+	img, err := tile.DecodeImage(key, 48)
+	if err != nil || img == nil {
+		mw.catalogIconCache[key] = nil
+		return nil
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		mw.catalogIconCache[key] = nil
+		return nil
+	}
+	res := fyne.NewStaticResource("catalog-"+filepath.Base(key)+".png", buf.Bytes())
+	mw.catalogIconCache[key] = res
+	return res
+}
+
+func (mw *MainWindow) resolveCategoryIcon(category, iconURI string, actions []plugin.ActionDescriptor) fyne.Resource {
+	if res := mw.loadCatalogIconResource(iconURI); res != nil {
+		return res
+	}
+	for _, a := range actions {
+		if res := mw.loadCatalogIconResource(a.Icon); res != nil {
+			return res
+		}
+		if res := mw.loadCatalogIconResource(a.DefaultImage); res != nil {
+			return res
+		}
+	}
+	lower := strings.ToLower(category)
+	switch {
+	case strings.Contains(lower, "obs"):
+		return theme.MediaVideoIcon()
+	case strings.Contains(lower, "app") || strings.Contains(lower, "system"):
+		return theme.ComputerIcon()
+	case strings.Contains(lower, "media") || strings.Contains(lower, "audio"):
+		return theme.VolumeUpIcon()
+	case strings.Contains(lower, "nav") || strings.Contains(lower, "core"):
+		return theme.GridIcon()
+	case strings.Contains(lower, "web") || strings.Contains(lower, "http"):
+		return theme.MailSendIcon()
+	default:
+		return theme.FolderIcon()
+	}
+}
+
+func (mw *MainWindow) resolveActionIcon(act plugin.ActionDescriptor) fyne.Resource {
+	if res := mw.loadCatalogIconResource(act.Icon); res != nil {
+		return res
+	}
+	if res := mw.loadCatalogIconResource(act.DefaultImage); res != nil {
+		return res
+	}
+	lowerUUID := strings.ToLower(act.UUID)
+	lowerName := strings.ToLower(act.Name)
+	switch {
+	case strings.Contains(lowerUUID, "folder") || strings.Contains(lowerName, "folder"):
+		return theme.FolderIcon()
+	case strings.Contains(lowerUUID, "next") || strings.Contains(lowerName, "next"):
+		return theme.NavigateNextIcon()
+	case strings.Contains(lowerUUID, "prev") || strings.Contains(lowerName, "previous"):
+		return theme.NavigateBackIcon()
+	case strings.Contains(lowerUUID, "profile") || strings.Contains(lowerName, "profile"):
+		return theme.AccountIcon()
+	case strings.Contains(lowerUUID, "multi") || strings.Contains(lowerName, "multi"):
+		return theme.ListIcon()
+	case strings.Contains(lowerUUID, "record") || strings.Contains(lowerUUID, "stream"):
+		return theme.MediaRecordIcon()
+	case strings.Contains(lowerUUID, "mute") || strings.Contains(lowerUUID, "volume") || strings.Contains(lowerUUID, "audio"):
+		return theme.VolumeUpIcon()
+	case strings.Contains(lowerUUID, "scene") || strings.Contains(lowerUUID, "source"):
+		return theme.VisibilityIcon()
+	case strings.Contains(lowerUUID, "url") || strings.Contains(lowerUUID, "webhook") || strings.Contains(lowerUUID, "http"):
+		return theme.MailSendIcon()
+	case strings.Contains(lowerUUID, "media") || strings.Contains(lowerUUID, "play"):
+		return theme.MediaPlayIcon()
+	case strings.Contains(lowerUUID, "hotkey") || strings.Contains(lowerUUID, "macro"):
+		return theme.ComputerIcon()
+	default:
+		return theme.ConfirmIcon()
+	}
 }
 
 func (mw *MainWindow) buildDeckCenter() fyne.CanvasObject {

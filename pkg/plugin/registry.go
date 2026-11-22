@@ -241,6 +241,16 @@ func (r *Registry) PropertyInspectorSession(
 	return pip.PropertyInspectorURL(ctxID, actionUUID, controller, coords, dial, settings)
 }
 
+// Manifests returns all plugin manifests exposed by registered providers.
+func (r *Registry) Manifests() []Manifest {
+	providers := r.Providers()
+	var out []Manifest
+	for _, p := range providers {
+		out = append(out, p.Manifests()...)
+	}
+	return out
+}
+
 // Close closes every registered provider and returns any joined close errors.
 func (r *Registry) Close() error {
 	r.mu.Lock()

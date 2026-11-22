@@ -62,6 +62,7 @@ type PluginStatus struct {
 type HostConfig struct {
 	ExtraPaths     []string `json:"extraPaths,omitempty"`
 	ScanElgato     bool     `json:"scanElgato,omitempty"`
+	ScanOpenDeck   bool     `json:"scanOpenDeck,omitempty"`
 	CustomNodePath string   `json:"customNodePath,omitempty"`
 }
 
@@ -72,6 +73,7 @@ type Options struct {
 	OpenURL           func(context.Context, string) error
 	OnStatusChange    func()
 	elgatoDir         string
+	openDeckDir       string
 	nodeManager       *NodeManager
 	spawnOverride     func(inst *pluginInstance, port int) error
 }
@@ -131,9 +133,10 @@ type Provider struct {
 	reloadMu sync.Mutex
 	mu       sync.RWMutex
 
-	opts      Options
-	elgatoDir string
-	nodeMgr   *NodeManager
+	opts        Options
+	elgatoDir   string
+	openDeckDir string
+	nodeMgr     *NodeManager
 	openURL   func(context.Context, string) error
 	host      plugin.HostAPI
 	closed    bool
@@ -152,6 +155,8 @@ type Provider struct {
 	piSessions  map[string]*piSessionInfo     // piToken -> session
 	piOrder     []string
 	piPeers     map[string]*wsPeer // piToken -> connected PI WS
+	marketPages map[string]string  // token -> rendered HTML detail page
+	marketOrder []string
 }
 
 var (
@@ -176,10 +181,15 @@ func NewProvider(opts Options) *Provider {
 	if elgatoDir == "" && opts.nodeManager == nil && opts.spawnOverride == nil {
 		elgatoDir = DefaultElgatoPluginsDir()
 	}
+	openDeckDir := opts.openDeckDir
+	if openDeckDir == "" && opts.nodeManager == nil && opts.spawnOverride == nil {
+		openDeckDir = DefaultOpenDeckPluginsDir()
+	}
 
 	return &Provider{
 		opts:           opts,
 		elgatoDir:      elgatoDir,
+		openDeckDir:    openDeckDir,
 		nodeMgr:        nodeMgr,
 		openURL:        openURL,
 		plugins:        make(map[string]*pluginInstance),
@@ -188,6 +198,7 @@ func NewProvider(opts Options) *Provider {
 		activeSlots:    make(map[string]plugin.ActionEvent),
 		piSessions:     make(map[string]*piSessionInfo),
 		piPeers:        make(map[string]*wsPeer),
+		marketPages:    make(map[string]string),
 	}
 }
 
@@ -248,6 +259,9 @@ func (p *Provider) HostConfig() HostConfig {
 	if b, ok := gs["scanElgato"].(bool); ok {
 		cfg.ScanElgato = b
 	}
+	if b, ok := gs["scanOpenDeck"].(bool); ok {
+		cfg.ScanOpenDeck = b
+	}
 	if s, ok := gs["customNodePath"].(string); ok {
 		cfg.CustomNodePath = strings.TrimSpace(s)
 	}
@@ -284,6 +298,7 @@ func (p *Provider) SaveHostConfig(cfg HostConfig) error {
 	return host.SaveGlobalSettings(HostPluginUUID, map[string]any{
 		"extraPaths":     cleaned,
 		"scanElgato":     cfg.ScanElgato,
+		"scanOpenDeck":   cfg.ScanOpenDeck,
 		"customNodePath": strings.TrimSpace(cfg.CustomNodePath),
 	})
 }
@@ -303,6 +318,11 @@ func (p *Provider) DefaultPluginsDir() string {
 // ElgatoPluginsDir returns the detected Elgato local plugins directory if applicable on this OS.
 func (p *Provider) ElgatoPluginsDir() string {
 	return p.elgatoDir
+}
+
+// OpenDeckPluginsDir returns the detected OpenDeck local plugins directory if applicable on this OS.
+func (p *Provider) OpenDeckPluginsDir() string {
+	return p.openDeckDir
 }
 
 // NodeStatus returns resolved Node.js runtime information meeting requiredMajor (default 20).
@@ -448,6 +468,10 @@ func (p *Provider) startServer() error {
 			p.servePropertyInspector(w, r)
 			return
 		}
+		if strings.HasPrefix(r.URL.Path, "/marketplace/info/") {
+			p.serveMarketplaceDetail(w, r)
+			return
+		}
 		wsSrv.ServeHTTP(w, r)
 	})
 
@@ -483,6 +507,9 @@ func (p *Provider) reloadLocked() error {
 	if cfg.ScanElgato && p.elgatoDir != "" {
 		searchPaths = append(searchPaths, p.elgatoDir)
 	}
+	if cfg.ScanOpenDeck && p.openDeckDir != "" {
+		searchPaths = append(searchPaths, p.openDeckDir)
+	}
 	searchPaths = append(searchPaths, cfg.ExtraPaths...)
 
 	bundleDirs := DiscoverBundles(searchPaths)
@@ -504,9 +531,33 @@ func (p *Provider) reloadLocked() error {
 			if host != nil {
 				host.Log(HostPluginUUID, fmt.Sprintf("Failed loading %s: %v", dir, err))
 			}
+			base := filepath.Base(dir)
+			fallbackUUID := strings.TrimSuffix(base, ".sdPlugin")
+			fallbackUUID = strings.TrimSuffix(fallbackUUID, ".sdplugin")
+			if fallbackUUID == "" {
+				fallbackUUID = base
+			}
+			if _, dup := newPlugins[fallbackUUID]; !dup {
+				errMsg := err.Error()
+				if errors.Is(err, ErrEncryptedManifest) {
+					errMsg = ErrEncryptedManifest.Error()
+				}
+				newPlugins[fallbackUUID] = &pluginInstance{
+					bundle: &LoadedBundle{
+						UUID: fallbackUUID,
+						Dir:  dir,
+						Manifest: SDManifest{
+							UUID: fallbackUUID,
+							Name: fallbackUUID,
+						},
+					},
+					state:  StatusError,
+					errMsg: errMsg,
+				}
+			}
 			continue
 		}
-		if _, dup := newPlugins[b.UUID]; dup {
+		if existing, dup := newPlugins[b.UUID]; dup && existing.state != StatusError {
 			continue
 		}
 
@@ -537,6 +588,9 @@ func (p *Provider) reloadLocked() error {
 	p.mu.Unlock()
 
 	for _, inst := range newPlugins {
+		if inst.state == StatusError {
+			continue
+		}
 		p.launchPluginInstance(inst, cfg.CustomNodePath, port)
 	}
 	p.emitStatusChange()
@@ -903,6 +957,46 @@ func escapeURLPathSegments(rel string) string {
 	return strings.Join(parts, "/")
 }
 
+// RegisterMarketplaceDetailPage stores a rendered HTML detail page on the loopback HTTP server
+// and returns its localhost URL for display in WebView2 or a browser.
+func (p *Provider) RegisterMarketplaceDetailPage(htmlContent string) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.port <= 0 {
+		return "", false
+	}
+	token := strings.ReplaceAll(deck.NewUUID(), "-", "")
+	if p.marketPages == nil {
+		p.marketPages = make(map[string]string)
+	}
+	p.marketPages[token] = htmlContent
+	p.marketOrder = append(p.marketOrder, token)
+	if len(p.marketOrder) > 16 {
+		evict := p.marketOrder[0]
+		p.marketOrder = slices.Delete(p.marketOrder, 0, 1)
+		delete(p.marketPages, evict)
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d/marketplace/info/%s", p.port, url.PathEscape(token)), true
+}
+
+func (p *Provider) serveMarketplaceDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/marketplace/info/"))
+	p.mu.RLock()
+	page, ok := p.marketPages[token]
+	p.mu.RUnlock()
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = io.WriteString(w, page)
+}
+
 func (p *Provider) servePropertyInspector(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1000,7 +1094,9 @@ func injectPIBootstrap(htmlBytes []byte, port int, b *LoadedBundle, sess *piSess
 
 	script := fmt.Sprintf(
 		`<script>(function(){var p=%d,u=%s,e=%s,i=%s,a=%s;`+
-			`function boot(){if(typeof window.connectElgatoStreamDeckSocket==="function"){`+
+			`function boot(){if(typeof window.connectOpenActionSocket==="function"){`+
+			`window.connectOpenActionSocket(p,u,e,i,a);}`+
+			`else if(typeof window.connectElgatoStreamDeckSocket==="function"){`+
 			`window.connectElgatoStreamDeckSocket(p,u,e,i,a);}}`+
 			`if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",boot);}`+
 			`else{setTimeout(boot,0);}})();</script>`,
@@ -1111,6 +1207,8 @@ func (p *Provider) dispatchSDKInbound(peer *wsPeer, msg sdkInboundMessage) {
 		p.onSetState(msg.Context, msg.Payload)
 	case "setFeedback":
 		p.onSetFeedback(msg.Context, msg.Payload)
+	case "setFeedbackLayout", "setTriggerDescription":
+		// OpenAction / SDK v3 dial layout and trigger metadata updates are accepted safely.
 	case "showAlert":
 		p.onFlash(msg.Context, "alert")
 	case "showOk":
@@ -1169,6 +1267,15 @@ func (p *Provider) onRegisterPlugin(peer *wsPeer, regUUID string) {
 	if host != nil {
 		gs = host.GetGlobalSettings(plugUUID)
 	}
+	_ = peer.sendJSON(map[string]any{
+		"event":  "deviceDidConnect",
+		"device": virtualDeviceID,
+		"deviceInfo": map[string]any{
+			"name": "PoundControl Studio",
+			"type": 7,
+			"size": map[string]int{"columns": 8, "rows": 4},
+		},
+	})
 	_ = peer.sendJSON(map[string]any{
 		"event":   "didReceiveGlobalSettings",
 		"payload": map[string]any{"settings": nonNilMap(gs)},

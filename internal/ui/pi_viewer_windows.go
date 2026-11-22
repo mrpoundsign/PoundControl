@@ -8,12 +8,46 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 
 	webview2 "github.com/jchv/go-webview2"
 
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/apps"
 )
+
+var (
+	user32DLL             = syscall.NewLazyDLL("user32.dll")
+	procIsIconic          = user32DLL.NewProc("IsIconic")
+	procShowWindow        = user32DLL.NewProc("ShowWindow")
+	procBringWindowToTop  = user32DLL.NewProc("BringWindowToTop")
+	procSetForegroundWnd  = user32DLL.NewProc("SetForegroundWindow")
+	procSetActiveWindow   = user32DLL.NewProc("SetActiveWindow")
+	procAllowSetForegrnd  = user32DLL.NewProc("AllowSetForegroundWindow")
+	procGetCurrentProcID  = syscall.NewLazyDLL("kernel32.dll").NewProc("GetCurrentProcessId")
+)
+
+const (
+	swShow    = 5
+	swRestore = 9
+)
+
+func bringWindowToForeground(hwnd uintptr) {
+	if hwnd == 0 {
+		return
+	}
+	if pid, _, _ := procGetCurrentProcID.Call(); pid != 0 {
+		_, _, _ = procAllowSetForegrnd.Call(pid)
+	}
+	if iconic, _, _ := procIsIconic.Call(hwnd); iconic != 0 {
+		_, _, _ = procShowWindow.Call(hwnd, swRestore)
+	} else {
+		_, _, _ = procShowWindow.Call(hwnd, swShow)
+	}
+	_, _, _ = procBringWindowToTop.Call(hwnd)
+	_, _, _ = procSetForegroundWnd.Call(hwnd)
+	_, _, _ = procSetActiveWindow.Call(hwnd)
+}
 
 type windowsPIViewer struct {
 	mu      sync.Mutex
@@ -34,6 +68,7 @@ func (v *windowsPIViewer) Open(title, targetURL string) error {
 		wv.Dispatch(func() {
 			wv.SetTitle(title)
 			wv.Navigate(targetURL)
+			bringWindowToForeground(uintptr(wv.Window()))
 		})
 		return nil
 	}
@@ -86,6 +121,9 @@ func (v *windowsPIViewer) Open(title, targetURL string) error {
 
 		ready <- true
 		wv.Navigate(targetURL)
+		wv.Dispatch(func() {
+			bringWindowToForeground(uintptr(wv.Window()))
+		})
 		wv.Run()
 		wv.Destroy()
 

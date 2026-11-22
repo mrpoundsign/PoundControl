@@ -3,9 +3,11 @@
 package sdplugin
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -19,6 +21,12 @@ import (
 
 // HostPluginUUID identifies PoundControl's .sdPlugin host configuration in PluginSettings.
 const HostPluginUUID = "com.github.mrpoundsign.poundcontrol.sdplugin"
+
+// ErrEncryptedManifest indicates that a .sdPlugin bundle's manifest.json uses Elgato Marketplace
+// DRM binary encryption ("ELGATO" header) and cannot be loaded by third-party hosts.
+var ErrEncryptedManifest = errors.New("encrypted Elgato Marketplace manifest (DRM-protected); cannot be loaded by third-party hosts")
+
+var elgatoEncryptedMagic = []byte("ELGATO")
 
 // NodejsConfig declares the Node.js runtime requirements in an Elgato manifest.json.
 type NodejsConfig struct {
@@ -63,29 +71,52 @@ type SDAction struct {
 	VisibleInActionsList  *bool           `json:"VisibleInActionsList,omitempty"`
 }
 
-// SDManifest models an Elgato Stream Deck SDK v2/v3 plugin manifest.json.
+// SDManifest models an Elgato Stream Deck SDK v2/v3 or OpenAction plugin manifest.json.
 type SDManifest struct {
-	SDKVersion            int             `json:"SDKVersion"`
-	UUID                  string          `json:"UUID"`
-	Name                  string          `json:"Name"`
-	Author                string          `json:"Author,omitempty"`
-	Version               string          `json:"Version,omitempty"`
-	Description           string          `json:"Description,omitempty"`
-	Category              string          `json:"Category,omitempty"`
-	CategoryIcon          string          `json:"CategoryIcon,omitempty"`
-	Icon                  string          `json:"Icon,omitempty"`
-	CodePath              string          `json:"CodePath"`
-	CodePathWin           string          `json:"CodePathWin,omitempty"`
-	CodePathMac           string          `json:"CodePathMac,omitempty"`
-	CodePathLinux         string          `json:"CodePathLinux,omitempty"`
-	PropertyInspectorPath string          `json:"PropertyInspectorPath,omitempty"`
-	Nodejs                *NodejsConfig   `json:"Nodejs,omitempty"`
-	OS                    []OSRequirement `json:"OS,omitempty"`
-	Actions               []SDAction      `json:"Actions"`
+	SDKVersion            int               `json:"SDKVersion"`
+	UUID                  string            `json:"UUID"`
+	Name                  string            `json:"Name"`
+	Author                string            `json:"Author,omitempty"`
+	Version               string            `json:"Version,omitempty"`
+	Description           string            `json:"Description,omitempty"`
+	Category              string            `json:"Category,omitempty"`
+	CategoryIcon          string            `json:"CategoryIcon,omitempty"`
+	Icon                  string            `json:"Icon,omitempty"`
+	CodePath              string            `json:"CodePath"`
+	CodePathWin           string            `json:"CodePathWin,omitempty"`
+	CodePathMac           string            `json:"CodePathMac,omitempty"`
+	CodePathLin           string            `json:"CodePathLin,omitempty"`
+	CodePathLinux         string            `json:"CodePathLinux,omitempty"`
+	CodePaths             map[string]string `json:"CodePaths,omitempty"`
+	PropertyInspectorPath string            `json:"PropertyInspectorPath,omitempty"`
+	Nodejs                *NodejsConfig     `json:"Nodejs,omitempty"`
+	OS                    []OSRequirement   `json:"OS,omitempty"`
+	Actions               []SDAction        `json:"Actions"`
 }
 
-// ResolveCodePath picks the best executable or script entrypoint for the given GOOS.
+// ResolveCodePath picks the best executable or script entrypoint for the given GOOS and current GOARCH.
 func (m SDManifest) ResolveCodePath(goos string) string {
+	return m.ResolveCodePathFor(goos, runtime.GOARCH)
+}
+
+// ResolveCodePathFor picks the best executable or script entrypoint for the given GOOS and GOARCH.
+// Precedence:
+//  1. Exact OpenAction / Rust target triple in CodePaths
+//  2. OS-specific CodePathWin / CodePathMac / CodePathLin / CodePathLinux
+//  3. Universal CodePath fallback
+func (m SDManifest) ResolveCodePathFor(goos, goarch string) string {
+	if triple := openActionTargetTriple(goos, goarch); triple != "" && len(m.CodePaths) > 0 {
+		if p := strings.TrimSpace(m.CodePaths[triple]); p != "" {
+			return p
+		}
+		for k, v := range m.CodePaths {
+			if strings.EqualFold(strings.TrimSpace(k), triple) {
+				if p := strings.TrimSpace(v); p != "" {
+					return p
+				}
+			}
+		}
+	}
 	switch goos {
 	case "windows":
 		if strings.TrimSpace(m.CodePathWin) != "" {
@@ -96,11 +127,41 @@ func (m SDManifest) ResolveCodePath(goos string) string {
 			return strings.TrimSpace(m.CodePathMac)
 		}
 	case "linux":
+		if strings.TrimSpace(m.CodePathLin) != "" {
+			return strings.TrimSpace(m.CodePathLin)
+		}
 		if strings.TrimSpace(m.CodePathLinux) != "" {
 			return strings.TrimSpace(m.CodePathLinux)
 		}
 	}
 	return strings.TrimSpace(m.CodePath)
+}
+
+func openActionTargetTriple(goos, goarch string) string {
+	switch goos {
+	case "windows":
+		switch goarch {
+		case "amd64":
+			return "x86_64-pc-windows-msvc"
+		case "arm64":
+			return "aarch64-pc-windows-msvc"
+		}
+	case "darwin":
+		switch goarch {
+		case "amd64":
+			return "x86_64-apple-darwin"
+		case "arm64":
+			return "aarch64-apple-darwin"
+		}
+	case "linux":
+		switch goarch {
+		case "amd64":
+			return "x86_64-unknown-linux-gnu"
+		case "arm64":
+			return "aarch64-unknown-linux-gnu"
+		}
+	}
+	return ""
 }
 
 // IsNodeJS reports whether entrypoint codePath should be executed via Node.js.
@@ -155,16 +216,11 @@ func LoadBundle(bundleDir string) (*LoadedBundle, error) {
 		return nil, fmt.Errorf("plugin bundle directory not found: %s", absDir)
 	}
 
-	manifestPath := filepath.Join(absDir, "manifest.json")
-	raw, err := os.ReadFile(manifestPath)
+	m, err := loadManifestWithOverlay(absDir, runtime.GOOS)
 	if err != nil {
-		return nil, fmt.Errorf("read manifest.json in %s: %w", absDir, err)
+		return nil, err
 	}
-
-	var m SDManifest
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", manifestPath, err)
-	}
+	applyManifestLocalization(absDir, &m)
 
 	m.UUID = strings.TrimSpace(m.UUID)
 	if m.UUID == "" {
@@ -182,7 +238,7 @@ func LoadBundle(bundleDir string) (*LoadedBundle, error) {
 		return nil, fmt.Errorf("manifest %q declares no Actions", m.UUID)
 	}
 
-	codeRel := m.ResolveCodePath(runtime.GOOS)
+	codeRel := m.ResolveCodePathFor(runtime.GOOS, runtime.GOARCH)
 	if codeRel == "" {
 		return nil, fmt.Errorf("manifest %q is missing CodePath", m.UUID)
 	}
@@ -191,7 +247,24 @@ func LoadBundle(bundleDir string) (*LoadedBundle, error) {
 		return nil, fmt.Errorf("plugin %q CodePath %q escapes bundle root", m.UUID, codeRel)
 	}
 	if _, err := os.Stat(codeAbs); err != nil {
-		return nil, fmt.Errorf("plugin %q entrypoint %q not found: %w", m.UUID, codeRel, err)
+		resolved := false
+		if runtime.GOOS == "windows" {
+			lower := strings.ToLower(codeAbs)
+			for _, ext := range []string{".exe", ".cmd", ".bat"} {
+				if strings.HasSuffix(lower, ext) {
+					continue
+				}
+				if st, statErr := os.Stat(codeAbs + ext); statErr == nil && !st.IsDir() {
+					codeAbs += ext
+					codeRel += ext
+					resolved = true
+					break
+				}
+			}
+		}
+		if !resolved {
+			return nil, fmt.Errorf("plugin %q entrypoint %q not found: %w", m.UUID, codeRel, err)
+		}
 	}
 
 	customSchema, err := loadSidecarSchema(filepath.Join(absDir, "poundcontrol.schema.json"))
@@ -252,10 +325,17 @@ func LoadBundle(bundleDir string) (*LoadedBundle, error) {
 				defImg = imgAbs
 			}
 		}
-		if defImg == "" && strings.TrimSpace(act.Icon) != "" {
+		actIcon := ""
+		if strings.TrimSpace(act.Icon) != "" {
 			if imgAbs, safe := ResolveAssetPath(absDir, act.Icon); safe {
-				defImg = imgAbs
+				actIcon = imgAbs
 			}
+		}
+		if defImg == "" {
+			defImg = actIcon
+		}
+		if actIcon == "" {
+			actIcon = defImg
 		}
 
 		hideTitle := len(act.States) > 0 && act.States[0].ShowTitle != nil && !*act.States[0].ShowTitle
@@ -270,6 +350,7 @@ func LoadBundle(bundleDir string) (*LoadedBundle, error) {
 			Name:           strings.TrimSpace(act.Name),
 			Category:       cat,
 			Tooltip:        strings.TrimSpace(act.Tooltip),
+			Icon:           actIcon,
 			DefaultTitle:   defTitle,
 			DefaultColor:   "#38BDF8",
 			DefaultImage:   defImg,
@@ -299,14 +380,164 @@ func LoadBundle(bundleDir string) (*LoadedBundle, error) {
 
 // ToPluginManifest converts this bundle into PoundControl's unified plugin.Manifest.
 func (b *LoadedBundle) ToPluginManifest() plugin.Manifest {
+	icon := ""
+	if strings.TrimSpace(b.Manifest.Icon) != "" {
+		if abs, safe := ResolveAssetPath(b.Dir, b.Manifest.Icon); safe {
+			icon = abs
+		}
+	}
+	catIcon := ""
+	if strings.TrimSpace(b.Manifest.CategoryIcon) != "" {
+		if abs, safe := ResolveAssetPath(b.Dir, b.Manifest.CategoryIcon); safe {
+			catIcon = abs
+		}
+	}
 	return plugin.Manifest{
-		UUID:        b.UUID,
-		Name:        b.Manifest.Name,
-		Version:     b.Manifest.Version,
-		Author:      b.Manifest.Author,
-		Description: b.Manifest.Description,
-		Provider:    plugin.ProviderStreamDeck,
-		Actions:     slices.Clone(b.Actions),
+		UUID:         b.UUID,
+		Name:         b.Manifest.Name,
+		Version:      b.Manifest.Version,
+		Author:       b.Manifest.Author,
+		Description:  b.Manifest.Description,
+		Icon:         icon,
+		CategoryIcon: catIcon,
+		Provider:     plugin.ProviderStreamDeck,
+		Actions:      slices.Clone(b.Actions),
+	}
+}
+
+func manifestOverlayFilename(goos string) string {
+	switch goos {
+	case "windows":
+		return "manifest.windows.json"
+	case "darwin":
+		return "manifest.macos.json"
+	case "linux":
+		return "manifest.linux.json"
+	default:
+		return ""
+	}
+}
+
+func loadManifestWithOverlay(absDir, goos string) (SDManifest, error) {
+	manifestPath := filepath.Join(absDir, "manifest.json")
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return SDManifest{}, fmt.Errorf("read manifest.json in %s: %w", absDir, err)
+	}
+	if bytes.HasPrefix(raw, elgatoEncryptedMagic) {
+		return SDManifest{}, fmt.Errorf("%s: %w", manifestPath, ErrEncryptedManifest)
+	}
+
+	var baseObj map[string]any
+	if err := json.Unmarshal(raw, &baseObj); err != nil {
+		return SDManifest{}, fmt.Errorf("parse %s: %w", manifestPath, err)
+	}
+	if baseObj == nil {
+		baseObj = make(map[string]any)
+	}
+
+	if overlayName := manifestOverlayFilename(goos); overlayName != "" {
+		overlayPath := filepath.Join(absDir, overlayName)
+		if overlayRaw, readErr := os.ReadFile(overlayPath); readErr == nil {
+			if bytes.HasPrefix(overlayRaw, elgatoEncryptedMagic) {
+				return SDManifest{}, fmt.Errorf("%s: %w", overlayPath, ErrEncryptedManifest)
+			}
+			var overlayObj map[string]any
+			if err := json.Unmarshal(overlayRaw, &overlayObj); err != nil {
+				return SDManifest{}, fmt.Errorf("parse %s: %w", overlayPath, err)
+			}
+			mergeJSONObjects(baseObj, overlayObj)
+		} else if !errors.Is(readErr, os.ErrNotExist) {
+			return SDManifest{}, fmt.Errorf("read %s: %w", overlayPath, readErr)
+		}
+	}
+
+	merged, err := json.Marshal(baseObj)
+	if err != nil {
+		return SDManifest{}, fmt.Errorf("marshal merged manifest in %s: %w", absDir, err)
+	}
+	var m SDManifest
+	if err := json.Unmarshal(merged, &m); err != nil {
+		return SDManifest{}, fmt.Errorf("parse %s: %w", manifestPath, err)
+	}
+	return m, nil
+}
+
+func mergeJSONObjects(dst, src map[string]any) {
+	for k, v := range src {
+		srcMap, srcIsMap := v.(map[string]any)
+		dstMap, dstIsMap := dst[k].(map[string]any)
+		if srcIsMap && dstIsMap {
+			cp := maps.Clone(dstMap)
+			mergeJSONObjects(cp, srcMap)
+			dst[k] = cp
+			continue
+		}
+		dst[k] = v
+	}
+}
+
+func applyManifestLocalization(absDir string, m *SDManifest) {
+	raw, err := os.ReadFile(filepath.Join(absDir, "en.json"))
+	if err != nil {
+		return
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return
+	}
+	readStr := func(key string) string {
+		val, ok := root[key]
+		if !ok {
+			return ""
+		}
+		var s string
+		if err := json.Unmarshal(val, &s); err != nil {
+			return ""
+		}
+		return strings.TrimSpace(s)
+	}
+	if s := readStr("Name"); s != "" {
+		m.Name = s
+	}
+	if s := readStr("Description"); s != "" {
+		m.Description = s
+	}
+	if s := readStr("Category"); s != "" {
+		m.Category = s
+	}
+
+	type locAction struct {
+		Name    string `json:"Name"`
+		Tooltip string `json:"Tooltip"`
+		States  []struct {
+			Title string `json:"Title"`
+		} `json:"States"`
+	}
+	for i := range m.Actions {
+		actUUID := strings.TrimSpace(m.Actions[i].UUID)
+		if actUUID == "" {
+			continue
+		}
+		rawAct, ok := root[actUUID]
+		if !ok {
+			continue
+		}
+		var la locAction
+		if err := json.Unmarshal(rawAct, &la); err != nil {
+			continue
+		}
+		if s := strings.TrimSpace(la.Name); s != "" {
+			m.Actions[i].Name = s
+		}
+		if s := strings.TrimSpace(la.Tooltip); s != "" {
+			m.Actions[i].Tooltip = s
+		}
+		for si := 0; si < len(la.States) && si < len(m.Actions[i].States); si++ {
+			if s := strings.TrimSpace(la.States[si].Title); s != "" {
+				m.Actions[i].States[si].Title = s
+			}
+		}
 	}
 }
 
@@ -442,6 +673,28 @@ func DefaultElgatoPluginsDir() string {
 	case "darwin":
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
 			return filepath.Join(home, "Library", "Application Support", "com.elgato.StreamDeck", "Plugins")
+		}
+	}
+	return ""
+}
+
+// DefaultOpenDeckPluginsDir returns the OS-standard local OpenDeck plugins directory if known.
+func DefaultOpenDeckPluginsDir() string {
+	switch runtime.GOOS {
+	case "windows":
+		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+			return filepath.Join(appData, "opendeck", "plugins")
+		}
+	case "darwin":
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return filepath.Join(home, "Library", "Application Support", "opendeck", "plugins")
+		}
+	case "linux":
+		if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+			return filepath.Join(xdg, "opendeck", "plugins")
+		}
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return filepath.Join(home, ".config", "opendeck", "plugins")
 		}
 	}
 	return ""

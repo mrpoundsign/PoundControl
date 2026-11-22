@@ -538,13 +538,18 @@ func (p *Provider) SaveConnectionConfig(cfg ConnectionConfig, password string, u
 }
 
 // Connect establishes a synchronous OBS WebSocket v5 session and hydrates live OBS state.
+// If AutoConnect is enabled, it keeps monitoring the established session for automatic reconnection.
 func (p *Provider) Connect(ctx context.Context) error {
 	cfg := p.ConnectionConfig()
-	if err := p.client.Connect(ctx, cfg.Host, cfg.Port, p.Password()); err != nil {
+	pw := p.Password()
+	if err := p.client.Connect(ctx, cfg.Host, cfg.Port, pw); err != nil {
 		p.refreshAllSlots()
 		return err
 	}
 	p.hydrateState(ctx)
+	if cfg.AutoConnect {
+		p.client.MaintainCurrentConnection(cfg.Host, cfg.Port, pw)
+	}
 	return nil
 }
 

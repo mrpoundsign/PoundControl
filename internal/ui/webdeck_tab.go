@@ -407,5 +407,5 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 		container.NewHBox(revokeAllBtn),
 	)
 
-	return container.NewVScroll(container.NewPadded(content)), cleanup
+	return container.NewScroll(container.NewPadded(content)), cleanup
 }

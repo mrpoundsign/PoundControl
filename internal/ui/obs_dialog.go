@@ -9,7 +9,6 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/obs"
@@ -183,15 +182,4 @@ func buildOBSConnectionContent(obsCtrl OBSController, onStatus func(string)) (fy
 		container.NewGridWithColumns(2, connectBtn, disconnectBtn),
 	)
 	return content, unsub
-}
-
-func showOBSConnectionDialog(win fyne.Window, obsCtrl OBSController, onStatus func(string)) {
-	if obsCtrl == nil {
-		return
-	}
-	content, cleanup := buildOBSConnectionContent(obsCtrl, onStatus)
-	dlg := dialog.NewCustom("OBS Studio (WebSocket v5)", "Close", content, win)
-	dlg.Resize(fyne.NewSize(430, 340))
-	dlg.SetOnClosed(cleanup)
-	dlg.Show()
 }

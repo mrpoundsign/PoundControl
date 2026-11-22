@@ -13,7 +13,7 @@ type PIViewer interface {
 	CloseAll()
 }
 
-// SDPluginController exposes external .sdPlugin discovery, lifecycle, and Node.js runtime control to UI surfaces.
+// SDPluginController exposes external .sdPlugin discovery, lifecycle, Marketplace installation, and Node.js runtime control to UI surfaces.
 type SDPluginController interface {
 	HostConfig() sdplugin.HostConfig
 	SaveHostConfig(cfg sdplugin.HostConfig) error
@@ -21,6 +21,12 @@ type SDPluginController interface {
 	Plugins() []sdplugin.PluginStatus
 	DefaultPluginsDir() string
 	ElgatoPluginsDir() string
+	OpenDeckPluginsDir() string
+	IsUserManagedPlugin(pluginDir string) bool
+	InstallArchive(archivePath string) (*sdplugin.LoadedBundle, error)
+	InstallFromCatalogue(ctx context.Context, client *sdplugin.CatalogueClient, entry sdplugin.CatalogueEntry, onProgress func(downloaded, total int64, stage string)) (*sdplugin.LoadedBundle, error)
+	UninstallPlugin(pluginUUID string) error
+	RegisterMarketplaceDetailPage(htmlContent string) (string, bool)
 	NodeStatus(requiredMajor int) sdplugin.NodeRuntimeInfo
 	DownloadNode(ctx context.Context, onProgress func(downloaded, total int64, stage string)) (sdplugin.NodeRuntimeInfo, error)
 	NeedsNodeForAction(actionUUID string) (minMajor int, ok bool)

@@ -31,6 +31,7 @@ type ActionDescriptor struct {
 	Name           string                `json:"name"`
 	Category       string                `json:"category,omitempty"`
 	Tooltip        string                `json:"tooltip,omitempty"`
+	Icon           string                `json:"icon,omitempty"`
 	DefaultTitle   string                `json:"defaultTitle,omitempty"`
 	DefaultColor   string                `json:"defaultColor,omitempty"`
 	DefaultImage   string                `json:"defaultImage,omitempty"`
@@ -51,13 +52,15 @@ func (a ActionDescriptor) SupportsController(c deck.ControllerType) bool {
 
 // Manifest describes a plugin and its available actions independently of its runtime backend.
 type Manifest struct {
-	UUID        string             `json:"uuid"`
-	Name        string             `json:"name"`
-	Version     string             `json:"version"`
-	Author      string             `json:"author,omitempty"`
-	Description string             `json:"description,omitempty"`
-	Provider    ProviderKind       `json:"provider"`
-	Actions     []ActionDescriptor `json:"actions"`
+	UUID         string             `json:"uuid"`
+	Name         string             `json:"name"`
+	Version      string             `json:"version"`
+	Author       string             `json:"author,omitempty"`
+	Description  string             `json:"description,omitempty"`
+	Icon         string             `json:"icon,omitempty"`
+	CategoryIcon string             `json:"categoryIcon,omitempty"`
+	Provider     ProviderKind       `json:"provider"`
+	Actions      []ActionDescriptor `json:"actions"`
 }
 
 // Validate verifies required metadata and action uniqueness in a plugin manifest.

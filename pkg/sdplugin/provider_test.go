@@ -257,7 +257,11 @@ func TestProviderWebSocketAndPropertyInspectorBridge(t *testing.T) {
 		"uuid":  launchToken,
 	})
 
-	// Expect global settings first, then replayed willAppear.
+	// Expect deviceDidConnect, then global settings, then replayed willAppear.
+	msg0 := recvSDKJSON(t, plugConn)
+	if msg0["event"] != "deviceDidConnect" || msg0["device"] != virtualDeviceID {
+		t.Fatalf("expected deviceDidConnect, got %+v", msg0)
+	}
 	msg1 := recvSDKJSON(t, plugConn)
 	if msg1["event"] != "didReceiveGlobalSettings" {
 		t.Fatalf("expected didReceiveGlobalSettings, got %+v", msg1)
@@ -267,7 +271,17 @@ func TestProviderWebSocketAndPropertyInspectorBridge(t *testing.T) {
 		t.Fatalf("expected replayed willAppear for slot-ctx-1, got %+v", msg2)
 	}
 
-	// Plugin pushes setTitle(""), setImage(svg), setState(1), setFeedback, showOk, openUrl.
+	// Plugin pushes setTitle(""), setImage(svg), setState(1), setFeedback, setFeedbackLayout, setTriggerDescription, showOk, openUrl.
+	sendSDKJSON(t, plugConn, map[string]any{
+		"event":   "setFeedbackLayout",
+		"context": "slot-ctx-1",
+		"payload": map[string]any{"layout": "$B1"},
+	})
+	sendSDKJSON(t, plugConn, map[string]any{
+		"event":   "setTriggerDescription",
+		"context": "slot-ctx-1",
+		"payload": map[string]any{"rotate": "Adjust volume"},
+	})
 	sendSDKJSON(t, plugConn, map[string]any{
 		"event":   "setTitle",
 		"context": "slot-ctx-1",
@@ -435,12 +449,102 @@ func TestProviderWebSocketAndPropertyInspectorBridge(t *testing.T) {
 	if err := prov.SaveHostConfig(HostConfig{
 		ExtraPaths:     []string{filepath.Join(root, "extra"), filepath.Join(root, "extra")},
 		ScanElgato:     true,
+		ScanOpenDeck:   true,
 		CustomNodePath: "/usr/bin/node",
 	}); err != nil {
 		t.Fatalf("SaveHostConfig() error = %v", err)
 	}
 	gotCfg := prov.HostConfig()
-	if len(gotCfg.ExtraPaths) != 1 || !gotCfg.ScanElgato || gotCfg.CustomNodePath != "/usr/bin/node" {
+	if len(gotCfg.ExtraPaths) != 1 || !gotCfg.ScanElgato || !gotCfg.ScanOpenDeck || gotCfg.CustomNodePath != "/usr/bin/node" {
 		t.Fatalf("unexpected HostConfig round-trip: %+v", gotCfg)
+	}
+}
+
+func TestProviderEncryptedDiagnosticsOpenDeckAndOpenActionPI(t *testing.T) {
+	root := t.TempDir()
+	defaultDir := filepath.Join(root, "plugins")
+	openDeckDir := filepath.Join(root, "opendeck-plugins")
+	if err := os.MkdirAll(defaultDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(defaultDir) error = %v", err)
+	}
+	if err := os.MkdirAll(openDeckDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(openDeckDir) error = %v", err)
+	}
+
+	// Encrypted Elgato bundle in defaultDir.
+	encDir := filepath.Join(defaultDir, "com.elgato.drm.sdPlugin")
+	if err := os.MkdirAll(encDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(encDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(encDir, "manifest.json"), []byte("ELGATO\x01\x00binary"), 0o600); err != nil {
+		t.Fatalf("WriteFile(encrypted) error = %v", err)
+	}
+
+	// Valid OpenAction bundle in openDeckDir.
+	manifest := `{
+		"SDKVersion": 2,
+		"Name": "OpenDeck Sample",
+		"Version": "1.0.0",
+		"CodePath": "bin/plugin.js",
+		"PropertyInspectorPath": "property-inspector/index.html",
+		"Actions": [{
+			"UUID": "com.example.opendeck.act",
+			"Name": "OpenDeck Action"
+		}]
+	}`
+	createSyntheticBundle(t, openDeckDir, "com.example.opendeck.sdPlugin", manifest, `<html><body><div id="pi"></div></body></html>`)
+
+	host := newRecordedHost()
+	prov := NewProvider(Options{
+		DefaultPluginsDir: defaultDir,
+		openDeckDir:       openDeckDir,
+		spawnOverride: func(_ *pluginInstance, _ int) error {
+			return nil
+		},
+	})
+	prov.BindHost(host)
+	defer func() { _ = prov.Close() }()
+
+	if err := prov.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	// Initially ScanOpenDeck is false: only the encrypted diagnostic entry is present, and Actions() is empty.
+	if acts := prov.Actions(); len(acts) != 0 {
+		t.Fatalf("expected 0 runnable actions when only encrypted bundle present, got %d", len(acts))
+	}
+	statuses := prov.Plugins()
+	if len(statuses) != 1 {
+		t.Fatalf("expected 1 diagnostic status, got %+v", statuses)
+	}
+	if statuses[0].UUID != "com.elgato.drm" || statuses[0].State != StatusError || !strings.Contains(statuses[0].Error, "DRM") {
+		t.Fatalf("unexpected encrypted plugin diagnostic status: %+v", statuses[0])
+	}
+
+	// Enable ScanOpenDeck and reload -> OpenDeck Sample should load cleanly.
+	if err := prov.SaveHostConfig(HostConfig{ScanOpenDeck: true}); err != nil {
+		t.Fatalf("SaveHostConfig() error = %v", err)
+	}
+	if err := prov.Reload(); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+	if acts := prov.Actions(); len(acts) != 1 || acts[0].UUID != "com.example.opendeck.act" {
+		t.Fatalf("expected 1 OpenDeck action after enabling ScanOpenDeck, got %+v", acts)
+	}
+
+	// Verify PI bootstrap injects connectOpenActionSocket alongside connectElgatoStreamDeckSocket.
+	sess, ok := prov.PropertyInspectorURL("ctx-oa", "com.example.opendeck.act", deck.ControllerKeypad, deck.Coordinates{}, 0, nil)
+	if !ok {
+		t.Fatal("expected PropertyInspectorURL to succeed for OpenDeck action")
+	}
+	resp, err := http.Get(sess.URL)
+	if err != nil {
+		t.Fatalf("http.Get(PI) error = %v", err)
+	}
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	body := string(bodyBytes)
+	if !strings.Contains(body, "connectOpenActionSocket") || !strings.Contains(body, "connectElgatoStreamDeckSocket") {
+		t.Fatalf("expected both OpenAction and Elgato connect hooks in PI bootstrap, got: %s", body)
 	}
 }

@@ -151,8 +151,14 @@ func (c *Client) IsConnected() bool {
 	return c.conn != nil && c.status.State == StateConnected
 }
 
-// Connect dials host:port, completes the OBS WebSocket v5 handshake, and starts reading events.
+// Connect stops any background reconnect supervisor, dials host:port, completes the OBS WebSocket v5 handshake,
+// and starts reading events.
 func (c *Client) Connect(ctx context.Context, host string, port int, password string) error {
+	c.stopSupervisor()
+	return c.connectOnce(ctx, host, port, password)
+}
+
+func (c *Client) connectOnce(ctx context.Context, host string, port int, password string) error {
 	if host == "" {
 		host = DefaultHost
 	}
@@ -278,6 +284,16 @@ func (c *Client) Connect(ctx context.Context, host string, port int, password st
 
 // StartAutoReconnect maintains an active connection to host:port with exponential backoff until Disconnect is called.
 func (c *Client) StartAutoReconnect(host string, port int, password string) {
+	c.startSupervisor(host, port, password, false)
+}
+
+// MaintainCurrentConnection starts a background reconnect supervisor that preserves the current live
+// connection (if already connected) and reconnects with host:port/password only if it drops.
+func (c *Client) MaintainCurrentConnection(host string, port int, password string) {
+	c.startSupervisor(host, port, password, true)
+}
+
+func (c *Client) startSupervisor(host string, port int, password string, waitIfConnected bool) {
 	c.stopSupervisor()
 
 	supCtx, cancel := context.WithCancel(context.Background())
@@ -287,16 +303,27 @@ func (c *Client) StartAutoReconnect(host string, port int, password string) {
 	c.supCancel = cancel
 	c.supDone = done
 	c.manualClose = false
+	var initialDrop chan struct{}
+	if waitIfConnected && c.conn != nil && c.status.State == StateConnected {
+		initialDrop = c.dropNotify
+	}
 	c.mu.Unlock()
 
 	go func() {
 		defer close(done)
+		if initialDrop != nil {
+			select {
+			case <-supCtx.Done():
+				return
+			case <-initialDrop:
+			}
+		}
 		backoff := time.Second
 		for {
 			if supCtx.Err() != nil {
 				return
 			}
-			err := c.Connect(supCtx, host, port, password)
+			err := c.connectOnce(supCtx, host, port, password)
 			if supCtx.Err() != nil {
 				return
 			}

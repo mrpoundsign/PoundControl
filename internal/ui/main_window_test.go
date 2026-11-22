@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
@@ -434,12 +436,12 @@ func TestMainWindowAppsActionsHotkeyAndSettingsDialog(t *testing.T) {
 		t.Fatalf("expected MediaVolumeUp from Dial 0 +, got %v", medias)
 	}
 
-	// Open and close unified tabbed Settings dialog cleanly.
-	dlg := mw.ShowSettingsDialog()
-	if dlg == nil {
-		t.Fatal("expected non-nil Settings dialog")
+	// Switch to top-level Settings tab and back to Control tab cleanly.
+	mw.ShowSettingsTab(settingsTabGeneral)
+	if mw.mainTabs.SelectedIndex() != mainTabSettings {
+		t.Fatalf("expected Settings tab selected, got %d", mw.mainTabs.SelectedIndex())
 	}
-	dlg.Hide()
+	mw.ShowControlTab()
 	drainUI()
 }
 
@@ -556,14 +558,14 @@ func TestMainWindowOverwriteConfirmAndUndoRedo(t *testing.T) {
 		t.Fatalf("expected Undo of Clear to restore OpenURL, got %+v", slot0.Config)
 	}
 
-	// 4) Canvas Ctrl+Z must be ignored while a modal overlay (Settings dialog) is open.
-	settingsDlg := mw.ShowSettingsDialog()
+	// 4) Canvas Ctrl+Z must be ignored while on the Settings tab (outside Control tab).
+	mw.ShowSettingsTab(settingsTabGeneral)
 	triggerCanvasShortcut(&fyne.ShortcutUndo{})
 	drainUI()
 	if slot0 = eng.Snapshot().Slots["0,0"]; slot0.Config == nil || slot0.Config.ActionUUID != apps.ActionOpenURL {
-		t.Fatalf("expected Ctrl+Z ignored while modal overlay is open, got %+v", slot0.Config)
+		t.Fatalf("expected Ctrl+Z ignored while Settings tab is active, got %+v", slot0.Config)
 	}
-	settingsDlg.Hide()
+	mw.ShowControlTab()
 	drainUI()
 
 	// 5) Occupied encoder dial prompts confirmation and preserves dial action on Dismiss.
@@ -786,10 +788,13 @@ func TestMainWindowSDPluginArtworkDialFeedbackAndPI(t *testing.T) {
 		t.Fatalf("unexpected Property Inspector URL: %q", openedURL)
 	}
 
-	// Settings dialog should open cleanly on the Plugins tab.
-	pluginsDlg := mw.ShowSettingsDialogTab(settingsTabPlugins)
+	// Plugins tab should open cleanly.
+	mw.ShowSettingsTab(settingsTabPlugins)
 	drainUI()
-	pluginsDlg.Hide()
+	if mw.mainTabs.SelectedIndex() != mainTabPlugins {
+		t.Fatalf("expected Plugins tab selected, got %d", mw.mainTabs.SelectedIndex())
+	}
+	mw.ShowControlTab()
 	drainUI()
 
 	// Test SVG + <text> artwork + setTitle("") full-art rendering on slot (0, 1).
@@ -893,7 +898,7 @@ func TestMainWindowWebDeckSettingsAndHeaderBadge(t *testing.T) {
 		t.Fatalf("header badge = %q, want %q", mw.webBtn.Text, wantBadge)
 	}
 
-	dlg := mw.ShowSettingsDialogTab(settingsTabWeb)
+	mw.ShowSettingsTab(settingsTabWeb)
 	drainUI()
 
 	openSt, err := webSrv.OpenPairingWindow(webdeck.DefaultPairingTTL)
@@ -907,7 +912,7 @@ func TestMainWindowWebDeckSettingsAndHeaderBadge(t *testing.T) {
 		t.Fatalf("QRImage(180) = (%#v, %v), want 180x180", qrImg, err)
 	}
 
-	dlg.Hide()
+	mw.ShowControlTab()
 	drainUI()
 
 	// Verify incoming SPAKE2-verified pairing request opens and clears Studio's mutual confirmation modal.
@@ -1088,9 +1093,9 @@ func TestMainWindowWasmPluginReloadAndSettings(t *testing.T) {
 		t.Fatalf("expected Pomodoro resting tile to keep user Accent Color #FBBF24, got %q", tile00.accentHex)
 	}
 
-	pluginsDlg := mw.ShowSettingsDialogTab(settingsTabPlugins)
+	mw.ShowSettingsTab(settingsTabPlugins)
 	drainUI()
-	pluginsDlg.Hide()
+	mw.ShowControlTab()
 	drainUI()
 }
 
@@ -1549,10 +1554,10 @@ func TestMainWindowCustomPaletteBackgroundsAndSchemaWidgets(t *testing.T) {
 		t.Fatalf("expected HideTitle to blank tile title, got %q", tile00.title)
 	}
 
-	// Open General Settings tab containing Custom Color Palette manager & close cleanly.
-	genDlg := mw.ShowSettingsDialogTab(settingsTabGeneral)
+	// Open General Settings tab containing Custom Color Palette manager & return cleanly.
+	mw.ShowSettingsTab(settingsTabGeneral)
 	drainUI()
-	genDlg.Hide()
+	mw.ShowControlTab()
 	drainUI()
 }
 
@@ -1753,5 +1758,261 @@ func TestMainWindowInspectorSectionGroupingAndPersistence(t *testing.T) {
 	wantDialTitles := []string{"General", "Appearance"}
 	if !slices.Equal(dTitles, wantDialTitles) {
 		t.Fatalf("counter dial sections = %v, want %v", dTitles, wantDialTitles)
+	}
+}
+
+func TestActionCatalogFoldingIconsAndSearch(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+
+	reg := plugin.NewRegistry()
+	if err := reg.RegisterProvider(core.New()); err != nil {
+		t.Fatalf("RegisterProvider(core) error = %v", err)
+	}
+	if err := reg.RegisterProvider(apps.New(&fakeAppsDriver{})); err != nil {
+		t.Fatalf("RegisterProvider(apps) error = %v", err)
+	}
+
+	eng, err := app.NewEngine(deck.NewMemoryStore(nil), reg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	defer func() { _ = eng.Close() }()
+
+	mw := NewMainWindow(a, eng)
+
+	// Verify category headers and action buttons have icons.
+	if len(mw.catalogGroupHeaders) == 0 {
+		t.Fatal("expected collapsible category headers in Action Catalog")
+	}
+	var coreCat string
+	for _, act := range reg.Actions() {
+		if act.UUID == core.ActionFolderOpen {
+			coreCat = act.Category
+			break
+		}
+	}
+	if coreCat == "" {
+		coreCat = "General"
+	}
+	hdr := mw.catalogGroupHeaders[coreCat]
+	if hdr == nil {
+		t.Fatalf("expected header button for category %q", coreCat)
+	}
+	if hdr.Icon == nil || !strings.HasPrefix(hdr.Text, "▾ ") {
+		t.Fatalf("expected expanded header with icon, got text=%q icon=%v", hdr.Text, hdr.Icon)
+	}
+	folderBtn := mw.catalogButtons[core.ActionFolderOpen]
+	if folderBtn == nil || folderBtn.Icon == nil {
+		t.Fatalf("expected folder action button with icon, got %+v", folderBtn)
+	}
+
+	// Tap header to fold the category -> its actions disappear from catalogButtons.
+	test.Tap(hdr)
+	if !mw.catalogCollapsed[coreCat] {
+		t.Fatalf("expected category %q to be collapsed after tap", coreCat)
+	}
+	if _, visible := mw.catalogButtons[core.ActionFolderOpen]; visible {
+		t.Fatal("expected folder action to be hidden while its category is folded")
+	}
+	if collapsedHdr := mw.catalogGroupHeaders[coreCat]; collapsedHdr == nil || !strings.HasPrefix(collapsedHdr.Text, "▸ ") {
+		t.Fatalf("expected collapsed chevron header, got %+v", collapsedHdr)
+	}
+
+	// Search by category name -> auto-expands folded category and shows all its actions.
+	mw.catalogSearch.SetText(strings.ToLower(coreCat))
+	if _, visible := mw.catalogButtons[core.ActionFolderOpen]; !visible {
+		t.Fatalf("expected folder action visible when searching by category %q", coreCat)
+	}
+	if _, visible := mw.catalogButtons[core.ActionCounter]; !visible {
+		t.Fatalf("expected counter action visible when searching by category %q", coreCat)
+	}
+
+	// Search by action name -> filters down to matching action only.
+	mw.catalogSearch.SetText("counter")
+	if _, visible := mw.catalogButtons[core.ActionCounter]; !visible {
+		t.Fatal("expected Counter action visible when searching 'counter'")
+	}
+	if _, visible := mw.catalogButtons[core.ActionFolderOpen]; visible {
+		t.Fatal("expected Folder action filtered out when searching 'counter'")
+	}
+
+	// Clearing search restores the user's previous collapsed fold state.
+	test.Tap(mw.catalogClearBtn)
+	if mw.catalogSearch.Text != "" {
+		t.Fatalf("expected search text cleared, got %q", mw.catalogSearch.Text)
+	}
+	if _, visible := mw.catalogButtons[core.ActionFolderOpen]; visible {
+		t.Fatal("expected folded state to be restored after clearing search")
+	}
+}
+
+func TestSettingsPluginsOpenActionDiagnosticsAndMarketplace(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+
+	root := t.TempDir()
+	defaultDir := filepath.Join(root, "plugins")
+	if err := os.MkdirAll(defaultDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	// Place an encrypted Elgato bundle to verify diagnostic reporting in Settings -> Plugins.
+	encDir := filepath.Join(defaultDir, "com.elgato.locked.sdPlugin")
+	if err := os.MkdirAll(encDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(encDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(encDir, "manifest.json"), []byte("ELGATO\x01\x00locked"), 0o600); err != nil {
+		t.Fatalf("WriteFile(encrypted) error = %v", err)
+	}
+
+	// Build an in-memory .streamDeckPlugin archive served by a mock OpenAction Marketplace server.
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	addZipFile := func(name, content string) {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip.Create(%q) error = %v", name, err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatalf("zip.Write(%q) error = %v", name, err)
+		}
+	}
+	addZipFile("com.example.uiinstall.sdPlugin/manifest.json", `{
+		"SDKVersion": 2,
+		"UUID": "com.example.uiinstall",
+		"Name": "UI Market Plugin",
+		"Version": "1.0.0",
+		"Category": "UI Market",
+		"CodePath": "bin/plugin.js",
+		"Actions": [{"UUID": "com.example.uiinstall.ping", "Name": "UI Ping"}]
+	}`)
+	addZipFile("com.example.uiinstall.sdPlugin/bin/plugin.js", "// ok")
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip.Close() error = %v", err)
+	}
+	archiveBytes := zipBuf.Bytes()
+
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/catalogue.json":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"com.example.uiinstall": map[string]any{
+					"name":         "UI Market Plugin",
+					"author":       "Tester",
+					"description":  "Installed from UI test",
+					"version":      "1.0.0",
+					"download_url": srvURL + "/dl/uiinstall.streamDeckPlugin",
+				},
+			})
+		case "/dl/uiinstall.streamDeckPlugin":
+			_, _ = w.Write(archiveBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	srvURL = srv.URL
+
+	reg := plugin.NewRegistry()
+	if err := reg.RegisterProvider(core.New()); err != nil {
+		t.Fatalf("RegisterProvider(core) error = %v", err)
+	}
+	sdProv := sdplugin.NewProvider(sdplugin.Options{
+		DefaultPluginsDir: defaultDir,
+	})
+	if err := reg.RegisterProvider(sdProv); err != nil {
+		t.Fatalf("RegisterProvider(sdplugin) error = %v", err)
+	}
+
+	eng, err := app.NewEngine(deck.NewMemoryStore(nil), reg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	defer func() { _ = eng.Close() }()
+	defer func() { _ = sdProv.Close() }()
+
+	if err := sdProv.Start(); err != nil {
+		t.Fatalf("sdProv.Start() error = %v", err)
+	}
+
+	client := &sdplugin.CatalogueClient{
+		CatalogueURL:     srv.URL + "/catalogue.json",
+		GitHubAPIBaseURL: srv.URL,
+		HTTPClient:       srv.Client(),
+	}
+
+	mw := NewMainWindow(a, eng)
+	mw.SetSDPluginController(sdProv)
+	mw.SetCatalogueClient(client)
+
+	// Switch to Plugins tab and verify encrypted diagnostic + ScanOpenDeck checkbox exist.
+	mw.ShowSettingsTab(settingsTabPlugins)
+	if mw.mainTabs.SelectedIndex() != mainTabPlugins {
+		t.Fatalf("expected Plugins tab selected, got %d", mw.mainTabs.SelectedIndex())
+	}
+
+	var foundDRMDiag bool
+	var openDeckCheck *widget.Check
+	var walk func(obj fyne.CanvasObject)
+	walk = func(obj fyne.CanvasObject) {
+		if obj == nil {
+			return
+		}
+		if lbl, ok := obj.(*widget.Label); ok && strings.Contains(lbl.Text, "DRM") {
+			foundDRMDiag = true
+		}
+		if ch, ok := obj.(*widget.Check); ok && strings.Contains(ch.Text, "OpenDeck") {
+			openDeckCheck = ch
+		}
+		if c, ok := obj.(*fyne.Container); ok {
+			for _, child := range c.Objects {
+				walk(child)
+			}
+		}
+		if sc, ok := obj.(*container.Scroll); ok {
+			walk(sc.Content)
+		}
+		if tabs, ok := obj.(*container.AppTabs); ok {
+			for _, item := range tabs.Items {
+				walk(item.Content)
+			}
+		}
+		if w, ok := obj.(fyne.Widget); ok {
+			if r := test.WidgetRenderer(w); r != nil {
+				for _, child := range r.Objects() {
+					if child != obj {
+						walk(child)
+					}
+				}
+			}
+		}
+	}
+	walk(mw.pluginsTabItem.Content)
+	if !foundDRMDiag {
+		t.Fatal("expected encrypted Elgato DRM diagnostic label in Settings -> Plugins")
+	}
+	if openDeckCheck == nil {
+		t.Fatal("expected Scan OpenDeck checkbox in Settings -> Plugins")
+	}
+	openDeckCheck.SetChecked(true)
+	if !sdProv.HostConfig().ScanOpenDeck {
+		t.Fatal("expected ScanOpenDeck to persist when checked")
+	}
+
+	// Verify Marketplace install + ReloadExternalPlugins brings the new action into the catalog.
+	entries, err := client.Fetch(context.Background(), true)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("client.Fetch() = (%d, %v)", len(entries), err)
+	}
+	if _, err := sdProv.InstallFromCatalogue(context.Background(), client, entries[0], nil); err != nil {
+		t.Fatalf("InstallFromCatalogue() error = %v", err)
+	}
+	if err := mw.ReloadExternalPlugins(); err != nil {
+		t.Fatalf("ReloadExternalPlugins() error = %v", err)
+	}
+	if _, ok := mw.catalogButtons["com.example.uiinstall.ping"]; !ok {
+		t.Fatal("expected newly installed OpenAction Marketplace action in Action Catalog")
 	}
 }
