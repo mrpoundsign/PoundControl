@@ -35,15 +35,16 @@ const (
 
 // PluginStatus summarizes one discovered WebAssembly plugin for Studio status cards.
 type PluginStatus struct {
-	UUID         string         `json:"uuid"`
-	Name         string         `json:"name"`
-	Version      string         `json:"version"`
-	Author       string         `json:"author,omitempty"`
-	Path         string         `json:"path"`
-	AllowedHosts []string       `json:"allowedHosts,omitempty"`
-	ActionCount  int            `json:"actionCount"`
-	State        PluginRunState `json:"state"`
-	Error        string         `json:"error,omitempty"`
+	UUID              string         `json:"uuid"`
+	Name              string         `json:"name"`
+	Version           string         `json:"version"`
+	Author            string         `json:"author,omitempty"`
+	Path              string         `json:"path"`
+	AllowedHosts      []string       `json:"allowedHosts,omitempty"`
+	ActionCount       int            `json:"actionCount"`
+	HasGlobalSettings bool           `json:"hasGlobalSettings,omitempty"`
+	State             PluginRunState `json:"state"`
+	Error             string         `json:"error,omitempty"`
 }
 
 // HostConfig persists user-configured WebAssembly search paths.
@@ -73,13 +74,14 @@ type wasmInstance struct {
 	state   PluginRunState
 	errMsg  string
 
-	callMu  sync.Mutex
-	rt      wazero.Runtime
-	mod     api.Module
-	allocFn api.Function
-	freeFn  api.Function
-	eventFn api.Function
-	timerFn api.Function
+	callMu           sync.Mutex
+	rt               wazero.Runtime
+	mod              api.Module
+	allocFn          api.Function
+	freeFn           api.Function
+	eventFn          api.Function
+	timerFn          api.Function
+	globalSettingsFn api.Function
 
 	lifeCtx    context.Context
 	lifeCancel context.CancelFunc
@@ -119,7 +121,10 @@ type Provider struct {
 	actions        []plugin.ActionDescriptor
 }
 
-var _ plugin.Provider = (*Provider)(nil)
+var (
+	_ plugin.Provider               = (*Provider)(nil)
+	_ plugin.GlobalSettingsListener = (*Provider)(nil)
+)
 
 // NewProvider constructs a sandboxed wazero WebAssembly plugin provider.
 func NewProvider(opts Options) *Provider {
@@ -239,15 +244,16 @@ func (p *Provider) Plugins() []PluginStatus {
 		}
 		st, errMsg := inst.snapshotState()
 		out = append(out, PluginStatus{
-			UUID:         inst.manifest.UUID,
-			Name:         name,
-			Version:      inst.manifest.Version,
-			Author:       inst.manifest.Author,
-			Path:         inst.path,
-			AllowedHosts: slices.Clone(inst.allowedHosts),
-			ActionCount:  len(inst.manifest.Actions),
-			State:        st,
-			Error:        errMsg,
+			UUID:              inst.manifest.UUID,
+			Name:              name,
+			Version:           inst.manifest.Version,
+			Author:            inst.manifest.Author,
+			Path:              inst.path,
+			AllowedHosts:      slices.Clone(inst.allowedHosts),
+			ActionCount:       len(inst.manifest.Actions),
+			HasGlobalSettings: len(inst.manifest.GlobalSettingsSchema) > 0,
+			State:             st,
+			Error:             errMsg,
 		})
 	}
 	p.mu.RUnlock()
@@ -348,6 +354,29 @@ func (p *Provider) Dispatch(_ context.Context, ev plugin.ActionEvent) error {
 	return err
 }
 
+// OnGlobalSettingsChanged implements plugin.GlobalSettingsListener by invoking the optional
+// pc_on_global_settings(ptr, len) export when present on the target Wasm module.
+func (p *Provider) OnGlobalSettingsChanged(_ context.Context, pluginUUID string, settings map[string]any) error {
+	p.mu.RLock()
+	inst := p.instances[strings.TrimSpace(pluginUUID)]
+	p.mu.RUnlock()
+	if inst == nil {
+		return nil
+	}
+	if curState, _ := inst.snapshotState(); curState != StatusRunning || inst.globalSettingsFn == nil {
+		return nil
+	}
+	if settings == nil {
+		settings = map[string]any{}
+	}
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	_, err = inst.callWithBytes(inst.globalSettingsFn, raw)
+	return err
+}
+
 // Close implements plugin.Provider, canceling timers and closing all wazero runtimes.
 func (p *Provider) Close() error {
 	p.reloadMu.Lock()
@@ -445,6 +474,7 @@ func (p *Provider) loadInstance(path string) *wasmInstance {
 	manifestFn := mod.ExportedFunction("pc_manifest")
 	inst.eventFn = mod.ExportedFunction("pc_handle_event")
 	inst.timerFn = mod.ExportedFunction("pc_on_timer")
+	inst.globalSettingsFn = mod.ExportedFunction("pc_on_global_settings")
 
 	if manifestFn == nil || inst.eventFn == nil {
 		inst.errMsg = "missing required PoundControl exports (pc_manifest, pc_handle_event)"

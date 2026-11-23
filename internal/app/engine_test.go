@@ -12,6 +12,7 @@ import (
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/core"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 	"github.com/mrpoundsign/PoundControl/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/secrets"
 )
 
 func newTestEngine(t *testing.T, store deck.Store) *Engine {
@@ -844,5 +845,128 @@ func TestEngineAppearanceBackgroundsHideTitleAndGlobalPalette(t *testing.T) {
 	}
 	if pal := eng.Snapshot().ColorPalette; len(pal) != len(deck.DefaultColorPalette())+1 {
 		t.Fatalf("expected Undo to preserve global ColorPalette, got %+v", pal)
+	}
+}
+
+type fakeGlobalConfigProvider struct {
+	mu           sync.Mutex
+	manifest     plugin.Manifest
+	lastNotified map[string]any
+	notifyCount  int
+}
+
+func (f *fakeGlobalConfigProvider) Kind() plugin.ProviderKind        { return plugin.ProviderWasm }
+func (f *fakeGlobalConfigProvider) Name() string                     { return f.manifest.Name }
+func (f *fakeGlobalConfigProvider) Manifests() []plugin.Manifest     { return []plugin.Manifest{f.manifest} }
+func (f *fakeGlobalConfigProvider) Actions() []plugin.ActionDescriptor { return f.manifest.Actions }
+func (f *fakeGlobalConfigProvider) BindHost(plugin.HostAPI)          {}
+func (f *fakeGlobalConfigProvider) Dispatch(context.Context, plugin.ActionEvent) error {
+	return nil
+}
+func (f *fakeGlobalConfigProvider) Close() error { return nil }
+func (f *fakeGlobalConfigProvider) OnGlobalSettingsChanged(_ context.Context, _ string, settings map[string]any) error {
+	f.mu.Lock()
+	f.lastNotified = settings
+	f.notifyCount++
+	f.mu.Unlock()
+	return nil
+}
+
+func TestEngineGlobalSettingsSecretsAndListener(t *testing.T) {
+	const pluginUUID = "com.test.global.secrets"
+	prov := &fakeGlobalConfigProvider{
+		manifest: plugin.Manifest{
+			UUID:     pluginUUID,
+			Name:     "Secret Plugin",
+			Version:  "1.0.0",
+			Provider: plugin.ProviderWasm,
+			GlobalSettingsSchema: []plugin.SettingField{
+				{Key: "channel", Label: "Default Channel", Type: plugin.FieldText},
+				{Key: "apiToken", Label: "API Token", Type: plugin.FieldPassword},
+			},
+			Actions: []plugin.ActionDescriptor{
+				{UUID: pluginUUID + ".ping", PluginUUID: pluginUUID, Name: "Ping", Category: "Secret Plugin"},
+			},
+		},
+	}
+
+	reg := plugin.NewRegistry()
+	if err := reg.RegisterProvider(prov); err != nil {
+		t.Fatalf("RegisterProvider() error = %v", err)
+	}
+	memDeck := deck.NewMemoryStore(nil)
+	memSecrets := secrets.NewMemoryStore()
+
+	eng, err := NewEngine(memDeck, reg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	eng.SetSecretStore(memSecrets)
+	t.Cleanup(func() { _ = eng.Close() })
+
+	// Save both plain and password settings.
+	if err := eng.SaveGlobalSettings(pluginUUID, map[string]any{
+		"channel":  "mrpoundsign",
+		"apiToken": "super-secret-token",
+	}); err != nil {
+		t.Fatalf("SaveGlobalSettings() error = %v", err)
+	}
+
+	// Verify password is NOT stored in deck config JSON, only in secret store.
+	loadedCfg, err := memDeck.Load()
+	if err != nil {
+		t.Fatalf("memDeck.Load() error = %v", err)
+	}
+	if _, leaked := loadedCfg.PluginSettings[pluginUUID]["apiToken"]; leaked {
+		t.Fatalf("expected apiToken to stay out of config.json, found %+v", loadedCfg.PluginSettings[pluginUUID])
+	}
+	if loadedCfg.PluginSettings[pluginUUID]["channel"] != "mrpoundsign" {
+		t.Fatalf("expected channel in config.json, got %+v", loadedCfg.PluginSettings[pluginUUID])
+	}
+	if !eng.HasGlobalSecret(pluginUUID, "apiToken") {
+		t.Fatal("expected HasGlobalSecret(apiToken) = true")
+	}
+
+	// Verify GlobalSettings transparently merges secret back in.
+	gs := eng.GlobalSettings(pluginUUID)
+	if gs["channel"] != "mrpoundsign" || gs["apiToken"] != "super-secret-token" {
+		t.Fatalf("unexpected merged GlobalSettings: %+v", gs)
+	}
+
+	// Verify listener received merged settings.
+	prov.mu.Lock()
+	if prov.notifyCount != 1 || prov.lastNotified["apiToken"] != "super-secret-token" {
+		t.Fatalf("unexpected listener notification: count=%d settings=%+v", prov.notifyCount, prov.lastNotified)
+	}
+	prov.mu.Unlock()
+
+	// Updating plain setting while omitting apiToken preserves existing keyring secret.
+	if err := eng.SaveGlobalSettings(pluginUUID, map[string]any{
+		"channel": "newchannel",
+	}); err != nil {
+		t.Fatalf("SaveGlobalSettings(omit secret) error = %v", err)
+	}
+	gs2 := eng.GlobalSettings(pluginUUID)
+	if gs2["channel"] != "newchannel" || gs2["apiToken"] != "super-secret-token" {
+		t.Fatalf("expected existing secret to be preserved when omitted, got %+v", gs2)
+	}
+	prov.mu.Lock()
+	if prov.notifyCount != 2 || prov.lastNotified["channel"] != "newchannel" || prov.lastNotified["apiToken"] != "super-secret-token" {
+		t.Fatalf("expected listener to receive preserved secret, got count=%d settings=%+v", prov.notifyCount, prov.lastNotified)
+	}
+	prov.mu.Unlock()
+
+	// Saving empty string deletes secret from keyring.
+	if err := eng.SaveGlobalSettings(pluginUUID, map[string]any{
+		"channel":  "newchannel",
+		"apiToken": "",
+	}); err != nil {
+		t.Fatalf("SaveGlobalSettings(clear secret) error = %v", err)
+	}
+	if eng.HasGlobalSecret(pluginUUID, "apiToken") {
+		t.Fatal("expected HasGlobalSecret(apiToken) = false after clearing")
+	}
+	if _, stillHas := eng.GlobalSettings(pluginUUID)["apiToken"]; stillHas {
+		t.Fatalf("expected apiToken removed from GlobalSettings, got %+v", eng.GlobalSettings(pluginUUID))
 	}
 }

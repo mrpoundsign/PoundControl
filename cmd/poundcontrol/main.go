@@ -60,6 +60,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("initialize deck engine: %v", err)
 	}
+	eng.SetSecretStore(secretStore)
 	defer func() {
 		if closeErr := eng.Close(); closeErr != nil {
 			log.Printf("close engine: %v", closeErr)

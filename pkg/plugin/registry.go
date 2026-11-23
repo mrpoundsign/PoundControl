@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -249,6 +250,50 @@ func (r *Registry) Manifests() []Manifest {
 		out = append(out, p.Manifests()...)
 	}
 	return out
+}
+
+// Manifest looks up a registered plugin manifest by its plugin UUID.
+func (r *Registry) Manifest(pluginUUID string) (Manifest, bool) {
+	pid := strings.TrimSpace(pluginUUID)
+	if pid == "" {
+		return Manifest{}, false
+	}
+	for _, p := range r.Providers() {
+		for _, m := range p.Manifests() {
+			if m.UUID == pid {
+				return m, true
+			}
+		}
+	}
+	return Manifest{}, false
+}
+
+// NotifyGlobalSettingsChanged informs the provider owning pluginUUID (if it implements
+// GlobalSettingsListener) that its global settings were updated.
+func (r *Registry) NotifyGlobalSettingsChanged(ctx context.Context, pluginUUID string, settings map[string]any) error {
+	pid := strings.TrimSpace(pluginUUID)
+	if pid == "" {
+		return nil
+	}
+	for _, p := range r.Providers() {
+		for _, m := range p.Manifests() {
+			if m.UUID != pid {
+				continue
+			}
+			listener, ok := p.(GlobalSettingsListener)
+			if !ok {
+				return nil
+			}
+			var cloned map[string]any
+			if len(settings) > 0 {
+				cloned = maps.Clone(settings)
+			} else {
+				cloned = make(map[string]any)
+			}
+			return listener.OnGlobalSettingsChanged(ctx, pid, cloned)
+		}
+	}
+	return nil
 }
 
 // Close closes every registered provider and returns any joined close errors.

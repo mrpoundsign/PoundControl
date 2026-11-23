@@ -176,8 +176,8 @@ func buildManifest() plugin.Manifest {
 					Label:       "Timeout (seconds)",
 					Type:        plugin.FieldNumber,
 					Section:     plugin.SectionAdvanced,
-					Default:     10,
-					Placeholder: "10",
+					Placeholder: "Uses plugin default (10s)",
+					Help:        "Leave blank or 0 to use the App & System Control default HTTP timeout.",
 				},
 			},
 		},
@@ -304,7 +304,24 @@ func buildManifest() plugin.Manifest {
 		Author:      "PoundControl",
 		Description: "Launch apps/scripts, open URLs, call HTTP/WebSocket webhooks, send hotkeys/text, and control media.",
 		Provider:    plugin.ProviderBuiltin,
-		Actions:     actions,
+		GlobalSettingsSchema: []plugin.SettingField{
+			{
+				Key:         "defaultWorkingDir",
+				Label:       "Default Working Directory",
+				Type:        plugin.FieldText,
+				Placeholder: "Optional fallback folder for Launch App / Script",
+				Help:        "Used when a Launch App / Script action leaves Working Directory blank.",
+			},
+			{
+				Key:         "defaultHttpTimeoutSec",
+				Label:       "Default HTTP Timeout (seconds)",
+				Type:        plugin.FieldNumber,
+				Default:     10,
+				Placeholder: "10",
+				Help:        "Fallback timeout for HTTP Request actions when Timeout is blank or 0.",
+			},
+		},
+		Actions: actions,
 	}
 }
 
@@ -413,15 +430,29 @@ func (p *Provider) flash(ctxID, kind string) {
 	}
 }
 
+func (p *Provider) globalSettings() map[string]any {
+	p.mu.RLock()
+	host := p.host
+	p.mu.RUnlock()
+	if host == nil {
+		return nil
+	}
+	return host.GetGlobalSettings(PluginUUID)
+}
+
 func (p *Provider) execApp(ctx context.Context, ev plugin.ActionEvent) error {
 	cmd := stringSetting(ev.Settings, "command", "")
 	if cmd == "" {
 		return errors.New("launch app requires a command path")
 	}
+	workingDir := stringSetting(ev.Settings, "workingDir", "")
+	if workingDir == "" {
+		workingDir = stringSetting(p.globalSettings(), "defaultWorkingDir", "")
+	}
 	req := ExecRequest{
 		Command:    cmd,
 		Args:       SplitArgs(stringSetting(ev.Settings, "args", "")),
-		WorkingDir: stringSetting(ev.Settings, "workingDir", ""),
+		WorkingDir: workingDir,
 		Detached:   boolSetting(ev.Settings, "detached", true),
 		HideWindow: boolSetting(ev.Settings, "hideWindow", true),
 	}
@@ -443,7 +474,11 @@ func (p *Provider) execHTTP(ctx context.Context, ev plugin.ActionEvent) error {
 		return errors.New("HTTP request requires a URL")
 	}
 	method := strings.ToUpper(stringSetting(ev.Settings, "method", http.MethodPost))
-	timeoutSec := max(1, intSetting(ev.Settings, "timeoutSec", 10))
+	defaultTimeout := max(1, intSetting(p.globalSettings(), "defaultHttpTimeoutSec", 10))
+	timeoutSec := intSetting(ev.Settings, "timeoutSec", 0)
+	if timeoutSec <= 0 {
+		timeoutSec = defaultTimeout
+	}
 	reqCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 

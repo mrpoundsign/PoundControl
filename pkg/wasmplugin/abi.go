@@ -29,13 +29,14 @@ const (
 
 // GuestManifest is the JSON manifest returned by a Wasm plugin's pc_manifest export.
 type GuestManifest struct {
-	UUID        string           `json:"uuid"`
-	Name        string           `json:"name"`
-	Version     string           `json:"version"`
-	Author      string           `json:"author,omitempty"`
-	Description string           `json:"description,omitempty"`
-	Permissions GuestPermissions `json:"permissions,omitzero"`
-	Actions     []GuestAction    `json:"actions"`
+	UUID                 string                `json:"uuid"`
+	Name                 string                `json:"name"`
+	Version              string                `json:"version"`
+	Author               string                `json:"author,omitempty"`
+	Description          string                `json:"description,omitempty"`
+	Permissions          GuestPermissions      `json:"permissions,omitzero"`
+	GlobalSettingsSchema []plugin.SettingField `json:"globalSettingsSchema,omitempty"`
+	Actions              []GuestAction         `json:"actions"`
 }
 
 // GuestPermissions declares explicit sandbox capabilities requested by a Wasm plugin.
@@ -119,14 +120,20 @@ func (gm GuestManifest) toPluginManifest() plugin.Manifest {
 			Provider:       plugin.ProviderWasm,
 		})
 	}
+	var globalSchema []plugin.SettingField
+	if len(gm.GlobalSettingsSchema) > 0 {
+		globalSchema = make([]plugin.SettingField, len(gm.GlobalSettingsSchema))
+		copy(globalSchema, gm.GlobalSettingsSchema)
+	}
 	return plugin.Manifest{
-		UUID:        strings.TrimSpace(gm.UUID),
-		Name:        strings.TrimSpace(gm.Name),
-		Version:     strings.TrimSpace(gm.Version),
-		Author:      strings.TrimSpace(gm.Author),
-		Description: strings.TrimSpace(gm.Description),
-		Provider:    plugin.ProviderWasm,
-		Actions:     actions,
+		UUID:                 strings.TrimSpace(gm.UUID),
+		Name:                 strings.TrimSpace(gm.Name),
+		Version:              strings.TrimSpace(gm.Version),
+		Author:               strings.TrimSpace(gm.Author),
+		Description:          strings.TrimSpace(gm.Description),
+		Provider:             plugin.ProviderWasm,
+		GlobalSettingsSchema: globalSchema,
+		Actions:              actions,
 	}
 }
 

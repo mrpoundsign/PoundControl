@@ -2083,3 +2083,154 @@ func TestPageStripDeleteWithConfirmation(t *testing.T) {
 		t.Fatal("expected pageDeleteBtn disabled again after returning to 1 page")
 	}
 }
+
+type fakeConfigurablePluginProvider struct {
+	mu           sync.Mutex
+	manifest     plugin.Manifest
+	lastNotified map[string]any
+}
+
+func (f *fakeConfigurablePluginProvider) Kind() plugin.ProviderKind        { return plugin.ProviderWasm }
+func (f *fakeConfigurablePluginProvider) Name() string                     { return f.manifest.Name }
+func (f *fakeConfigurablePluginProvider) Manifests() []plugin.Manifest     { return []plugin.Manifest{f.manifest} }
+func (f *fakeConfigurablePluginProvider) Actions() []plugin.ActionDescriptor { return f.manifest.Actions }
+func (f *fakeConfigurablePluginProvider) BindHost(plugin.HostAPI)          {}
+func (f *fakeConfigurablePluginProvider) Dispatch(context.Context, plugin.ActionEvent) error {
+	return nil
+}
+func (f *fakeConfigurablePluginProvider) Close() error { return nil }
+func (f *fakeConfigurablePluginProvider) OnGlobalSettingsChanged(_ context.Context, _ string, settings map[string]any) error {
+	f.mu.Lock()
+	f.lastNotified = settings
+	f.mu.Unlock()
+	return nil
+}
+
+func TestActionCatalogGearIconsAndPluginConfigTabs(t *testing.T) {
+	eng, _, mw := newTestStudio(t)
+	memSecrets := secrets.NewMemoryStore()
+	eng.SetSecretStore(memSecrets)
+
+	const twitchUUID = "com.test.wasm.twitch"
+	twitchProv := &fakeConfigurablePluginProvider{
+		manifest: plugin.Manifest{
+			UUID:        twitchUUID,
+			Name:        "Twitch",
+			Version:     "1.2.0",
+			Author:      "Tester",
+			Description: "Twitch stream controls",
+			Provider:    plugin.ProviderWasm,
+			GlobalSettingsSchema: []plugin.SettingField{
+				{Key: "defaultChannel", Label: "Default Channel", Type: plugin.FieldText, Default: "lobby"},
+				{Key: "oauthToken", Label: "OAuth Token", Type: plugin.FieldPassword},
+				{Key: "autoReconnect", Label: "Auto Reconnect", Type: plugin.FieldBool, Section: plugin.SectionAdvanced, Default: true},
+			},
+			Actions: []plugin.ActionDescriptor{
+				{UUID: twitchUUID + ".marker", PluginUUID: twitchUUID, Name: "Create Marker", Category: "Twitch"},
+			},
+		},
+	}
+	if err := eng.Registry().RegisterProvider(twitchProv); err != nil {
+		t.Fatalf("RegisterProvider(twitch) error = %v", err)
+	}
+	mw.RefreshActionCatalog()
+
+	// Core Navigation has no GlobalSettingsSchema -> no gear button.
+	if _, hasCoreGear := mw.catalogConfigButtons["Core Navigation"]; hasCoreGear {
+		t.Fatal("expected Core Navigation to have no gear button")
+	}
+
+	// OBS Studio has a gear button that jumps to Settings -> OBS Studio.
+	obsGear, ok := mw.catalogConfigButtons["OBS Studio"]
+	if !ok {
+		t.Fatal("expected gear button for OBS Studio category")
+	}
+	test.Tap(obsGear)
+	if mw.mainTabs.SelectedIndex() != mainTabSettings {
+		t.Fatalf("expected Settings tab active after OBS gear tap, got %d", mw.mainTabs.SelectedIndex())
+	}
+	if mw.settingsTabs.SelectedIndex() != settingsSubTabOBS {
+		t.Fatalf("expected OBS Studio settings sub-tab selected, got %d", mw.settingsTabs.SelectedIndex())
+	}
+
+	// App & System Control has a gear button that jumps to its Settings sub-tab.
+	appsGear, ok := mw.catalogConfigButtons["App & System Control"]
+	if !ok {
+		t.Fatal("expected gear button for App & System Control category")
+	}
+	test.Tap(appsGear)
+	if gotIdx, wantIdx := mw.settingsTabs.SelectedIndex(), mw.settingsPluginTabs[apps.PluginUUID]; gotIdx != wantIdx {
+		t.Fatalf("expected App & System Control settings sub-tab %d, got %d", wantIdx, gotIdx)
+	}
+
+	// Twitch WASM plugin gear button opens its Settings sub-tab.
+	twitchGear, ok := mw.catalogConfigButtons["Twitch"]
+	if !ok {
+		t.Fatal("expected gear button for Twitch category")
+	}
+	test.Tap(twitchGear)
+	if mw.mainTabs.SelectedIndex() != mainTabSettings {
+		t.Fatalf("expected Settings tab active after Twitch gear tap, got %d", mw.mainTabs.SelectedIndex())
+	}
+	wantTwitchIdx, hasTab := mw.settingsPluginTabs[twitchUUID]
+	if !hasTab || mw.settingsTabs.SelectedIndex() != wantTwitchIdx {
+		t.Fatalf("expected Twitch settings sub-tab selected (want %d, has=%v), got %d", wantTwitchIdx, hasTab, mw.settingsTabs.SelectedIndex())
+	}
+
+	view := mw.settingsPluginViews[twitchUUID]
+	if view == nil {
+		t.Fatal("expected pluginConfigTabView for Twitch")
+	}
+
+	// Enter channel + secret token and save.
+	chEntry := view.form.fields["defaultChannel"].widget.(*widget.Entry)
+	tokEntry := view.form.fields["oauthToken"].secretEntry
+	tokClear := view.form.fields["oauthToken"].clearSecretCheck
+	chEntry.SetText("mrpoundsign")
+	tokEntry.SetText("oauth:secret123")
+	test.Tap(view.saveBtn)
+
+	if !eng.HasGlobalSecret(twitchUUID, "oauthToken") {
+		t.Fatal("expected oauthToken stored in secret store")
+	}
+	if tokEntry.Text != "" {
+		t.Fatalf("expected password entry cleared after save, got %q", tokEntry.Text)
+	}
+	if tokClear.Disabled() {
+		t.Fatal("expected clear secret checkbox enabled after saving secret")
+	}
+	gs := eng.GlobalSettings(twitchUUID)
+	if gs["defaultChannel"] != "mrpoundsign" || gs["oauthToken"] != "oauth:secret123" {
+		t.Fatalf("unexpected saved global settings: %+v", gs)
+	}
+	twitchProv.mu.Lock()
+	if twitchProv.lastNotified["defaultChannel"] != "mrpoundsign" || twitchProv.lastNotified["oauthToken"] != "oauth:secret123" {
+		t.Fatalf("expected OnGlobalSettingsChanged notification, got %+v", twitchProv.lastNotified)
+	}
+	twitchProv.mu.Unlock()
+
+	// Edit channel without touching token -> existing token must remain intact.
+	chEntry.SetText("secondchannel")
+	test.Tap(view.saveBtn)
+	gs2 := eng.GlobalSettings(twitchUUID)
+	if gs2["defaultChannel"] != "secondchannel" || gs2["oauthToken"] != "oauth:secret123" {
+		t.Fatalf("expected oauthToken preserved when untouched, got %+v", gs2)
+	}
+
+	// Check Clear saved OAuth Token and save -> token removed from secret store.
+	tokClear.SetChecked(true)
+	test.Tap(view.saveBtn)
+	if eng.HasGlobalSecret(twitchUUID, "oauthToken") {
+		t.Fatal("expected oauthToken cleared from secret store")
+	}
+	if !tokClear.Disabled() {
+		t.Fatal("expected clear secret checkbox disabled after clearing secret")
+	}
+
+	// Reset Defaults restores defaultChannel = "lobby".
+	test.Tap(view.resetBtn)
+	gs3 := eng.GlobalSettings(twitchUUID)
+	if gs3["defaultChannel"] != "lobby" {
+		t.Fatalf("expected defaultChannel reset to lobby, got %+v", gs3)
+	}
+}

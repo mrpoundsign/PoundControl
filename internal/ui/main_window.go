@@ -80,14 +80,16 @@ type MainWindow struct {
 	catalogueClient *sdplugin.CatalogueClient
 	piViewer        PIViewer
 	popOut      *PopOutPad
-	cfgPath     string
-	hotkeyCount func() int
+	cfgPath         string
+	hotkeyCount     func() int
+	hotkeySuspender func(bool)
 
 	selectedController deck.ControllerType
 	selectedSlot       deck.Coordinates
 	selectedDial       int
 	runMode            bool
 	syncing            bool
+	suppressTabRebuild bool
 	statusNote         string
 	lastSnap           app.Snapshot
 	profileIDs         []string
@@ -98,18 +100,21 @@ type MainWindow struct {
 	obsBtn         *widget.Button
 	webBtn         *widget.Button
 	runModeCheck        *widget.Check
-	mainTabs            *container.AppTabs
-	pluginsTabItem      *container.TabItem
-	settingsTabItem     *container.TabItem
-	settingsTabs        *container.AppTabs
-	pluginsCleanup      func()
-	settingsCleanup     func()
-	catalogSearch       *widget.Entry
-	catalogClearBtn     *widget.Button
-	catalogList         *fyne.Container
-	catalogButtons      map[string]*widget.Button
-	catalogGroupHeaders map[string]*widget.Button
-	catalogCollapsed    map[string]bool
+	mainTabs             *container.AppTabs
+	pluginsTabItem       *container.TabItem
+	settingsTabItem      *container.TabItem
+	settingsTabs         *container.AppTabs
+	settingsPluginTabs   map[string]int
+	settingsPluginViews  map[string]*pluginConfigTabView
+	pluginsCleanup       func()
+	settingsCleanup      func()
+	catalogSearch        *widget.Entry
+	catalogClearBtn      *widget.Button
+	catalogList          *fyne.Container
+	catalogButtons       map[string]*widget.Button
+	catalogGroupHeaders  map[string]*widget.Button
+	catalogConfigButtons map[string]*widget.Button
+	catalogCollapsed     map[string]bool
 	catalogIconCache    map[string]fyne.Resource
 	surface             *deckSurfaceView
 	deckTitle      *canvas.Text
@@ -167,9 +172,10 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 		selectedController: deck.ControllerKeypad,
 		selectedSlot:       deck.Coordinates{Row: 0, Col: 0},
 		statusNote:          "Ready",
-		catalogButtons:      make(map[string]*widget.Button),
-		catalogGroupHeaders: make(map[string]*widget.Button),
-		catalogCollapsed:    make(map[string]bool),
+		catalogButtons:       make(map[string]*widget.Button),
+		catalogGroupHeaders:  make(map[string]*widget.Button),
+		catalogConfigButtons: make(map[string]*widget.Button),
+		catalogCollapsed:     make(map[string]bool),
 		catalogIconCache:    make(map[string]fyne.Resource),
 		hoverPageIdx:        -1,
 	}
@@ -219,6 +225,9 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 		mw.settingsTabItem,
 	)
 	mw.mainTabs.OnSelected = func(item *container.TabItem) {
+		if mw.suppressTabRebuild {
+			return
+		}
 		switch item {
 		case mw.pluginsTabItem:
 			mw.rebuildPluginsTab()
@@ -426,6 +435,7 @@ func (mw *MainWindow) SetHotkeyCountProvider(fn func() int) {
 
 // SetHotkeySuspender sets a callback invoked to suspend or resume global OS hotkeys while capturing shortcuts.
 func (mw *MainWindow) SetHotkeySuspender(fn func(bool)) {
+	mw.hotkeySuspender = fn
 	if mw.inspector != nil {
 		mw.inspector.SetHotkeySuspender(fn)
 	}
@@ -445,12 +455,19 @@ func (mw *MainWindow) ShowControlTab() {
 	}
 }
 
+func (mw *MainWindow) selectMainTabNoRebuild(idx int) {
+	if mw.mainTabs == nil {
+		return
+	}
+	mw.suppressTabRebuild = true
+	mw.mainTabs.SelectIndex(idx)
+	mw.suppressTabRebuild = false
+}
+
 // ShowPluginsTab switches the main Studio view to the Plugins tab and refreshes its contents.
 func (mw *MainWindow) ShowPluginsTab() {
 	mw.rebuildPluginsTab()
-	if mw.mainTabs != nil {
-		mw.mainTabs.SelectIndex(mainTabPlugins)
-	}
+	mw.selectMainTabNoRebuild(mainTabPlugins)
 }
 
 // ShowSettingsTab switches the main Studio view to the Plugins or Settings tab (selecting the requested sub-tab).
@@ -467,9 +484,24 @@ func (mw *MainWindow) ShowSettingsTab(tab int) {
 		sub = settingsSubTabWeb
 	}
 	mw.rebuildSettingsTab(sub)
-	if mw.mainTabs != nil {
-		mw.mainTabs.SelectIndex(mainTabSettings)
+	mw.selectMainTabNoRebuild(mainTabSettings)
+}
+
+// ShowPluginConfigTab switches the main Studio view to the Settings sub-tab for pluginUUID.
+func (mw *MainWindow) ShowPluginConfigTab(pluginUUID string) {
+	pid := strings.TrimSpace(pluginUUID)
+	if pid == "" {
+		return
 	}
+	if pid == obs.PluginUUID {
+		mw.ShowSettingsTab(settingsTabOBS)
+		return
+	}
+	mw.rebuildSettingsTab(settingsSubTabGeneral)
+	if idx, ok := mw.settingsPluginTabs[pid]; ok && mw.settingsTabs != nil && idx >= 0 && idx < len(mw.settingsTabs.Items) {
+		mw.settingsTabs.SelectIndex(idx)
+	}
+	mw.selectMainTabNoRebuild(mainTabSettings)
 }
 
 func (mw *MainWindow) rebuildPluginsTab() {
@@ -488,6 +520,7 @@ func (mw *MainWindow) rebuildPluginsTab() {
 		mw.catalogueClient,
 		mw.piViewer,
 		mw.ReloadExternalPlugins,
+		mw.ShowPluginConfigTab,
 		mw.setStatus,
 	)
 	mw.pluginsCleanup = cleanup
@@ -509,22 +542,32 @@ func (mw *MainWindow) rebuildSettingsTab(subTab int) {
 	if mw.hotkeyCount != nil {
 		hotkeys = mw.hotkeyCount()
 	}
-	tabs, cleanup := buildSettingsTabsView(
+	assetsDir := func() string {
+		if trimmed := strings.TrimSpace(mw.cfgPath); trimmed != "" {
+			return filepath.Join(filepath.Dir(trimmed), "assets")
+		}
+		return ""
+	}
+	res := buildSettingsTabsView(
 		mw.win,
 		mw.engine,
 		mw.obsCtrl,
 		mw.webCtrl,
 		mw.cfgPath,
+		assetsDir,
 		hotkeys,
 		func() { mw.OpenPopOutPad() },
+		mw.hotkeySuspender,
 		mw.setStatus,
 	)
-	if subTab >= 0 && subTab < len(tabs.Items) {
-		tabs.SelectIndex(subTab)
+	if subTab >= 0 && subTab < len(res.tabs.Items) {
+		res.tabs.SelectIndex(subTab)
 	}
-	mw.settingsTabs = tabs
-	mw.settingsCleanup = cleanup
-	mw.settingsTabItem.Content = tabs
+	mw.settingsTabs = res.tabs
+	mw.settingsPluginTabs = res.pluginTabs
+	mw.settingsPluginViews = res.pluginViews
+	mw.settingsCleanup = res.cleanup
+	mw.settingsTabItem.Content = res.tabs
 	if mw.mainTabs != nil {
 		mw.mainTabs.Refresh()
 	}
@@ -1168,6 +1211,7 @@ func (mw *MainWindow) RefreshActionCatalog() {
 	}
 	clear(mw.catalogButtons)
 	clear(mw.catalogGroupHeaders)
+	clear(mw.catalogConfigButtons)
 
 	actions := mw.engine.Registry().Actions()
 	manifests := mw.engine.Registry().Manifests()
@@ -1176,11 +1220,17 @@ func (mw *MainWindow) RefreshActionCatalog() {
 		manifestByUUID[m.UUID] = m
 	}
 
+	type configurablePlugin struct {
+		uuid string
+		name string
+	}
 	type catalogGroup struct {
-		category    string
-		pluginNames []string
-		iconURI     string
-		actions     []plugin.ActionDescriptor
+		category     string
+		pluginNames  []string
+		pluginUUIDs  map[string]struct{}
+		configurable []configurablePlugin
+		iconURI      string
+		actions      []plugin.ActionDescriptor
 	}
 
 	groupIndex := make(map[string]int)
@@ -1195,11 +1245,24 @@ func (mw *MainWindow) RefreshActionCatalog() {
 		if !ok {
 			idx = len(groups)
 			groupIndex[cat] = idx
-			groups = append(groups, catalogGroup{category: cat})
+			groups = append(groups, catalogGroup{
+				category:    cat,
+				pluginUUIDs: make(map[string]struct{}),
+			})
 		}
 		g := &groups[idx]
 		g.actions = append(g.actions, act)
 		if m, hasM := manifestByUUID[act.PluginUUID]; hasM {
+			if _, seen := g.pluginUUIDs[m.UUID]; !seen {
+				g.pluginUUIDs[m.UUID] = struct{}{}
+				if m.UUID == obs.PluginUUID || len(m.GlobalSettingsSchema) > 0 {
+					name := strings.TrimSpace(m.Name)
+					if name == "" {
+						name = cat
+					}
+					g.configurable = append(g.configurable, configurablePlugin{uuid: m.UUID, name: name})
+				}
+			}
 			if m.Name != "" && !strings.EqualFold(m.Name, cat) {
 				g.pluginNames = append(g.pluginNames, m.Name)
 			}
@@ -1270,7 +1333,35 @@ func (mw *MainWindow) RefreshActionCatalog() {
 		headerBtn.Alignment = widget.ButtonAlignLeading
 		headerBtn.Importance = widget.LowImportance
 		mw.catalogGroupHeaders[catName] = headerBtn
-		items = append(items, headerBtn)
+		if len(g.configurable) > 0 {
+			cfgPlugins := g.configurable
+			var gearBtn *widget.Button
+			gearBtn = widget.NewButtonWithIcon("", theme.SettingsIcon(), func() {
+				if len(cfgPlugins) == 1 {
+					mw.ShowPluginConfigTab(cfgPlugins[0].uuid)
+					return
+				}
+				if mw.win == nil || mw.win.Canvas() == nil {
+					mw.ShowPluginConfigTab(cfgPlugins[0].uuid)
+					return
+				}
+				menuItems := make([]*fyne.MenuItem, 0, len(cfgPlugins))
+				for _, cp := range cfgPlugins {
+					pid := cp.uuid
+					menuItems = append(menuItems, fyne.NewMenuItem("Configure "+cp.name, func() {
+						mw.ShowPluginConfigTab(pid)
+					}))
+				}
+				pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(gearBtn)
+				pop := widget.NewPopUpMenu(fyne.NewMenu("", menuItems...), mw.win.Canvas())
+				pop.ShowAtPosition(pos.Add(fyne.NewPos(0, gearBtn.Size().Height)))
+			})
+			gearBtn.Importance = widget.LowImportance
+			mw.catalogConfigButtons[catName] = gearBtn
+			items = append(items, container.NewBorder(nil, nil, nil, gearBtn, headerBtn))
+		} else {
+			items = append(items, headerBtn)
+		}
 
 		if collapsed {
 			continue

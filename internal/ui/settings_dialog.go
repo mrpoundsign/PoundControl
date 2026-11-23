@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"image"
@@ -23,6 +24,7 @@ import (
 	"github.com/mrpoundsign/PoundControl/internal/app"
 	"github.com/mrpoundsign/PoundControl/internal/version"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 	"github.com/mrpoundsign/PoundControl/pkg/sdplugin"
 	"github.com/mrpoundsign/PoundControl/pkg/wasmplugin"
 )
@@ -40,16 +42,25 @@ const (
 	settingsSubTabWeb     = 2
 )
 
+type settingsTabsResult struct {
+	tabs        *container.AppTabs
+	pluginTabs  map[string]int
+	pluginViews map[string]*pluginConfigTabView
+	cleanup     func()
+}
+
 func buildSettingsTabsView(
 	win fyne.Window,
 	engine *app.Engine,
 	obsCtrl OBSController,
 	webCtrl WebDeckController,
 	cfgPath string,
+	assetsDir func() string,
 	activeHotkeys int,
 	onOpenPopOut func(),
+	onSuspendHotkeys func(bool),
 	onStatus func(string),
-) (*container.AppTabs, func()) {
+) settingsTabsResult {
 	snap := engine.Snapshot()
 
 	if cfgPath == "" {
@@ -87,11 +98,40 @@ func buildSettingsTabsView(
 	// Web Deck Tab
 	webTab, webCleanup := buildWebDeckSettingsTab(webCtrl, onStatus)
 
-	tabs := container.NewAppTabs(
+	var configurable []plugin.Manifest
+	for _, m := range engine.Registry().Manifests() {
+		if len(m.GlobalSettingsSchema) > 0 {
+			configurable = append(configurable, m)
+		}
+	}
+	slices.SortFunc(configurable, func(a, b plugin.Manifest) int {
+		if c := cmp.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name)); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.UUID, b.UUID)
+	})
+
+	tabItems := make([]*container.TabItem, 0, 3+len(configurable))
+	tabItems = append(tabItems,
 		container.NewTabItem("General", container.NewScroll(container.NewPadded(generalTab))),
 		container.NewTabItem("OBS Studio", container.NewScroll(container.NewPadded(obsContent))),
 		container.NewTabItem("Web Deck", webTab),
 	)
+
+	pluginTabs := make(map[string]int, len(configurable))
+	pluginViews := make(map[string]*pluginConfigTabView, len(configurable))
+	var pluginCleanups []func()
+	for _, m := range configurable {
+		view, pCleanup := buildPluginConfigTab(win, engine, m, assetsDir, onSuspendHotkeys, onStatus)
+		pluginTabs[m.UUID] = len(tabItems)
+		pluginViews[m.UUID] = view
+		if pCleanup != nil {
+			pluginCleanups = append(pluginCleanups, pCleanup)
+		}
+		tabItems = append(tabItems, container.NewTabItem(m.Name, view.root))
+	}
+
+	tabs := container.NewAppTabs(tabItems...)
 
 	cleanup := func() {
 		if generalCleanup != nil {
@@ -103,8 +143,16 @@ func buildSettingsTabsView(
 		if webCleanup != nil {
 			webCleanup()
 		}
+		for _, fn := range pluginCleanups {
+			fn()
+		}
 	}
-	return tabs, cleanup
+	return settingsTabsResult{
+		tabs:        tabs,
+		pluginTabs:  pluginTabs,
+		pluginViews: pluginViews,
+		cleanup:     cleanup,
+	}
 }
 
 func buildPaletteSettingsSection(
@@ -251,6 +299,7 @@ func buildPluginsSettingsTab(
 	catalogueClient *sdplugin.CatalogueClient,
 	piViewer PIViewer,
 	onReloadPlugins func() error,
+	onConfigurePlugin func(string),
 	onStatus func(string),
 ) (fyne.CanvasObject, func()) {
 	providersBox := container.NewVBox()
@@ -320,7 +369,7 @@ func buildPluginsSettingsTab(
 	}
 
 	if wasmCtrl != nil {
-		wasmObj, wasmRefresh := buildWasmPluginSection(win, wasmCtrl, reloadAll, onStatus)
+		wasmObj, wasmRefresh := buildWasmPluginSection(win, wasmCtrl, reloadAll, onConfigurePlugin, onStatus)
 		items = append(items, widget.NewSeparator(), wasmObj)
 		if wasmRefresh != nil {
 			refreshes = append(refreshes, wasmRefresh)
@@ -1034,6 +1083,7 @@ func buildWasmPluginSection(
 	win fyne.Window,
 	wasmCtrl WasmPluginController,
 	reloadAll func(string),
+	onConfigurePlugin func(string),
 	onStatus func(string),
 ) (fyne.CanvasObject, func()) {
 	extraContainer := container.NewVBox()
@@ -1146,7 +1196,16 @@ func buildWasmPluginSection(
 				metaLbl := widget.NewLabel(metaText)
 				metaLbl.Wrapping = fyne.TextWrapBreak
 
-				pluginsContainer.Add(container.NewVBox(titleLbl, metaLbl, widget.NewSeparator()))
+				var headerRow fyne.CanvasObject = titleLbl
+				if st.HasGlobalSettings && onConfigurePlugin != nil {
+					pluginUUID := st.UUID
+					cfgBtn := widget.NewButtonWithIcon("Configure", theme.SettingsIcon(), func() {
+						onConfigurePlugin(pluginUUID)
+					})
+					headerRow = container.NewBorder(nil, nil, nil, cfgBtn, titleLbl)
+				}
+
+				pluginsContainer.Add(container.NewVBox(headerRow, metaLbl, widget.NewSeparator()))
 			}
 		}
 		pluginsContainer.Refresh()

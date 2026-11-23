@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -54,8 +53,9 @@ type ActionInspector struct {
 	hotkeyEntry        *widget.Entry
 	hotkeyCaptureBtn   *widget.Button
 	openPIBtn          *widget.Button
+	schemaForm         *schemaFormState
 	hotkeyFieldButtons map[string]*widget.Button
-	fields             map[string]inspectorFieldBinding
+	fields             map[string]schemaFieldBinding
 	saveBtn            *widget.Button
 	triggerBtn         *widget.Button
 	clearBtn           *widget.Button
@@ -74,24 +74,26 @@ type ActionInspector struct {
 	syncing         bool
 }
 
-type inspectorFieldBinding struct {
-	schema   plugin.SettingField
-	widget   fyne.CanvasObject
-	control  any
-	getValue func() any
-	optMap   map[string]string // label -> option value for FieldSelect
-}
-
 // NewActionInspector constructs an inspector panel bound to engine.
 func NewActionInspector(win fyne.Window, engine *app.Engine, onStatus func(string)) *ActionInspector {
 	ins := &ActionInspector{
-		win:                win,
-		engine:             engine,
-		onStatus:           onStatus,
-		sectionOpen:        make(map[string]bool),
-		hotkeyFieldButtons: make(map[string]*widget.Button),
-		fields:             make(map[string]inspectorFieldBinding),
+		win:         win,
+		engine:      engine,
+		onStatus:    onStatus,
+		sectionOpen: make(map[string]bool),
 	}
+	ins.schemaForm = newSchemaFormState(schemaFormOptions{
+		win:       win,
+		engine:    engine,
+		assetsDir: func() string { return ins.assetsDir },
+		palette:   func() []deck.ColorSwatch { return ins.palette },
+		onStatus:  ins.reportStatus,
+		onCaptureHotkey: func(title string, target *widget.Entry) {
+			ins.openHotkeyCapture(title, target, captureModeChord)
+		},
+	})
+	ins.fields = ins.schemaForm.fields
+	ins.hotkeyFieldButtons = ins.schemaForm.hotkeyFieldButtons
 
 	heading := widget.NewLabelWithStyle("Action Inspector", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	ins.slotLbl = widget.NewLabel("Slot: Row 0, Col 0")
@@ -205,11 +207,7 @@ func (ins *ActionInspector) refreshPaletteSwatches(swatches []deck.ColorSwatch) 
 	if ins.bgColorCtrl != nil {
 		ins.bgColorCtrl.RefreshPalette(ins.palette)
 	}
-	for _, b := range ins.fields {
-		if ctrl, ok := b.control.(*colorFieldControl); ok && ctrl != nil {
-			ctrl.RefreshPalette(ins.palette)
-		}
-	}
+	ins.schemaForm.refreshPalette(ins.palette)
 }
 
 // SetSelection refreshes the inspector to reflect the currently selected slot or dial.
@@ -289,8 +287,7 @@ func (ins *ActionInspector) clearForm(title, message string, canTrigger bool) {
 	ins.accordion = nil
 	ins.actionLbl.SetText(title)
 	ins.metaLbl.SetText(message)
-	clear(ins.fields)
-	clear(ins.hotkeyFieldButtons)
+	ins.schemaForm.reset()
 	ins.titleEntry = nil
 	ins.accentColorCtrl = nil
 	ins.bgColorCtrl = nil
@@ -325,8 +322,7 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 
 	ins.saveSectionOpenState()
 	ins.accordion = nil
-	clear(ins.fields)
-	clear(ins.hotkeyFieldButtons)
+	ins.schemaForm.reset()
 	ins.hotkeyCaptureBtn = nil
 	ins.openPIBtn = nil
 	name := cfg.ActionUUID
@@ -505,51 +501,6 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 	}
 }
 
-type customFieldGroup struct {
-	title  string
-	fields []plugin.SettingField
-}
-
-type groupedSchemaFields struct {
-	general    []plugin.SettingField
-	custom     []customFieldGroup
-	appearance []plugin.SettingField
-	trigger    []plugin.SettingField
-	advanced   []plugin.SettingField
-}
-
-func groupSchemaFields(schema []plugin.SettingField) groupedSchemaFields {
-	var out groupedSchemaFields
-	customIdx := make(map[string]int)
-	for _, field := range schema {
-		canon, isCanon := plugin.NormalizeSection(field.Section)
-		if !isCanon {
-			key := strings.ToLower(canon)
-			if idx, ok := customIdx[key]; ok {
-				out.custom[idx].fields = append(out.custom[idx].fields, field)
-			} else {
-				customIdx[key] = len(out.custom)
-				out.custom = append(out.custom, customFieldGroup{
-					title:  canon,
-					fields: []plugin.SettingField{field},
-				})
-			}
-			continue
-		}
-		switch canon {
-		case plugin.SectionGeneral:
-			out.general = append(out.general, field)
-		case plugin.SectionAppearance:
-			out.appearance = append(out.appearance, field)
-		case plugin.SectionTrigger:
-			out.trigger = append(out.trigger, field)
-		case plugin.SectionAdvanced:
-			out.advanced = append(out.advanced, field)
-		}
-	}
-	return out
-}
-
 func (ins *ActionInspector) saveSectionOpenState() {
 	if ins.accordion == nil {
 		return
@@ -578,203 +529,12 @@ func (ins *ActionInspector) makeAccordionSection(title string, objs []fyne.Canva
 }
 
 func (ins *ActionInspector) buildSchemaObjects(fields []plugin.SettingField, settings map[string]any) []fyne.CanvasObject {
-	out := make([]fyne.CanvasObject, 0, len(fields)*2)
-	for _, field := range fields {
-		out = append(out, ins.buildSchemaField(field, settings)...)
-	}
-	return out
-}
-
-func (ins *ActionInspector) buildSchemaField(field plugin.SettingField, settings map[string]any) []fyne.CanvasObject {
-	val, exists := settings[field.Key]
-	if !exists {
-		val = field.Default
-	}
-
-	var out []fyne.CanvasObject
-	switch field.Type {
-	case plugin.FieldBool:
-		chk := widget.NewCheck(field.Label, nil)
-		chk.SetChecked(toBoolValue(val))
-		ins.fields[field.Key] = inspectorFieldBinding{schema: field, widget: chk}
-		out = append(out, chk)
-
-	case plugin.FieldSelect:
-		if field.OptionsKey != "" {
-			opts := ins.engine.DynamicOptions(context.Background(), field.OptionsKey, settings)
-			choices := make([]string, len(opts))
-			for i, opt := range opts {
-				choices[i] = opt.Value
-			}
-			se := widget.NewSelectEntry(choices)
-			se.SetPlaceHolder(field.Placeholder)
-			if val != nil {
-				se.SetText(fmt.Sprint(val))
-			}
-			ins.fields[field.Key] = inspectorFieldBinding{schema: field, widget: se}
-			out = append(out, widget.NewLabel(field.Label), se)
-		} else {
-			labels := make([]string, len(field.Options))
-			optMap := make(map[string]string, len(field.Options))
-			selLabel := ""
-			curVal := fmt.Sprint(val)
-			for i, opt := range field.Options {
-				labels[i] = opt.Label
-				optMap[opt.Label] = opt.Value
-				if opt.Value == curVal || opt.Label == curVal {
-					selLabel = opt.Label
-				}
-			}
-			if selLabel == "" && len(labels) > 0 {
-				selLabel = labels[0]
-			}
-			sel := widget.NewSelect(labels, nil)
-			if selLabel != "" {
-				sel.SetSelected(selLabel)
-			}
-			ins.fields[field.Key] = inspectorFieldBinding{schema: field, widget: sel, optMap: optMap}
-			out = append(out, widget.NewLabel(field.Label), sel)
-		}
-
-	case plugin.FieldMultiline:
-		entry := widget.NewMultiLineEntry()
-		entry.SetMinRowsVisible(4)
-		entry.SetPlaceHolder(field.Placeholder)
-		if val != nil {
-			entry.SetText(fmt.Sprint(val))
-		}
-		ins.fields[field.Key] = inspectorFieldBinding{schema: field, widget: entry}
-		out = append(out, widget.NewLabel(field.Label), entry)
-
-	case plugin.FieldPassword:
-		entry := widget.NewPasswordEntry()
-		entry.SetPlaceHolder(field.Placeholder)
-		if val != nil {
-			entry.SetText(fmt.Sprint(val))
-		}
-		ins.fields[field.Key] = inspectorFieldBinding{schema: field, widget: entry}
-		out = append(out, widget.NewLabel(field.Label), entry)
-
-	case plugin.FieldHotkey:
-		entry := widget.NewEntry()
-		entry.SetPlaceHolder(field.Placeholder)
-		if val != nil {
-			entry.SetText(fmt.Sprint(val))
-		}
-		capBtn := widget.NewButton("Capture", func() {
-			ins.openHotkeyCapture("Capture "+field.Label, entry, captureModeChord)
-		})
-		ins.hotkeyFieldButtons[field.Key] = capBtn
-		ins.fields[field.Key] = inspectorFieldBinding{schema: field, widget: entry}
-		out = append(out, widget.NewLabel(field.Label), container.NewBorder(nil, nil, nil, capBtn, entry))
-
-	case plugin.FieldColor:
-		valStr := ""
-		if val != nil {
-			valStr = fmt.Sprint(val)
-		}
-		ctrl := newColorFieldControl(ins.win, field.Label, valStr, ins.palette, ins.engine.AddColorSwatch, ins.reportStatus)
-		ins.fields[field.Key] = inspectorFieldBinding{
-			schema:   field,
-			widget:   ctrl.entry,
-			control:  ctrl,
-			getValue: func() any { return ctrl.Value() },
-		}
-		out = append(out, widget.NewLabel(field.Label), ctrl.Object())
-
-	case plugin.FieldImage:
-		valStr := ""
-		if val != nil {
-			valStr = fmt.Sprint(val)
-		}
-		ctrl := newImageFieldControl(ins.win, valStr, func() string { return ins.assetsDir }, ins.reportStatus)
-		ins.fields[field.Key] = inspectorFieldBinding{
-			schema:   field,
-			widget:   ctrl.entry,
-			control:  ctrl,
-			getValue: func() any { return ctrl.Value() },
-		}
-		out = append(out, widget.NewLabel(field.Label), ctrl.Object())
-
-	case plugin.FieldFile:
-		valStr := ""
-		if val != nil {
-			valStr = fmt.Sprint(val)
-		}
-		ctrl := newFileFieldControl(ins.win, valStr, field.Placeholder)
-		ins.fields[field.Key] = inspectorFieldBinding{
-			schema:   field,
-			widget:   ctrl.entry,
-			control:  ctrl,
-			getValue: func() any { return ctrl.Value() },
-		}
-		out = append(out, widget.NewLabel(field.Label), ctrl.Object())
-
-	default: // FieldText, FieldNumber
-		entry := widget.NewEntry()
-		entry.SetPlaceHolder(field.Placeholder)
-		if val != nil {
-			entry.SetText(fmt.Sprint(val))
-		}
-		ins.fields[field.Key] = inspectorFieldBinding{schema: field, widget: entry}
-		out = append(out, widget.NewLabel(field.Label), entry)
-	}
-
-	if field.Help != "" {
-		helpLbl := widget.NewLabel(field.Help)
-		helpLbl.Wrapping = fyne.TextWrapWord
-		out = append(out, helpLbl)
-	}
-	return out
-}
-
-func (ins *ActionInspector) collectSettings() map[string]any {
-	out := make(map[string]any, len(ins.fields))
-	for key, binding := range ins.fields {
-		if binding.getValue != nil {
-			out[key] = binding.getValue()
-			continue
-		}
-		switch w := binding.widget.(type) {
-		case *widget.Check:
-			out[key] = w.Checked
-		case *widget.Select:
-			if v, ok := binding.optMap[w.Selected]; ok {
-				out[key] = v
-			} else {
-				out[key] = w.Selected
-			}
-		case *widget.SelectEntry:
-			out[key] = strings.TrimSpace(w.Text)
-		case *widget.Entry:
-			if binding.schema.Type == plugin.FieldNumber {
-				out[key] = parseNumberValue(w.Text, binding.schema.Default)
-			} else {
-				out[key] = w.Text
-			}
-		}
-	}
-	return out
+	return ins.schemaForm.buildFields(fields, settings)
 }
 
 // RefreshDynamicOptions repopulates any live SelectEntry dropdowns from registered dynamic providers.
 func (ins *ActionInspector) RefreshDynamicOptions() {
-	if len(ins.fields) == 0 {
-		return
-	}
-	cur := ins.collectSettings()
-	for _, binding := range ins.fields {
-		se, ok := binding.widget.(*widget.SelectEntry)
-		if !ok || binding.schema.OptionsKey == "" {
-			continue
-		}
-		opts := ins.engine.DynamicOptions(context.Background(), binding.schema.OptionsKey, cur)
-		choices := make([]string, len(opts))
-		for i, opt := range opts {
-			choices[i] = opt.Value
-		}
-		se.SetOptions(choices)
-	}
+	ins.schemaForm.refreshDynamicOptions()
 }
 
 func (ins *ActionInspector) handleSave() {
@@ -799,23 +559,10 @@ func (ins *ActionInspector) handleSave() {
 	}
 	hideTitle := ins.hideTitleCheck != nil && ins.hideTitleCheck.Checked
 
-	settings := ins.collectSettings()
-	for key, binding := range ins.fields {
-		if binding.schema.Type != plugin.FieldColor {
-			continue
-		}
-		raw, _ := settings[key].(string)
-		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" {
-			settings[key] = ""
-			continue
-		}
-		norm, ok := deck.NormalizeHexColor(trimmed)
-		if !ok {
-			ins.reportStatus(fmt.Sprintf("Invalid color %q for %s (expected #RRGGBB)", raw, binding.schema.Label))
-			return
-		}
-		settings[key] = norm
+	settings, err := ins.schemaForm.collectAndValidate()
+	if err != nil {
+		ins.reportStatus(err.Error())
+		return
 	}
 
 	canonicalHotkey := ""
@@ -842,14 +589,14 @@ func (ins *ActionInspector) handleSave() {
 		Hotkey:          canonicalHotkey,
 	}
 
-	var err error
+	var saveErr error
 	if ins.selCtrl == deck.ControllerEncoder {
-		err = ins.engine.UpdateDialSlotAppearance(ins.selDial, appearance, settings)
+		saveErr = ins.engine.UpdateDialSlotAppearance(ins.selDial, appearance, settings)
 	} else {
-		err = ins.engine.UpdateKeypadSlotAppearance(ins.selCoords, appearance, settings)
+		saveErr = ins.engine.UpdateKeypadSlotAppearance(ins.selCoords, appearance, settings)
 	}
-	if err != nil {
-		ins.reportStatus("Save failed: " + err.Error())
+	if saveErr != nil {
+		ins.reportStatus("Save failed: " + saveErr.Error())
 		return
 	}
 	ins.reportStatus("Saved " + ins.actionLbl.Text)
@@ -911,30 +658,4 @@ func (ins *ActionInspector) openHotkeyCapture(title string, target *widget.Entry
 			ins.reportStatus("Captured " + captured + " — click Save to apply")
 		},
 	)
-}
-
-func toBoolValue(v any) bool {
-	switch b := v.(type) {
-	case bool:
-		return b
-	case string:
-		parsed, err := strconv.ParseBool(strings.TrimSpace(b))
-		return err == nil && parsed
-	default:
-		return false
-	}
-}
-
-func parseNumberValue(raw string, fallback any) any {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return fallback
-	}
-	if iv, err := strconv.Atoi(trimmed); err == nil {
-		return iv
-	}
-	if fv, err := strconv.ParseFloat(trimmed, 64); err == nil {
-		return fv
-	}
-	return fallback
 }

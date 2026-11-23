@@ -64,6 +64,7 @@ func (m *mockDriver) SendMedia(_ context.Context, cmd MediaCommand) error {
 type mockHost struct {
 	mu      sync.Mutex
 	patches []plugin.VisualPatch
+	global  map[string]map[string]any
 }
 
 func (h *mockHost) UpdateVisual(_ string, patch plugin.VisualPatch) {
@@ -72,8 +73,15 @@ func (h *mockHost) UpdateVisual(_ string, patch plugin.VisualPatch) {
 	h.mu.Unlock()
 }
 
-func (h *mockHost) SaveSettings(string, map[string]any) error       { return nil }
-func (h *mockHost) GetGlobalSettings(string) map[string]any         { return nil }
+func (h *mockHost) SaveSettings(string, map[string]any) error { return nil }
+func (h *mockHost) GetGlobalSettings(pid string) map[string]any {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.global == nil {
+		return nil
+	}
+	return h.global[pid]
+}
 func (h *mockHost) SaveGlobalSettings(string, map[string]any) error { return nil }
 func (h *mockHost) Log(string, string)                              {}
 func (h *mockHost) Deck() plugin.DeckControl                        { return nil }
@@ -239,5 +247,73 @@ func TestProviderOSActionsAndNetwork(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for WebSocket message")
+	}
+}
+
+func TestAppsGlobalSettingsFallbacks(t *testing.T) {
+	drv := &mockDriver{}
+	prov := New(drv)
+	host := &mockHost{global: map[string]map[string]any{
+		PluginUUID: {
+			"defaultWorkingDir":     "/srv/scripts",
+			"defaultHttpTimeoutSec": 2,
+		},
+	}}
+	prov.BindHost(host)
+
+	if len(prov.Manifests()) != 1 || len(prov.Manifests()[0].GlobalSettingsSchema) < 2 {
+		t.Fatalf("expected apps manifest to declare GlobalSettingsSchema, got %+v", prov.Manifests())
+	}
+
+	ctx := context.Background()
+	// Blank workingDir falls back to defaultWorkingDir.
+	if err := prov.Dispatch(ctx, plugin.ActionEvent{
+		Type:       plugin.EventKeyDown,
+		Context:    "exec-default",
+		ActionUUID: ActionExec,
+		Settings:   map[string]any{"command": "tool"},
+	}); err != nil {
+		t.Fatalf("ActionExec fallback error = %v", err)
+	}
+	if len(drv.execs) != 1 || drv.execs[0].WorkingDir != "/srv/scripts" {
+		t.Fatalf("expected fallback WorkingDir /srv/scripts, got %+v", drv.execs)
+	}
+
+	// Explicit workingDir overrides defaultWorkingDir.
+	if err := prov.Dispatch(ctx, plugin.ActionEvent{
+		Type:       plugin.EventKeyDown,
+		Context:    "exec-override",
+		ActionUUID: ActionExec,
+		Settings:   map[string]any{"command": "tool", "workingDir": "/custom"},
+	}); err != nil {
+		t.Fatalf("ActionExec override error = %v", err)
+	}
+	if len(drv.execs) != 2 || drv.execs[1].WorkingDir != "/custom" {
+		t.Fatalf("expected explicit WorkingDir /custom, got %+v", drv.execs)
+	}
+
+	// Blank timeoutSec uses defaultHttpTimeoutSec.
+	slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer slowSrv.Close()
+
+	host.global[PluginUUID]["defaultHttpTimeoutSec"] = 1
+	start := time.Now()
+	err := prov.Dispatch(ctx, plugin.ActionEvent{
+		Type:       plugin.EventKeyDown,
+		Context:    "http-timeout",
+		ActionUUID: ActionHTTP,
+		Settings:   map[string]any{"method": "GET", "url": slowSrv.URL},
+	})
+	if err == nil {
+		t.Fatal("expected HTTP request to time out using defaultHttpTimeoutSec=1")
+	}
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Fatalf("expected ~1s timeout from defaultHttpTimeoutSec, took %v", elapsed)
 	}
 }

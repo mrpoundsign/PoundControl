@@ -14,6 +14,7 @@ import (
 
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 	"github.com/mrpoundsign/PoundControl/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/secrets"
 )
 
 // SlotVisual represents the live rendered appearance of a keypad slot or encoder dial.
@@ -98,11 +99,12 @@ type liveSlotVisual struct {
 
 // Engine coordinates deck configuration, persistence, navigation, plugin lifecycle, and live state updates.
 type Engine struct {
-	opMu     sync.Mutex
-	mu       sync.RWMutex
-	store    deck.Store
-	registry *plugin.Registry
-	cfg      *deck.Config
+	opMu        sync.Mutex
+	mu          sync.RWMutex
+	store       deck.Store
+	secretStore secrets.Store
+	registry    *plugin.Registry
+	cfg         *deck.Config
 
 	pageIdx     int
 	folderStack []string
@@ -136,11 +138,12 @@ func NewEngine(store deck.Store, reg *plugin.Registry) (*Engine, error) {
 	}
 
 	eng := &Engine{
-		store:    store,
-		registry: reg,
-		cfg:      cfg,
-		visuals:  make(map[string]liveSlotVisual),
-		subs:     make(map[uint64]func(Snapshot)),
+		store:       store,
+		secretStore: secrets.NewMemoryStore(),
+		registry:    reg,
+		cfg:         cfg,
+		visuals:     make(map[string]liveSlotVisual),
+		subs:        make(map[uint64]func(Snapshot)),
 	}
 	reg.SetHost(&engineHost{eng: eng})
 
@@ -155,6 +158,17 @@ func NewEngine(store deck.Store, reg *plugin.Registry) (*Engine, error) {
 // Registry returns the plugin registry attached to the engine.
 func (e *Engine) Registry() *plugin.Registry {
 	return e.registry
+}
+
+// SetSecretStore configures the secrets.Store used for keyring-backed plugin global password settings.
+// Passing nil resets the store to an isolated in-memory store.
+func (e *Engine) SetSecretStore(store secrets.Store) {
+	if store == nil {
+		store = secrets.NewMemoryStore()
+	}
+	e.mu.Lock()
+	e.secretStore = store
+	e.mu.Unlock()
 }
 
 // Close shuts down the plugin registry and clears active subscribers.
@@ -2279,29 +2293,128 @@ func (e *Engine) PropertyInspectorSession(ctrl deck.ControllerType, coords deck.
 	return e.registry.PropertyInspectorSession(ctxID, actionUUID, ctrl, coords, dial, settings)
 }
 
-// GlobalSettings returns a cloned copy of persisted plugin-wide settings for pluginUUID.
-func (e *Engine) GlobalSettings(pluginUUID string) map[string]any {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	if e.cfg == nil || e.cfg.PluginSettings == nil {
-		return make(map[string]any)
-	}
-	return cloneSettings(e.cfg.PluginSettings[pluginUUID])
+func globalSecretKey(pluginUUID, fieldKey string) string {
+	return "plugin.global." + strings.TrimSpace(pluginUUID) + "." + strings.TrimSpace(fieldKey)
 }
 
-// SaveGlobalSettings persists plugin-wide settings for pluginUUID atomically.
+func (e *Engine) passwordFieldKeys(pluginUUID string) map[string]struct{} {
+	if e.registry == nil {
+		return nil
+	}
+	manifest, ok := e.registry.Manifest(pluginUUID)
+	if !ok || len(manifest.GlobalSettingsSchema) == 0 {
+		return nil
+	}
+	var keys map[string]struct{}
+	for _, f := range manifest.GlobalSettingsSchema {
+		if f.Type == plugin.FieldPassword && strings.TrimSpace(f.Key) != "" {
+			if keys == nil {
+				keys = make(map[string]struct{})
+			}
+			keys[f.Key] = struct{}{}
+		}
+	}
+	return keys
+}
+
+// HasGlobalSecret reports whether a non-empty secret is stored in the secret store for pluginUUID's fieldKey.
+func (e *Engine) HasGlobalSecret(pluginUUID, fieldKey string) bool {
+	pid := strings.TrimSpace(pluginUUID)
+	fk := strings.TrimSpace(fieldKey)
+	if pid == "" || fk == "" {
+		return false
+	}
+	e.mu.RLock()
+	store := e.secretStore
+	e.mu.RUnlock()
+	if store == nil {
+		return false
+	}
+	val, err := store.Get(globalSecretKey(pid, fk))
+	return err == nil && val != ""
+}
+
+// GlobalSettings returns a cloned copy of persisted plugin-wide settings for pluginUUID,
+// transparently merging any FieldPassword values stored in the engine's secret store.
+func (e *Engine) GlobalSettings(pluginUUID string) map[string]any {
+	e.mu.RLock()
+	var out map[string]any
+	if e.cfg != nil && e.cfg.PluginSettings != nil {
+		out = cloneSettings(e.cfg.PluginSettings[pluginUUID])
+	} else {
+		out = make(map[string]any)
+	}
+	store := e.secretStore
+	e.mu.RUnlock()
+
+	if store != nil {
+		for k := range e.passwordFieldKeys(pluginUUID) {
+			if val, err := store.Get(globalSecretKey(pluginUUID, k)); err == nil && val != "" {
+				out[k] = val
+			}
+		}
+	}
+	return out
+}
+
+// SaveGlobalSettings persists plugin-wide settings for pluginUUID atomically, routing any
+// FieldPassword schema fields to the secret store instead of config.json, and notifies the owning provider.
+// Password fields omitted from settings preserve their existing secret store value; an empty string deletes it.
 func (e *Engine) SaveGlobalSettings(pluginUUID string, settings map[string]any) error {
+	return e.saveGlobalSettings(pluginUUID, settings, true)
+}
+
+func (e *Engine) saveGlobalSettings(pluginUUID string, settings map[string]any, notify bool) error {
 	pid := strings.TrimSpace(pluginUUID)
 	if pid == "" {
 		return errors.New("plugin UUID cannot be empty")
 	}
 
+	pwKeys := e.passwordFieldKeys(pid)
+	plain := make(map[string]any, len(settings))
+	var secretUpdates map[string]string
+	for k, v := range settings {
+		if _, isPW := pwKeys[k]; isPW {
+			if secretUpdates == nil {
+				secretUpdates = make(map[string]string)
+			}
+			if v == nil {
+				secretUpdates[k] = ""
+			} else {
+				secretUpdates[k] = fmt.Sprint(v)
+			}
+			continue
+		}
+		plain[k] = v
+	}
+
 	e.opMu.Lock()
+	e.mu.RLock()
+	store := e.secretStore
+	e.mu.RUnlock()
+
+	if store != nil && len(secretUpdates) > 0 {
+		for k, val := range secretUpdates {
+			secKey := globalSecretKey(pid, k)
+			if val == "" {
+				if err := store.Delete(secKey); err != nil && !errors.Is(err, secrets.ErrNotFound) {
+					e.opMu.Unlock()
+					return fmt.Errorf("delete plugin secret %q: %w", k, err)
+				}
+			} else {
+				if err := store.Set(secKey, val); err != nil {
+					e.opMu.Unlock()
+					return fmt.Errorf("save plugin secret %q: %w", k, err)
+				}
+			}
+		}
+	}
+
 	e.mu.Lock()
 	if e.cfg.PluginSettings == nil {
 		e.cfg.PluginSettings = make(map[string]map[string]any)
 	}
-	e.cfg.PluginSettings[pid] = cloneSettings(settings)
+	e.cfg.PluginSettings[pid] = plain
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
@@ -2311,6 +2424,9 @@ func (e *Engine) SaveGlobalSettings(pluginUUID string, settings map[string]any) 
 		return err
 	}
 	e.notifySubscribers()
+	if notify && e.registry != nil {
+		_ = e.registry.NotifyGlobalSettingsChanged(context.Background(), pid, e.GlobalSettings(pid))
+	}
 	return nil
 }
 
@@ -2519,7 +2635,7 @@ func (h *engineHost) GetGlobalSettings(pluginUUID string) map[string]any {
 }
 
 func (h *engineHost) SaveGlobalSettings(pluginUUID string, settings map[string]any) error {
-	return h.eng.SaveGlobalSettings(pluginUUID, settings)
+	return h.eng.saveGlobalSettings(pluginUUID, settings, false)
 }
 
 func (h *engineHost) Log(pluginUUID, message string) {

@@ -78,6 +78,12 @@ type DynamicOptionsProvider interface {
 	DynamicOptions(ctx context.Context, optionsKey string, currentSettings map[string]any) []SelectOption
 }
 
+// GlobalSettingsListener can be implemented optionally by a Provider to be notified
+// whenever plugin-wide global settings are updated by the host UI or engine.
+type GlobalSettingsListener interface {
+	OnGlobalSettingsChanged(ctx context.Context, pluginUUID string, settings map[string]any) error
+}
+
 // PropertyInspectorSession describes an HTML/WebView Property Inspector endpoint for a slot or dial.
 type PropertyInspectorSession struct {
 	Title string `json:"title"`

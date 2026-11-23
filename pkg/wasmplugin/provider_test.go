@@ -705,3 +705,161 @@ func TestProviderRejectsCommandWasmWithoutInitialize(t *testing.T) {
 		t.Fatalf("expected error mentioning _initialize and -buildmode=c-shared, got %q", statuses[0].Error)
 	}
 }
+
+func TestProviderGlobalSettingsSchemaAndCallback(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "guest_global")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll error = %v", err)
+	}
+
+	guestCode := `//go:build wasip1 && wasm
+
+package main
+
+import (
+	"encoding/json"
+	"unsafe"
+)
+
+//go:wasmimport poundcontrol pc_log
+func pcLog(msgPtr, msgLen uint32)
+
+//go:wasmimport poundcontrol pc_update_visual
+func pcUpdateVisual(ctxPtr, ctxLen, patchPtr, patchLen uint32) int32
+
+var allocations = map[uint32][]byte{}
+var lastChannel = ""
+
+//go:wasmexport pc_alloc
+func pcAlloc(size uint32) uint32 {
+	if size == 0 {
+		size = 1
+	}
+	b := make([]byte, size)
+	ptr := uint32(uintptr(unsafe.Pointer(&b[0])))
+	allocations[ptr] = b
+	return ptr
+}
+
+//go:wasmexport pc_free
+func pcFree(ptr uint32) {
+	delete(allocations, ptr)
+}
+
+func returnHostString(s string) uint64 {
+	raw := []byte(s)
+	ptr := pcAlloc(uint32(len(raw)))
+	copy(allocations[ptr], raw)
+	return (uint64(ptr) << 32) | uint64(len(raw))
+}
+
+func ptrLen(b []byte) (uint32, uint32) {
+	if len(b) == 0 {
+		return 0, 0
+	}
+	return uint32(uintptr(unsafe.Pointer(&b[0]))), uint32(len(b))
+}
+
+//go:wasmexport pc_manifest
+func pcManifest() uint64 {
+	manifest := map[string]any{
+		"uuid":    "com.test.wasm.globalcfg",
+		"name":    "Global Config Test",
+		"version": "1.0.0",
+		"globalSettingsSchema": []map[string]any{
+			{"key": "defaultChannel", "label": "Default Channel", "type": "text", "default": "lobby"},
+			{"key": "token", "label": "OAuth Token", "type": "password"},
+		},
+		"actions": []map[string]any{
+			{"uuid": "com.test.wasm.globalcfg.say", "name": "Say"},
+		},
+	}
+	raw, _ := json.Marshal(manifest)
+	return returnHostString(string(raw))
+}
+
+//go:wasmexport pc_on_global_settings
+func pcOnGlobalSettings(ptr, size uint32) int32 {
+	raw := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(ptr))), size)
+	var gs map[string]any
+	if err := json.Unmarshal(raw, &gs); err != nil {
+		return -1
+	}
+	if ch, ok := gs["defaultChannel"].(string); ok {
+		lastChannel = ch
+	}
+	msg := []byte("global:" + lastChannel)
+	mp, ml := ptrLen(msg)
+	pcLog(mp, ml)
+	return 0
+}
+
+//go:wasmexport pc_handle_event
+func pcHandleEvent(ptr, size uint32) int32 {
+	raw := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(ptr))), size)
+	var ev struct {
+		Context string ` + "`" + `json:"context"` + "`" + `
+	}
+	if err := json.Unmarshal(raw, &ev); err != nil {
+		return -1
+	}
+	patchBytes, _ := json.Marshal(map[string]any{"subtitle": lastChannel})
+	cp, cl := ptrLen([]byte(ev.Context))
+	pp, pl := ptrLen(patchBytes)
+	pcUpdateVisual(cp, cl, pp, pl)
+	return 0
+}
+
+func main() {}
+`
+	if err := os.WriteFile(filepath.Join(srcDir, "go.mod"), []byte("module guestglobal\n\ngo 1.24\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(go.mod) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte(guestCode), 0o600); err != nil {
+		t.Fatalf("WriteFile(main.go) error = %v", err)
+	}
+
+	defaultDir := filepath.Join(tmp, "wasm")
+	if err := os.MkdirAll(defaultDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll error = %v", err)
+	}
+	compileWasmFixture(t, srcDir, filepath.Join(defaultDir, "globalcfg.wasm"))
+
+	host := newFakeHostAPI()
+	prov := NewProvider(Options{DefaultPluginsDir: defaultDir})
+	prov.BindHost(host)
+	t.Cleanup(func() { _ = prov.Close() })
+
+	if err := prov.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	manifests := prov.Manifests()
+	if len(manifests) != 1 || len(manifests[0].GlobalSettingsSchema) != 2 {
+		t.Fatalf("expected 1 manifest with 2 GlobalSettingsSchema fields, got %+v", manifests)
+	}
+	statuses := prov.Plugins()
+	if len(statuses) != 1 || !statuses[0].HasGlobalSettings {
+		t.Fatalf("expected PluginStatus.HasGlobalSettings = true, got %+v", statuses)
+	}
+
+	if err := prov.OnGlobalSettingsChanged(context.Background(), "com.test.wasm.globalcfg", map[string]any{
+		"defaultChannel": "mrpoundsign",
+		"token":          "tok123",
+	}); err != nil {
+		t.Fatalf("OnGlobalSettingsChanged() error = %v", err)
+	}
+
+	if err := prov.Dispatch(context.Background(), plugin.ActionEvent{
+		Type:       plugin.EventKeyDown,
+		Context:    "ctx-say",
+		ActionUUID: "com.test.wasm.globalcfg.say",
+	}); err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	patch, ok := host.latestPatch("ctx-say")
+	if !ok || patch.Subtitle == nil || *patch.Subtitle != "mrpoundsign" {
+		t.Fatalf("expected subtitle updated from pc_on_global_settings to %q, got (%+v, %v)", "mrpoundsign", patch, ok)
+	}
+}
