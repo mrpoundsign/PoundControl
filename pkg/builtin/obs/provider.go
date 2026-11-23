@@ -1347,6 +1347,7 @@ func buildVisualPatch(slot trackedSlot, st obsState, connected bool, flash strin
 		return plugin.VisualPatch{
 			Subtitle: new("Offline"),
 			Color:    new("#64748B"),
+			State:    new(0),
 			Feedback: map[string]any{"value": "Offline"},
 			Flash:    flash,
 		}
@@ -1354,6 +1355,7 @@ func buildVisualPatch(slot trackedSlot, st obsState, connected bool, flash strin
 
 	var sub, col string
 	var fb map[string]any
+	state := 0
 
 	switch slot.actionUUID {
 	case ActionSwitchScene:
@@ -1361,13 +1363,13 @@ func buildVisualPatch(slot trackedSlot, st obsState, connected bool, flash strin
 		target := stringSetting(slot.settings, "target", "program")
 		if target == "preview" {
 			if scene != "" && strings.EqualFold(scene, st.previewScene) {
-				sub, col = "PREVIEW", "#FBBF24"
+				sub, col, state = "PREVIEW", "#FBBF24", 1
 			} else {
 				sub, col = "Ready", "#38BDF8"
 			}
 		} else {
 			if scene != "" && strings.EqualFold(scene, st.programScene) {
-				sub, col = "ACTIVE", "#22C55E"
+				sub, col, state = "ACTIVE", "#22C55E", 1
 			} else {
 				sub, col = "Ready", "#38BDF8"
 			}
@@ -1381,7 +1383,7 @@ func buildVisualPatch(slot trackedSlot, st obsState, connected bool, flash strin
 		case !cached:
 			sub, col = "Ready", "#38BDF8"
 		case enabled:
-			sub, col = "SHOWN", "#22C55E"
+			sub, col, state = "SHOWN", "#22C55E", 1
 		default:
 			sub, col = "HIDDEN", "#64748B"
 		}
@@ -1393,7 +1395,7 @@ func buildVisualPatch(slot trackedSlot, st obsState, connected bool, flash strin
 		case !cached:
 			sub, col = "Ready", "#38BDF8"
 		case muted:
-			sub, col = "MUTED", "#EF4444"
+			sub, col, state = "MUTED", "#EF4444", 1
 		default:
 			sub, col = "LIVE", "#22C55E"
 		}
@@ -1401,7 +1403,7 @@ func buildVisualPatch(slot trackedSlot, st obsState, connected bool, flash strin
 	case ActionAudioVolume:
 		input := stringSetting(slot.settings, "inputName", "")
 		if st.inputMuted[input] {
-			sub, col = "MUTED", "#EF4444"
+			sub, col, state = "MUTED", "#EF4444", 1
 		} else if db, cached := st.inputVolumeDb[input]; cached {
 			sub, col = fmt.Sprintf("%.1f dB", db), "#38BDF8"
 		} else {
@@ -1411,7 +1413,7 @@ func buildVisualPatch(slot trackedSlot, st obsState, connected bool, flash strin
 
 	case ActionStream:
 		if st.streaming {
-			sub, col = "ON AIR", "#EF4444"
+			sub, col, state = "ON AIR", "#EF4444", 1
 		} else {
 			sub, col = "OFFLINE", "#64748B"
 		}
@@ -1419,23 +1421,23 @@ func buildVisualPatch(slot trackedSlot, st obsState, connected bool, flash strin
 	case ActionRecord:
 		switch {
 		case st.recordingPaused:
-			sub, col = "PAUSED", "#FBBF24"
+			sub, col, state = "PAUSED", "#FBBF24", 1
 		case st.recording:
-			sub, col = "REC", "#EF4444"
+			sub, col, state = "REC", "#EF4444", 1
 		default:
 			sub, col = "IDLE", "#64748B"
 		}
 
 	case ActionReplayBuffer:
 		if st.replayActive {
-			sub, col = "ACTIVE", "#22C55E"
+			sub, col, state = "ACTIVE", "#22C55E", 1
 		} else {
 			sub, col = "OFF", "#64748B"
 		}
 
 	case ActionStudioMode:
 		if st.studioMode {
-			sub, col = "STUDIO ON", "#38BDF8"
+			sub, col, state = "STUDIO ON", "#38BDF8", 1
 		} else {
 			sub, col = "OFF", "#64748B"
 		}
@@ -1453,6 +1455,7 @@ func buildVisualPatch(slot trackedSlot, st obsState, connected bool, flash strin
 	return plugin.VisualPatch{
 		Subtitle: new(sub),
 		Color:    new(col),
+		State:    new(state),
 		Feedback: fb,
 		Flash:    flash,
 	}

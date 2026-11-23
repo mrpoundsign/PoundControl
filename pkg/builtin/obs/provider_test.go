@@ -46,8 +46,8 @@ func TestProviderActionsDynamicOptionsAndLiveEvents(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpdateKeypadSlot error = %v", err)
 	}
-	if snap := eng.Snapshot(); snap.Slots["0,0"].Visual.Subtitle != "Offline" {
-		t.Fatalf("expected Offline subtitle while disconnected, got %q", snap.Slots["0,0"].Visual.Subtitle)
+	if snap := eng.Snapshot(); snap.Slots["0,0"].Visual.Subtitle != "Offline" || snap.Slots["0,0"].Visual.State != 0 {
+		t.Fatalf("expected Offline subtitle and State 0 while disconnected, got (%q, %d)", snap.Slots["0,0"].Visual.Subtitle, snap.Slots["0,0"].Visual.State)
 	}
 	if err := eng.PressKey(ctx, deck.Coordinates{Row: 0, Col: 0}); err == nil {
 		t.Fatal("expected error pressing OBS action while offline")
@@ -70,8 +70,8 @@ func TestProviderActionsDynamicOptionsAndLiveEvents(t *testing.T) {
 	}
 
 	// Active scene "Main" is highlighted ACTIVE immediately after hydrateState.
-	if snap := eng.Snapshot(); snap.Slots["0,0"].Visual.Subtitle != "ACTIVE" {
-		t.Fatalf("expected Main scene ACTIVE after connect, got %q", snap.Slots["0,0"].Visual.Subtitle)
+	if snap := eng.Snapshot(); snap.Slots["0,0"].Visual.Subtitle != "ACTIVE" || snap.Slots["0,0"].Visual.State != 1 {
+		t.Fatalf("expected Main scene ACTIVE with State 1 after connect, got (%q, %d)", snap.Slots["0,0"].Visual.Subtitle, snap.Slots["0,0"].Visual.State)
 	}
 
 	// DynamicOptions returns scenes, inputs, and sources.
@@ -138,20 +138,24 @@ func TestProviderActionsDynamicOptionsAndLiveEvents(t *testing.T) {
 		t.Errorf("unexpected scene switch states: 0,0=%q 0,1=%q",
 			snap.Slots["0,0"].Visual.Subtitle, snap.Slots["0,1"].Visual.Subtitle)
 	}
-	if snap.Slots["0,2"].Visual.Subtitle != "HIDDEN" {
-		t.Errorf("expected Webcam HIDDEN after toggle, got %q", snap.Slots["0,2"].Visual.Subtitle)
+	if snap.Slots["0,1"].Visual.State != 1 || snap.Slots["0,0"].Visual.State != 0 {
+		t.Errorf("unexpected scene Visual.State: 0,0=%d 0,1=%d, want 0 and 1",
+			snap.Slots["0,0"].Visual.State, snap.Slots["0,1"].Visual.State)
 	}
-	if snap.Slots["0,3"].Visual.Subtitle != "MUTED" {
-		t.Errorf("expected Mic/Aux MUTED after toggle, got %q", snap.Slots["0,3"].Visual.Subtitle)
+	if snap.Slots["0,2"].Visual.Subtitle != "HIDDEN" || snap.Slots["0,2"].Visual.State != 0 {
+		t.Errorf("expected Webcam HIDDEN with State 0 after toggle, got (%q, %d)", snap.Slots["0,2"].Visual.Subtitle, snap.Slots["0,2"].Visual.State)
 	}
-	if snap.Slots["0,4"].Visual.Subtitle != "ON AIR" {
-		t.Errorf("expected Stream ON AIR, got %q", snap.Slots["0,4"].Visual.Subtitle)
+	if snap.Slots["0,3"].Visual.Subtitle != "MUTED" || snap.Slots["0,3"].Visual.State != 1 {
+		t.Errorf("expected Mic/Aux MUTED with State 1 after toggle, got (%q, %d)", snap.Slots["0,3"].Visual.Subtitle, snap.Slots["0,3"].Visual.State)
 	}
-	if snap.Slots["1,0"].Visual.Subtitle != "REC" {
-		t.Errorf("expected Record REC, got %q", snap.Slots["1,0"].Visual.Subtitle)
+	if snap.Slots["0,4"].Visual.Subtitle != "ON AIR" || snap.Slots["0,4"].Visual.State != 1 {
+		t.Errorf("expected Stream ON AIR with State 1, got (%q, %d)", snap.Slots["0,4"].Visual.Subtitle, snap.Slots["0,4"].Visual.State)
 	}
-	if snap.Slots["1,2"].Visual.Subtitle != "STUDIO ON" {
-		t.Errorf("expected Studio STUDIO ON, got %q", snap.Slots["1,2"].Visual.Subtitle)
+	if snap.Slots["1,0"].Visual.Subtitle != "REC" || snap.Slots["1,0"].Visual.State != 1 {
+		t.Errorf("expected Record REC with State 1, got (%q, %d)", snap.Slots["1,0"].Visual.Subtitle, snap.Slots["1,0"].Visual.State)
+	}
+	if snap.Slots["1,2"].Visual.Subtitle != "STUDIO ON" || snap.Slots["1,2"].Visual.State != 1 {
+		t.Errorf("expected Studio STUDIO ON with State 1, got (%q, %d)", snap.Slots["1,2"].Visual.Subtitle, snap.Slots["1,2"].Visual.State)
 	}
 
 	srv.mu.Lock()

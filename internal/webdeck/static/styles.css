@@ -482,11 +482,11 @@ body[data-view="deck"] .app-shell {
   background: var(--bg-deep);
   border: 1px solid var(--surface-2);
   border-radius: 16px;
-  padding: clamp(0.25rem, 0.2rem + 0.5vmin, 0.75rem);
+  padding: clamp(0.45rem, 0.35rem + 0.6vmin, 0.9rem);
 }
 
 .key-grid {
-  --gap: clamp(2px, 0.6vmin, 12px);
+  --gap: clamp(5px, 0.9vmin, 14px);
   width: min(100%, calc(85dvh * var(--cols) / var(--rows)));
   aspect-ratio: var(--cols) / var(--rows);
   display: grid;
@@ -501,7 +501,7 @@ body[data-view="deck"] .app-shell {
   .key-grid {
     width: auto;
     aspect-ratio: auto;
-    --gap: clamp(2px, min(calc(100cqw / (var(--cols) * 14)), calc(100cqh / (var(--rows) * 14))), 12px);
+    --gap: clamp(5px, min(calc(100cqw / (var(--cols) * 12)), calc(100cqh / (var(--rows) * 12))), 14px);
     --tile-w: calc((100cqw - (var(--cols) - 1) * var(--gap)) / var(--cols));
     --tile-h: calc((100cqh - (var(--rows) - 1) * var(--gap)) / var(--rows));
     --tile-size: max(1px, min(var(--tile-w), var(--tile-h)));
@@ -529,7 +529,7 @@ body[data-view="deck"] .app-shell {
   background: var(--surface-1);
   color: var(--text-primary);
   text-align: center;
-  overflow: hidden;
+  overflow: visible;
   cursor: pointer;
   touch-action: manipulation;
 }
@@ -537,6 +537,100 @@ body[data-view="deck"] .app-shell {
 .key-tile[data-assigned="true"],
 .key-tile[data-autoback="true"] {
   border-color: var(--tile-accent, var(--accent-sky));
+}
+
+.key-tile[data-glow="true"] {
+  z-index: 1;
+  box-shadow:
+    0 0 10px 1px color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 28%, transparent),
+    inset 0 0 12px color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 14%, transparent);
+}
+
+.key-tile[data-glow="true"] .key-accent-bar {
+  box-shadow: 0 0 6px color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 52%, transparent);
+}
+
+.key-tile[data-active="true"] {
+  z-index: 2;
+  border-color: color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 84%, white);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 58%, transparent),
+    0 0 10px 1px color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 42%, transparent),
+    inset 0 0 14px color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 24%, transparent),
+    inset 0 1px 0 color-mix(in oklab, white 22%, transparent);
+}
+
+.key-tile[data-active="true"]:not([data-has-bg-color="true"]):not([data-has-bg-image="true"]) {
+  background: color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 16%, var(--surface-1));
+}
+
+.key-tile[data-active="true"]:not([data-has-bg-color="true"]):not([data-has-bg-image="true"]):hover {
+  background: color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 22%, var(--surface-2));
+}
+
+.key-tile[data-active="true"] .key-accent-bar {
+  background: color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 74%, white);
+  box-shadow:
+    0 0 12px color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 90%, transparent),
+    0 0 4px color-mix(in oklab, white 55%, transparent);
+}
+
+.key-tile[data-active="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.85;
+  box-shadow:
+    0 0 18px 4px color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 68%, transparent),
+    0 0 6px 1px color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 80%, transparent),
+    inset 0 0 24px color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 36%, transparent);
+  background: radial-gradient(
+    ellipse 88% 58% at 50% 6%,
+    color-mix(in oklab, var(--tile-accent, var(--accent-sky)) 34%, transparent),
+    transparent 72%
+  );
+}
+
+@keyframes tile-active-shimmer {
+  0%,
+  100% {
+    opacity: 0.42;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes tile-bar-breathe {
+  0%,
+  100% {
+    opacity: 0.84;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .key-tile[data-active="true"]::after {
+    animation: tile-active-shimmer 2.6s ease-in-out infinite;
+    will-change: opacity;
+  }
+
+  .key-tile[data-active="true"] .key-accent-bar {
+    animation: tile-bar-breathe 2.6s ease-in-out infinite;
+  }
+}
+
+@media (forced-colors: active) {
+  .key-tile[data-active="true"] {
+    border-color: Highlight;
+    outline: 2px solid Highlight;
+    outline-offset: -3px;
+  }
 }
 
 .key-tile[data-has-bg-color="true"] {
@@ -551,6 +645,7 @@ body[data-view="deck"] .app-shell {
   inset: 0;
   width: 100%;
   height: 100%;
+  border-radius: inherit;
   object-fit: cover;
   z-index: 0;
   pointer-events: none;
@@ -564,6 +659,7 @@ body[data-view="deck"] .app-shell {
   content: "";
   position: absolute;
   inset: 0;
+  border-radius: inherit;
   background: rgb(0 0 0 / 0.45);
   z-index: 1;
   pointer-events: none;
@@ -627,6 +723,7 @@ body[data-view="deck"] .app-shell {
   font-weight: 700;
   line-height: 1.12;
   overflow-wrap: break-word;
+  overflow: hidden;
   max-width: 100%;
 }
 
@@ -635,6 +732,7 @@ body[data-view="deck"] .app-shell {
   font-weight: 700;
   color: var(--tile-sub-fg, var(--tile-accent, var(--accent-sky)));
   line-height: 1.1;
+  overflow: hidden;
   max-width: 100%;
 }
 

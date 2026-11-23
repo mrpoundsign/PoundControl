@@ -29,6 +29,7 @@ type ClientSlot struct {
 	BackgroundColor    string `json:"bgColor,omitempty"`
 	BackgroundImageURL string `json:"bgImageUrl,omitempty"`
 	ImageURL           string `json:"imageUrl,omitempty"`
+	State              int    `json:"state,omitempty"`
 	Flash              string `json:"flash,omitempty"`
 }
 
@@ -148,6 +149,7 @@ func buildClientSnapshot(snap app.Snapshot, mapImage func(string) string) Client
 			BackgroundColor:    r.Visual.BackgroundColor,
 			BackgroundImageURL: resolveClientImageURL(r.Visual.BackgroundImage, mapImage),
 			ImageURL:           resolveClientImageURL(r.Visual.ImageURI, mapImage),
+			State:              r.Visual.State,
 			Flash:              r.Visual.Flash,
 		}
 	}

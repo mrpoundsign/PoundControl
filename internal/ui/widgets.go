@@ -8,6 +8,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -39,7 +40,11 @@ func parseHexColor(hex string, fallback color.RGBA) color.RGBA {
 	}
 }
 
-const dragActivationThresholdPx = 10
+const (
+	dragActivationThresholdPx = 10
+	tileGlowMargin            = float32(4.0)
+	maxTileTitleLines         = 3
+)
 
 func widgetAbsolutePos(obj fyne.CanvasObject, local, fallbackAbs fyne.Position) fyne.Position {
 	if !fallbackAbs.IsZero() {
@@ -66,12 +71,15 @@ type deckTileWidget struct {
 	flash        string
 	imageURI     string
 	decodedImg   image.Image
+	state        int
+	shimmerPhase float64
 	assigned     bool
 	autoBack     bool
 	selected     bool
 	hovered      bool
 	dropTarget   bool
 	moveSource   bool
+	renderer     *deckTileRenderer
 
 	dragAccumX  float32
 	dragAccumY  float32
@@ -110,6 +118,17 @@ func (t *deckTileWidget) SetSelected(selected bool) {
 	t.Refresh()
 }
 
+func (t *deckTileWidget) isActive() bool {
+	return (t.assigned || t.autoBack) && t.state > 0
+}
+
+func (t *deckTileWidget) setShimmerPhase(phase float64) {
+	t.shimmerPhase = phase
+	if t.renderer != nil {
+		t.renderer.applyShimmer()
+	}
+}
+
 func (t *deckTileWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 	if rendered == nil {
 		t.title = "Empty"
@@ -122,6 +141,7 @@ func (t *deckTileWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 		t.flash = ""
 		t.imageURI = ""
 		t.decodedImg = nil
+		t.state = 0
 		t.assigned = false
 		t.autoBack = false
 	} else {
@@ -157,6 +177,7 @@ func (t *deckTileWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 				t.decodedImg = nil
 			}
 		}
+		t.state = rendered.Visual.State
 		t.assigned = rendered.Config != nil
 		t.autoBack = rendered.AutoBack
 	}
@@ -221,21 +242,27 @@ func (t *deckTileWidget) MouseOut() {
 
 func (t *deckTileWidget) CreateRenderer() fyne.WidgetRenderer {
 	bg := canvas.NewRectangle(ColorDarkCharcoal)
-	bg.CornerRadius = 10
+	bg.CornerRadius = 9
 	bg.StrokeColor = ColorSlateBorder
 	bg.StrokeWidth = 1.5
 
 	bgImg := canvas.NewImageFromImage(t.decodedBgImg)
 	bgImg.FillMode = canvas.ImageFillStretch
 	bgImg.ScaleMode = canvas.ImageScaleSmooth
+	bgImg.CornerRadius = 7
 	bgImg.SetMinSize(fyne.NewSize(0, 0))
 	if t.decodedBgImg == nil {
 		bgImg.Hide()
 	}
 
 	scrim := canvas.NewRectangle(color.RGBA{R: 10, G: 10, B: 12, A: 125})
-	scrim.CornerRadius = 8
+	scrim.CornerRadius = 7
 	scrim.Hide()
+
+	innerRim := canvas.NewRectangle(color.Transparent)
+	innerRim.CornerRadius = 7.5
+	innerRim.StrokeWidth = 2.5
+	innerRim.Hide()
 
 	accentBar := canvas.NewRectangle(ColorSlateBorder)
 	accentBar.CornerRadius = 2
@@ -248,10 +275,18 @@ func (t *deckTileWidget) CreateRenderer() fyne.WidgetRenderer {
 		artImg.Hide()
 	}
 
-	titleTxt := canvas.NewText(t.title, ColorChromeWhite)
-	titleTxt.TextSize = 12
-	titleTxt.TextStyle = fyne.TextStyle{Bold: true}
-	titleTxt.Alignment = fyne.TextAlignCenter
+	var titleLines [maxTileTitleLines]*canvas.Text
+	for i := range maxTileTitleLines {
+		line := canvas.NewText("", ColorChromeWhite)
+		line.TextSize = 12
+		line.TextStyle = fyne.TextStyle{Bold: true}
+		line.Alignment = fyne.TextAlignCenter
+		if i > 0 {
+			line.Hide()
+		}
+		titleLines[i] = line
+	}
+	titleLines[0].Text = t.title
 
 	subTxt := canvas.NewText(t.subtitle, ColorSkyBlue)
 	subTxt.TextSize = 12
@@ -262,49 +297,80 @@ func (t *deckTileWidget) CreateRenderer() fyne.WidgetRenderer {
 	coordTxt.TextSize = 10
 	coordTxt.Alignment = fyne.TextAlignCenter
 
-	return &deckTileRenderer{
+	r := &deckTileRenderer{
 		tile:           t,
 		bg:             bg,
 		bgImg:          bgImg,
 		scrim:          scrim,
+		innerRim:       innerRim,
 		accentBar:      accentBar,
 		artImg:         artImg,
-		titleTxt:       titleTxt,
+		titleLines:     titleLines,
 		subTxt:         subTxt,
 		coordTxt:       coordTxt,
 		lastImageURI:   t.imageURI,
 		hasArt:         t.decodedImg != nil,
 		lastBgImageURI: t.bgImageURI,
 		hasBgImg:       t.decodedBgImg != nil,
+		accentCol:      ColorSlateBorder,
+		baseBgCol:      ColorDarkCharcoal,
 	}
+	t.renderer = r
+	return r
 }
 
 type deckTileRenderer struct {
-	tile           *deckTileWidget
-	bg             *canvas.Rectangle
-	bgImg          *canvas.Image
-	scrim          *canvas.Rectangle
-	accentBar      *canvas.Rectangle
-	artImg         *canvas.Image
-	titleTxt       *canvas.Text
-	subTxt         *canvas.Text
-	coordTxt       *canvas.Text
-	lastImageURI   string
-	hasArt         bool
-	lastBgImageURI string
-	hasBgImg       bool
+	tile             *deckTileWidget
+	bg               *canvas.Rectangle
+	bgImg            *canvas.Image
+	scrim            *canvas.Rectangle
+	innerRim         *canvas.Rectangle
+	accentBar        *canvas.Rectangle
+	artImg           *canvas.Image
+	titleLines       [maxTileTitleLines]*canvas.Text
+	subTxt           *canvas.Text
+	coordTxt         *canvas.Text
+	lastImageURI     string
+	hasArt           bool
+	lastBgImageURI   string
+	hasBgImg         bool
+	accentCol        color.RGBA
+	baseBgCol        color.RGBA
+	hasCustomBg      bool
+	hasCustomOrImgBg bool
+	activeStroke     bool
 }
 
 func (r *deckTileRenderer) Layout(size fyne.Size) {
-	r.bg.Move(fyne.NewPos(0, 0))
-	r.bg.Resize(size)
+	effSize := size
+	minSz := r.MinSize()
+	if effSize.Width <= 0 {
+		effSize.Width = minSz.Width
+	}
+	if effSize.Height <= 0 {
+		effSize.Height = minSz.Height
+	}
+
+	drawW := max(float32(0), size.Width-tileGlowMargin*2)
+	drawH := max(float32(0), size.Height-tileGlowMargin*2)
+	bodyPos := fyne.NewPos(tileGlowMargin, tileGlowMargin)
+	bodySz := fyne.NewSize(
+		max(float32(16), effSize.Width-tileGlowMargin*2),
+		max(float32(16), effSize.Height-tileGlowMargin*2),
+	)
+	r.bg.Move(bodyPos)
+	r.bg.Resize(fyne.NewSize(drawW, drawH))
+
+	rimInset := float32(1.5)
+	r.innerRim.Move(fyne.NewPos(bodyPos.X+rimInset, bodyPos.Y+rimInset))
+	r.innerRim.Resize(fyne.NewSize(max(float32(0), drawW-rimInset*2), max(float32(0), drawH-rimInset*2)))
 
 	hasBgImg := r.tile.decodedBgImg != nil
 	hasText := strings.TrimSpace(r.tile.title) != "" || strings.TrimSpace(r.tile.subtitle) != ""
 	if hasBgImg {
-		pad := float32(2)
-		bgPos := fyne.NewPos(pad, pad)
-		bgSz := fyne.NewSize(max(float32(8), size.Width-pad*2), max(float32(8), size.Height-pad*2))
+		pad := float32(1.5)
+		bgPos := fyne.NewPos(bodyPos.X+pad, bodyPos.Y+pad)
+		bgSz := fyne.NewSize(max(float32(8), drawW-pad*2), max(float32(8), drawH-pad*2))
 		r.bgImg.Move(bgPos)
 		r.bgImg.Resize(bgSz)
 		r.bgImg.Show()
@@ -320,21 +386,23 @@ func (r *deckTileRenderer) Layout(size fyne.Size) {
 		r.scrim.Hide()
 	}
 
-	barW := max(float32(20), size.Width-24)
-	r.accentBar.Move(fyne.NewPos(12, 7))
+	barW := max(float32(18), bodySz.Width-22)
+	r.accentBar.Move(fyne.NewPos(bodyPos.X+(bodySz.Width-barW)/2, bodyPos.Y+6))
 	r.accentBar.Resize(fyne.NewSize(barW, 3))
 
 	hasArt := r.tile.decodedImg != nil
 	fullArt := (hasArt || hasBgImg) && !hasText
 	if fullArt {
 		r.accentBar.Hide()
-		r.titleTxt.Hide()
+		for _, line := range r.titleLines {
+			line.Hide()
+		}
 		r.subTxt.Hide()
 		r.coordTxt.Hide()
 		if hasArt {
-			pad := float32(6)
-			r.artImg.Move(fyne.NewPos(pad, pad))
-			r.artImg.Resize(fyne.NewSize(max(float32(16), size.Width-pad*2), max(float32(16), size.Height-pad*2)))
+			pad := float32(5)
+			r.artImg.Move(fyne.NewPos(bodyPos.X+pad, bodyPos.Y+pad))
+			r.artImg.Resize(fyne.NewSize(max(float32(16), drawW-pad*2), max(float32(16), drawH-pad*2)))
 			r.artImg.Show()
 		} else {
 			r.artImg.Hide()
@@ -342,77 +410,150 @@ func (r *deckTileRenderer) Layout(size fyne.Size) {
 		return
 	}
 
-	r.titleTxt.Show()
-	r.coordTxt.Show()
-	titleSize := r.titleTxt.MinSize()
-	coordSize := r.coordTxt.MinSize()
+	textMaxW := max(float32(16), bodySz.Width-10)
+	textX := bodyPos.X + 5
 
-	if hasArt {
-		iconRatio := float32(0.36)
-		if r.tile.subtitle != "" {
-			iconRatio = 0.28
-		}
-		iconSize := min(float32(34), max(float32(20), size.Height*iconRatio))
-		r.artImg.Move(fyne.NewPos((size.Width-iconSize)/2, 13))
-		r.artImg.Resize(fyne.NewSize(iconSize, iconSize))
-		r.artImg.Show()
-
-		startY := 13 + iconSize + 3
-		if r.tile.subtitle != "" {
-			subSize := r.subTxt.MinSize()
-			r.titleTxt.Resize(fyne.NewSize(size.Width-12, titleSize.Height))
-			r.titleTxt.Move(fyne.NewPos(6, startY))
-			r.subTxt.Resize(fyne.NewSize(size.Width-12, subSize.Height))
-			r.subTxt.Move(fyne.NewPos(6, startY+titleSize.Height+2))
-			r.coordTxt.Resize(fyne.NewSize(size.Width-12, coordSize.Height))
-			r.coordTxt.Move(fyne.NewPos(6, startY+titleSize.Height+2+subSize.Height+2))
-			r.subTxt.Show()
-		} else {
-			r.subTxt.Hide()
-			r.titleTxt.Resize(fyne.NewSize(size.Width-12, titleSize.Height))
-			r.titleTxt.Move(fyne.NewPos(6, startY))
-			r.coordTxt.Resize(fyne.NewSize(size.Width-12, coordSize.Height))
-			r.coordTxt.Move(fyne.NewPos(6, startY+titleSize.Height+2))
-		}
-		return
-	}
-
-	r.artImg.Hide()
-	if r.tile.subtitle != "" {
-		subSize := r.subTxt.MinSize()
-		totalH := titleSize.Height + 3 + subSize.Height + 4 + coordSize.Height
-		startY := max(float32(14), (size.Height-totalH)/2+2)
-		r.titleTxt.Resize(fyne.NewSize(size.Width-12, titleSize.Height))
-		r.titleTxt.Move(fyne.NewPos(6, startY))
-		r.subTxt.Resize(fyne.NewSize(size.Width-12, subSize.Height))
-		r.subTxt.Move(fyne.NewPos(6, startY+titleSize.Height+3))
-		r.coordTxt.Resize(fyne.NewSize(size.Width-12, coordSize.Height))
-		r.coordTxt.Move(fyne.NewPos(6, startY+titleSize.Height+3+subSize.Height+4))
-		r.subTxt.Show()
-	} else {
-		r.subTxt.Hide()
-		totalH := titleSize.Height + 4 + coordSize.Height
-		startY := max(float32(14), (size.Height-totalH)/2+2)
-		r.titleTxt.Resize(fyne.NewSize(size.Width-12, titleSize.Height))
-		r.titleTxt.Move(fyne.NewPos(6, startY))
-		r.coordTxt.Resize(fyne.NewSize(size.Width-12, coordSize.Height))
-		r.coordTxt.Move(fyne.NewPos(6, startY+titleSize.Height+4))
-	}
-}
-
-func (r *deckTileRenderer) MinSize() fyne.Size {
-	return fyne.NewSize(96, 92)
-}
-
-func (r *deckTileRenderer) Refresh() {
-	r.titleTxt.Text = r.tile.title
-	r.subTxt.Text = r.tile.subtitle
 	coordText := fmt.Sprintf("(%d, %d)", r.tile.coords.Row, r.tile.coords.Col)
 	if r.tile.hotkey != "" {
 		coordText += " • " + r.tile.hotkey
 	}
-	r.coordTxt.Text = coordText
+	r.coordTxt.Text = truncateCanvasText(coordText, textMaxW, 10, fyne.TextStyle{})
+	r.subTxt.Text = truncateCanvasText(r.tile.subtitle, textMaxW, 12, fyne.TextStyle{Bold: true})
 
+	lineH := fyne.MeasureText("Ag", 12, fyne.TextStyle{Bold: true}).Height
+	lineGap := float32(1)
+	subSize := r.subTxt.MinSize()
+	coordSize := r.coordTxt.MinSize()
+
+	topY := bodyPos.Y + 12
+	if hasArt {
+		iconRatio := float32(0.34)
+		if r.tile.subtitle != "" {
+			iconRatio = 0.26
+		}
+		iconSize := min(float32(32), max(float32(18), bodySz.Height*iconRatio))
+		r.artImg.Move(fyne.NewPos(bodyPos.X+(bodySz.Width-iconSize)/2, bodyPos.Y+11))
+		r.artImg.Resize(fyne.NewSize(iconSize, iconSize))
+		r.artImg.Show()
+		topY = bodyPos.Y + 11 + iconSize + 3
+	} else {
+		r.artImg.Hide()
+	}
+
+	bottomY := bodyPos.Y + bodySz.Height - 4
+	belowTitleH := float32(3) + coordSize.Height
+	if r.tile.subtitle != "" {
+		belowTitleH += subSize.Height + 2
+	}
+	availForTitle := bottomY - topY - belowTitleH
+	maxLines := maxTileTitleLines
+	if availForTitle < lineH*float32(maxTileTitleLines)+lineGap*float32(maxTileTitleLines-1) {
+		maxLines = max(1, int((availForTitle+lineGap)/(lineH+lineGap)))
+	}
+	maxLines = min(maxTileTitleLines, max(1, maxLines))
+
+	wrapped := wrapCanvasText(r.tile.title, textMaxW, 12, fyne.TextStyle{Bold: true}, maxLines)
+	var titleBlockH float32
+	if len(wrapped) > 0 {
+		titleBlockH = float32(len(wrapped))*lineH + float32(len(wrapped)-1)*lineGap
+	}
+
+	totalH := titleBlockH + coordSize.Height
+	if r.tile.subtitle != "" {
+		totalH += subSize.Height + 3
+		if titleBlockH > 0 {
+			totalH += 3
+		}
+	} else if titleBlockH > 0 {
+		totalH += 4
+	}
+
+	startY := topY
+	if !hasArt {
+		startY = max(topY, topY+(bottomY-topY-totalH)/2)
+	}
+
+	y := startY
+	for i := range maxTileTitleLines {
+		if i < len(wrapped) {
+			r.titleLines[i].Text = wrapped[i]
+			r.titleLines[i].Resize(fyne.NewSize(textMaxW, lineH))
+			r.titleLines[i].Move(fyne.NewPos(textX, y))
+			r.titleLines[i].Show()
+			y += lineH + lineGap
+		} else {
+			r.titleLines[i].Text = ""
+			r.titleLines[i].Hide()
+		}
+	}
+	if len(wrapped) > 0 {
+		y -= lineGap
+	}
+
+	r.coordTxt.Show()
+	if r.tile.subtitle != "" {
+		if len(wrapped) > 0 {
+			y += 3
+		}
+		r.subTxt.Resize(fyne.NewSize(textMaxW, subSize.Height))
+		r.subTxt.Move(fyne.NewPos(textX, y))
+		r.subTxt.Show()
+		y += subSize.Height + 3
+	} else {
+		r.subTxt.Hide()
+		if len(wrapped) > 0 {
+			y += 4
+		}
+	}
+	r.coordTxt.Resize(fyne.NewSize(textMaxW, coordSize.Height))
+	r.coordTxt.Move(fyne.NewPos(textX, y))
+}
+
+func (r *deckTileRenderer) MinSize() fyne.Size {
+	return fyne.NewSize(100, 96)
+}
+
+func (r *deckTileRenderer) applyShimmer() {
+	if !r.tile.isActive() {
+		return
+	}
+	r.applyShimmerLocked(true)
+}
+
+func (r *deckTileRenderer) applyShimmerLocked(refreshObjects bool) {
+	s := shimmerIntensity(r.tile.shimmerPhase)
+	r.bg.Shadow = canvas.Shadow{
+		Variant:    canvas.DropShadow,
+		Color:      withAlpha(r.accentCol, uint8(math.Round(135+95*s))),
+		BlurRadius: float32(11.0 + 6.0*s),
+		Spread:     float32(1.5 + 1.5*s),
+	}
+	if !r.hasCustomBg {
+		r.bg.FillColor = blendRGBA(r.baseBgCol, r.accentCol, 0.11+0.08*s)
+	}
+	if r.activeStroke {
+		r.bg.StrokeColor = blendRGBA(r.accentCol, ColorChromeWhite, 0.14+0.26*s)
+	}
+	rimAlpha := 55.0 + 60.0*s
+	if r.hasCustomOrImgBg {
+		rimAlpha *= 0.55
+	}
+	r.innerRim.StrokeColor = withAlpha(r.accentCol, uint8(math.Round(rimAlpha)))
+	r.accentBar.FillColor = blendRGBA(r.accentCol, ColorChromeWhite, 0.20+0.32*s)
+	r.accentBar.Shadow = canvas.Shadow{
+		Variant:    canvas.BoxShadow,
+		Color:      withAlpha(r.accentCol, uint8(math.Round(150+95*s))),
+		BlurRadius: float32(10.0 + 6.0*s),
+		Spread:     float32(1.0 + 1.2*s),
+	}
+	if refreshObjects {
+		r.bg.Refresh()
+		r.innerRim.Refresh()
+		r.accentBar.Refresh()
+	}
+}
+
+func (r *deckTileRenderer) Refresh() {
 	hasDecoded := r.tile.decodedImg != nil
 	if r.lastImageURI != r.tile.imageURI || r.hasArt != hasDecoded {
 		r.artImg.Image = r.tile.decodedImg
@@ -435,22 +576,34 @@ func (r *deckTileRenderer) Refresh() {
 	} else if r.tile.assigned || r.tile.autoBack {
 		accentCol = ColorSkyBlue
 	}
-	r.accentBar.FillColor = accentCol
+	r.accentCol = accentCol
+
+	active := r.tile.isActive()
+	ambient := !active && (r.tile.assigned || r.tile.autoBack) && isChromaticColor(accentCol)
+
 	if !fullArt && (r.tile.assigned || r.tile.autoBack) {
 		r.accentBar.Show()
 	} else {
 		r.accentBar.Hide()
 	}
 
-	hasCustomBg := (r.tile.assigned || r.tile.autoBack) && r.tile.bgColorHex != ""
-	fillCol := ColorDarkCharcoal
-	if hasCustomBg {
+	r.hasCustomBg = (r.tile.assigned || r.tile.autoBack) && r.tile.bgColorHex != ""
+	r.hasCustomOrImgBg = r.hasCustomBg || hasBgImg
+
+	r.baseBgCol = ColorDarkCharcoal
+	if !r.hasCustomBg && (r.tile.dropTarget || r.tile.moveSource || r.tile.selected || r.tile.flash != "" || r.tile.hovered) {
+		r.baseBgCol = ColorElevatedSlate
+	}
+
+	fillCol := r.baseBgCol
+	if r.hasCustomBg {
 		fillCol = parseHexColor(r.tile.bgColorHex, ColorDarkCharcoal)
-	} else if r.tile.dropTarget || r.tile.moveSource || r.tile.selected || r.tile.flash != "" || r.tile.hovered {
-		fillCol = ColorElevatedSlate
+	} else if active {
+		fillCol = blendRGBA(r.baseBgCol, accentCol, 0.14)
 	}
 	r.bg.FillColor = fillCol
 
+	r.activeStroke = false
 	switch {
 	case r.tile.dropTarget:
 		r.bg.StrokeColor = ColorSkyBlue
@@ -467,6 +620,10 @@ func (r *deckTileRenderer) Refresh() {
 	case r.tile.flash == "alert":
 		r.bg.StrokeColor = ColorError
 		r.bg.StrokeWidth = 2.0
+	case active:
+		r.activeStroke = true
+		r.bg.StrokeColor = blendRGBA(accentCol, ColorChromeWhite, 0.22)
+		r.bg.StrokeWidth = 2.2
 	case r.tile.hovered:
 		r.bg.StrokeColor = ColorSecondarySlate
 		r.bg.StrokeWidth = 1.5
@@ -479,17 +636,49 @@ func (r *deckTileRenderer) Refresh() {
 	}
 
 	switch {
+	case active:
+		r.innerRim.Show()
+		r.applyShimmerLocked(false)
+	case ambient:
+		r.bg.Shadow = canvas.Shadow{
+			Variant:    canvas.DropShadow,
+			Color:      withAlpha(accentCol, 95),
+			BlurRadius: 8,
+			Spread:     0.5,
+		}
+		r.accentBar.FillColor = accentCol
+		r.accentBar.Shadow = canvas.Shadow{
+			Variant:    canvas.BoxShadow,
+			Color:      withAlpha(accentCol, 110),
+			BlurRadius: 6,
+			Spread:     0.5,
+		}
+		rimAlpha := uint8(34)
+		if r.hasCustomOrImgBg {
+			rimAlpha = 20
+		}
+		r.innerRim.StrokeColor = withAlpha(accentCol, rimAlpha)
+		r.innerRim.Show()
+	default:
+		r.bg.Shadow = canvas.Shadow{}
+		r.accentBar.FillColor = accentCol
+		r.accentBar.Shadow = canvas.Shadow{}
+		r.innerRim.Hide()
+	}
+
+	var titleCol color.RGBA
+	switch {
 	case hasBgImg:
-		r.titleTxt.Color = ColorChromeWhite
+		titleCol = ColorChromeWhite
 		r.coordTxt.Color = ColorSecondarySlate
 		if contrastRatio(accentCol, ColorDarkCharcoal) < 3.0 {
 			r.subTxt.Color = ColorChromeWhite
 		} else {
 			r.subTxt.Color = accentCol
 		}
-	case hasCustomBg:
+	case r.hasCustomBg:
 		fg := contrastTextColor(fillCol)
-		r.titleTxt.Color = fg
+		titleCol = fg
 		r.coordTxt.Color = secondaryContrastTextColor(fillCol)
 		if contrastRatio(accentCol, fillCol) < 3.0 {
 			r.subTxt.Color = fg
@@ -498,9 +687,9 @@ func (r *deckTileRenderer) Refresh() {
 		}
 	default:
 		if r.tile.assigned || r.tile.autoBack || r.tile.dropTarget || r.tile.moveSource || r.tile.selected || r.tile.flash != "" || r.tile.hovered {
-			r.titleTxt.Color = ColorChromeWhite
+			titleCol = ColorChromeWhite
 		} else {
-			r.titleTxt.Color = ColorSecondarySlate
+			titleCol = ColorSecondarySlate
 		}
 		switch {
 		case r.tile.dropTarget || r.tile.selected:
@@ -514,23 +703,45 @@ func (r *deckTileRenderer) Refresh() {
 		}
 		r.subTxt.Color = accentCol
 	}
+	for _, line := range r.titleLines {
+		line.Color = titleCol
+	}
 
 	r.Layout(r.tile.Size())
 	r.bg.Refresh()
 	r.bgImg.Refresh()
 	r.scrim.Refresh()
+	r.innerRim.Refresh()
 	r.accentBar.Refresh()
 	r.artImg.Refresh()
-	r.titleTxt.Refresh()
+	for _, line := range r.titleLines {
+		line.Refresh()
+	}
 	r.subTxt.Refresh()
 	r.coordTxt.Refresh()
 }
 
 func (r *deckTileRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{r.bg, r.bgImg, r.scrim, r.accentBar, r.artImg, r.titleTxt, r.subTxt, r.coordTxt}
+	return []fyne.CanvasObject{
+		r.bg,
+		r.bgImg,
+		r.scrim,
+		r.innerRim,
+		r.accentBar,
+		r.artImg,
+		r.titleLines[0],
+		r.titleLines[1],
+		r.titleLines[2],
+		r.subTxt,
+		r.coordTxt,
+	}
 }
 
-func (r *deckTileRenderer) Destroy() {}
+func (r *deckTileRenderer) Destroy() {
+	if r.tile != nil && r.tile.renderer == r {
+		r.tile.renderer = nil
+	}
+}
 
 type dialFaceWidget struct {
 	widget.BaseWidget
@@ -786,12 +997,19 @@ func (r *dialFaceRenderer) Layout(size fyne.Size) {
 	r.ring.Resize(fyne.NewSize(ringSize, ringSize))
 	r.ring.Move(fyne.NewPos((size.Width-ringSize)/2, ringY))
 
+	textMaxW := max(float32(16), size.Width-8)
+	if size.Width <= 0 {
+		textMaxW = r.MinSize().Width - 8
+	}
+	r.titleTxt.Text = truncateCanvasText(r.face.title, textMaxW, 11, fyne.TextStyle{Bold: true})
+	r.valTxt.Text = truncateCanvasText(r.face.value, textMaxW, 11, fyne.TextStyle{Bold: true})
+
 	titleSize := r.titleTxt.MinSize()
-	r.titleTxt.Resize(fyne.NewSize(size.Width-8, titleSize.Height))
+	r.titleTxt.Resize(fyne.NewSize(textMaxW, titleSize.Height))
 	r.titleTxt.Move(fyne.NewPos(4, titleY))
 
 	valSize := r.valTxt.MinSize()
-	r.valTxt.Resize(fyne.NewSize(size.Width-8, valSize.Height))
+	r.valTxt.Resize(fyne.NewSize(textMaxW, valSize.Height))
 	r.valTxt.Move(fyne.NewPos(4, titleY+2+titleSize.Height))
 
 	if r.face.hasIndicator {
@@ -930,6 +1148,10 @@ type deckSurfaceView struct {
 	onDialDelta func(int, int)
 	onDialPress func(int)
 	edit        surfaceEditHandlers
+
+	shimmerAnim    *fyne.Animation
+	shimmerRunning bool
+	closed         bool
 }
 
 func newDeckSurfaceView(
@@ -1094,6 +1316,42 @@ func (v *deckSurfaceView) Object() fyne.CanvasObject {
 	return v.root
 }
 
+func (v *deckSurfaceView) syncShimmer(anyActive bool) {
+	if v.closed || !anyActive {
+		if v.shimmerRunning && v.shimmerAnim != nil {
+			v.shimmerAnim.Stop()
+			v.shimmerRunning = false
+		}
+		return
+	}
+	if v.shimmerAnim == nil {
+		v.shimmerAnim = fyne.NewAnimation(2600*time.Millisecond, func(done float32) {
+			if v.closed {
+				return
+			}
+			for _, tile := range v.tiles {
+				if tile != nil && tile.isActive() {
+					tile.setShimmerPhase(float64(done))
+				}
+			}
+		})
+		v.shimmerAnim.Curve = fyne.AnimationLinear
+		v.shimmerAnim.RepeatCount = fyne.AnimationRepeatForever
+	}
+	if !v.shimmerRunning {
+		v.shimmerRunning = true
+		v.shimmerAnim.Start()
+	}
+}
+
+func (v *deckSurfaceView) Close() {
+	v.closed = true
+	if v.shimmerRunning && v.shimmerAnim != nil {
+		v.shimmerAnim.Stop()
+		v.shimmerRunning = false
+	}
+}
+
 func (v *deckSurfaceView) ApplySnapshot(
 	snap app.Snapshot,
 	hasSelection bool,
@@ -1105,6 +1363,7 @@ func (v *deckSurfaceView) ApplySnapshot(
 		v.rebuildGeometry(snap.Grid, snap.Dials)
 	}
 
+	anyActive := false
 	for row := range snap.Grid.Rows {
 		for col := range snap.Grid.Cols {
 			c := deck.Coordinates{Row: row, Col: col}
@@ -1120,8 +1379,12 @@ func (v *deckSurfaceView) ApplySnapshot(
 			}
 			selected := hasSelection && selCtrl == deck.ControllerKeypad && selKey == c
 			tile.ApplySlot(rPtr, selected)
+			if tile.isActive() {
+				anyActive = true
+			}
 		}
 	}
+	v.syncShimmer(anyActive)
 
 	for i, dc := range v.dials {
 		var rPtr *app.RenderedSlot

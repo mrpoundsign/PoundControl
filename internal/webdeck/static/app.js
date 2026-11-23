@@ -38,6 +38,11 @@
     const lb = relLum(b);
     return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
   }
+  function isChromaticHex(hex) {
+    const rgb = parseHexRGB(hex);
+    if (!rgb) return false;
+    return Math.max(rgb[0], rgb[1], rgb[2]) - Math.min(rgb[0], rgb[1], rgb[2]) >= 48;
+  }
   const nativeBridge =
     window.PoundControlNative && typeof window.PoundControlNative.isNativeApp === 'function'
       ? window.PoundControlNative
@@ -105,6 +110,8 @@
   let lastSnapshot = null;
   let expectedHostFp = '';
   let activePair = null;
+  let renderedGridKey = '';
+  let renderedTiles = [];
 
   function storageKey() {
     return 'poundcontrol_auth_v2_' + window.location.origin;
@@ -532,15 +539,26 @@
       els.folderBanner.hidden = true;
     }
 
-    const keyNodes = [];
+    const gridKey = rows + 'x' + cols;
+    if (gridKey !== renderedGridKey || renderedTiles.length !== rows * cols) {
+      const nextTiles = [];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          nextTiles.push(createKeyTile(r, c));
+        }
+      }
+      renderedGridKey = gridKey;
+      renderedTiles = nextTiles;
+      els.keyGrid.replaceChildren(...renderedTiles);
+    }
+
     const slots = snap.slots || {};
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const slot = slots[r + ',' + c] || null;
-        keyNodes.push(buildKeyTile(r, c, slot));
+        updateKeyTile(renderedTiles[r * cols + c], r, c, slot);
       }
     }
-    els.keyGrid.replaceChildren(...keyNodes);
 
     const dialCount = snap.dials || 0;
     if (dialCount > 0 && Array.isArray(snap.dialSlots)) {
@@ -553,98 +571,10 @@
     }
   }
 
-  function buildKeyTile(row, col, slot) {
+  function createKeyTile(row, col) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'key-tile';
-
-    const assigned = Boolean(slot && slot.assigned);
-    const autoBack = Boolean(slot && slot.autoBack);
-    const title = slot ? (slot.title || '') : '';
-    const subtitle = slot ? (slot.subtitle || '') : '';
-    const imageUrl = slot ? (slot.imageUrl || '') : '';
-    const bgImageUrl = slot ? (slot.bgImageUrl || '') : '';
-    const flash = slot ? (slot.flash || '') : '';
-    const color = slot && HEX_RE.test(slot.color || '') ? slot.color : '';
-    const bgColor = slot && HEX_RE.test(slot.bgColor || '') ? slot.bgColor : '';
-
-    btn.dataset.assigned = String(assigned);
-    btn.dataset.autoback = String(autoBack);
-    if (flash) {
-      btn.dataset.flash = flash;
-    }
-    if (color) {
-      btn.style.setProperty('--tile-accent', color);
-    }
-    if (bgColor && (assigned || autoBack)) {
-      btn.dataset.hasBgColor = 'true';
-      btn.style.setProperty('--tile-bg', bgColor);
-      const fg = contrastFgHex(bgColor);
-      if (fg) {
-        btn.style.setProperty('--tile-fg', fg);
-      }
-      const accentEff = color || '#38BDF8';
-      if (hexContrastRatio(accentEff, bgColor) < 3.0 && fg) {
-        btn.style.setProperty('--tile-sub-fg', fg);
-      }
-    }
-    if (bgImageUrl && (assigned || autoBack)) {
-      btn.dataset.hasBgImage = 'true';
-    }
-
-    const fullArt = Boolean((imageUrl || bgImageUrl) && title.trim() === '' && subtitle.trim() === '');
-    if (fullArt) {
-      btn.dataset.fullart = 'true';
-    }
-
-    const ariaLabel = title || subtitle || (assigned ? ('Action key row ' + (row + 1) + ' column ' + (col + 1)) : ('Empty key row ' + (row + 1) + ' column ' + (col + 1)));
-    btn.setAttribute('aria-label', ariaLabel);
-
-    if (bgImageUrl && (assigned || autoBack)) {
-      const bgImg = document.createElement('img');
-      bgImg.className = 'key-bg-img';
-      bgImg.alt = '';
-      bgImg.draggable = false;
-      bgImg.src = bgImageUrl;
-      btn.appendChild(bgImg);
-    }
-
-    if (!fullArt && (assigned || autoBack)) {
-      const bar = document.createElement('span');
-      bar.className = 'key-accent-bar';
-      bar.setAttribute('aria-hidden', 'true');
-      btn.appendChild(bar);
-    }
-
-    if (imageUrl) {
-      const img = document.createElement('img');
-      img.className = 'key-art';
-      img.alt = '';
-      img.draggable = false;
-      img.src = imageUrl;
-      btn.appendChild(img);
-    }
-
-    if (!fullArt) {
-      if (assigned || autoBack) {
-        const titleEl = document.createElement('span');
-        titleEl.className = 'key-title';
-        titleEl.textContent = title || 'Action';
-        btn.appendChild(titleEl);
-
-        if (subtitle) {
-          const subEl = document.createElement('span');
-          subEl.className = 'key-subtitle';
-          subEl.textContent = subtitle;
-          btn.appendChild(subEl);
-        }
-      } else {
-        const emptyEl = document.createElement('span');
-        emptyEl.className = 'key-empty-hint';
-        emptyEl.textContent = '(' + row + ', ' + col + ')';
-        btn.appendChild(emptyEl);
-      }
-    }
 
     let activePointerId = null;
     btn.addEventListener('pointerdown', (ev) => {
@@ -694,6 +624,138 @@
     });
 
     return btn;
+  }
+
+  function updateKeyTile(btn, row, col, slot) {
+    const assigned = Boolean(slot && slot.assigned);
+    const autoBack = Boolean(slot && slot.autoBack);
+    const title = slot ? (slot.title || '') : '';
+    const subtitle = slot ? (slot.subtitle || '') : '';
+    const imageUrl = slot ? (slot.imageUrl || '') : '';
+    const bgImageUrl = slot ? (slot.bgImageUrl || '') : '';
+    const flash = slot ? (slot.flash || '') : '';
+    const state = slot ? Number(slot.state) || 0 : 0;
+    const color = slot && HEX_RE.test(slot.color || '') ? slot.color : '';
+    const bgColor = slot && HEX_RE.test(slot.bgColor || '') ? slot.bgColor : '';
+    const active = Boolean((assigned || autoBack) && state > 0);
+    const effectiveAccent = color || '#38BDF8';
+    const ambientGlow = Boolean((assigned || autoBack) && isChromaticHex(effectiveAccent));
+    const fullArt = Boolean((imageUrl || bgImageUrl) && title.trim() === '' && subtitle.trim() === '');
+
+    const sig = JSON.stringify([assigned, autoBack, title, subtitle, imageUrl, bgImageUrl, flash, state, color, bgColor]);
+    if (btn._slotSig === sig) {
+      return;
+    }
+    btn._slotSig = sig;
+
+    btn.dataset.assigned = String(assigned);
+    btn.dataset.autoback = String(autoBack);
+    if (ambientGlow) {
+      btn.dataset.glow = 'true';
+    } else {
+      delete btn.dataset.glow;
+    }
+    if (active) {
+      btn.dataset.active = 'true';
+    } else {
+      delete btn.dataset.active;
+    }
+    if (flash) {
+      btn.dataset.flash = flash;
+    } else {
+      delete btn.dataset.flash;
+    }
+    if (color) {
+      btn.style.setProperty('--tile-accent', color);
+    } else {
+      btn.style.removeProperty('--tile-accent');
+    }
+
+    if (bgColor && (assigned || autoBack)) {
+      btn.dataset.hasBgColor = 'true';
+      btn.style.setProperty('--tile-bg', bgColor);
+      const fg = contrastFgHex(bgColor);
+      if (fg) {
+        btn.style.setProperty('--tile-fg', fg);
+      } else {
+        btn.style.removeProperty('--tile-fg');
+      }
+      const accentEff = color || '#38BDF8';
+      if (hexContrastRatio(accentEff, bgColor) < 3.0 && fg) {
+        btn.style.setProperty('--tile-sub-fg', fg);
+      } else {
+        btn.style.removeProperty('--tile-sub-fg');
+      }
+    } else {
+      delete btn.dataset.hasBgColor;
+      btn.style.removeProperty('--tile-bg');
+      btn.style.removeProperty('--tile-fg');
+      btn.style.removeProperty('--tile-sub-fg');
+    }
+
+    if (bgImageUrl && (assigned || autoBack)) {
+      btn.dataset.hasBgImage = 'true';
+    } else {
+      delete btn.dataset.hasBgImage;
+    }
+
+    if (fullArt) {
+      btn.dataset.fullart = 'true';
+    } else {
+      delete btn.dataset.fullart;
+    }
+
+    const ariaLabel = title || subtitle || (assigned ? ('Action key row ' + (row + 1) + ' column ' + (col + 1)) : ('Empty key row ' + (row + 1) + ' column ' + (col + 1)));
+    btn.setAttribute('aria-label', ariaLabel);
+
+    const children = [];
+    if (bgImageUrl && (assigned || autoBack)) {
+      const bgImg = document.createElement('img');
+      bgImg.className = 'key-bg-img';
+      bgImg.alt = '';
+      bgImg.draggable = false;
+      bgImg.src = bgImageUrl;
+      children.push(bgImg);
+    }
+
+    if (!fullArt && (assigned || autoBack)) {
+      const bar = document.createElement('span');
+      bar.className = 'key-accent-bar';
+      bar.setAttribute('aria-hidden', 'true');
+      children.push(bar);
+    }
+
+    if (imageUrl) {
+      const img = document.createElement('img');
+      img.className = 'key-art';
+      img.alt = '';
+      img.draggable = false;
+      img.src = imageUrl;
+      children.push(img);
+    }
+
+    if (!fullArt) {
+      if (assigned || autoBack) {
+        const titleEl = document.createElement('span');
+        titleEl.className = 'key-title';
+        titleEl.textContent = title || 'Action';
+        children.push(titleEl);
+
+        if (subtitle) {
+          const subEl = document.createElement('span');
+          subEl.className = 'key-subtitle';
+          subEl.textContent = subtitle;
+          children.push(subEl);
+        }
+      } else {
+        const emptyEl = document.createElement('span');
+        emptyEl.className = 'key-empty-hint';
+        emptyEl.textContent = '(' + row + ', ' + col + ')';
+        children.push(emptyEl);
+      }
+    }
+
+    btn.replaceChildren(...children);
   }
 
   function buildDialCard(dial) {

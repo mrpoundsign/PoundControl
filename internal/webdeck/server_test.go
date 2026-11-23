@@ -620,6 +620,7 @@ func TestServerWSMutualHandshakeSignedFramesAssetsAndRevoke(t *testing.T) {
 	slot2, _ := eng.AssignKeypadAction(c2, "test.webdeck.key")
 	prov.host.UpdateVisual(slot2.Context, plugin.VisualPatch{
 		ImageURI: &svgPath,
+		State:    new(1),
 	})
 
 	dialSlot, _ := eng.AssignDialAction(0, "test.webdeck.dial")
@@ -702,6 +703,10 @@ func TestServerWSMutualHandshakeSignedFramesAssetsAndRevoke(t *testing.T) {
 
 	if !strings.HasPrefix(initMsg.Snapshot.Slots["0,1"].ImageURL, "data:image/svg+xml;base64,") {
 		t.Fatalf("expected base64 normalized SVG, got %q", initMsg.Snapshot.Slots["0,1"].ImageURL)
+	}
+	if initMsg.Snapshot.Slots["0,2"].State != 1 || initMsg.Snapshot.Slots["0,0"].State != 0 {
+		t.Fatalf("expected slot States (0,0)=0 and (0,2)=1, got (%d, %d)",
+			initMsg.Snapshot.Slots["0,0"].State, initMsg.Snapshot.Slots["0,2"].State)
 	}
 	signedAssetURL := initMsg.Snapshot.Slots["0,2"].ImageURL
 	if !strings.HasPrefix(signedAssetURL, "/api/asset/") || !strings.Contains(signedAssetURL, "?sid="+wsA.sessionID+"&mac=") {

@@ -92,6 +92,9 @@ func NewPopOutPad(a fyne.App, engine *app.Engine, onClosed func()) *PopOutPad {
 	})
 
 	win.SetOnClosed(func() {
+		if pad.surface != nil {
+			pad.surface.Close()
+		}
 		if pad.unsub != nil {
 			pad.unsub()
 			pad.unsub = nil

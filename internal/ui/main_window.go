@@ -295,6 +295,9 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 
 	win.SetOnClosed(func() {
 		mw.cancelHoverPageTimer()
+		if mw.surface != nil {
+			mw.surface.Close()
+		}
 		if mw.pluginsCleanup != nil {
 			mw.pluginsCleanup()
 			mw.pluginsCleanup = nil

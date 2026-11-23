@@ -382,6 +382,9 @@ func TestMainWindowOBSIntegrationAndConnectionBadge(t *testing.T) {
 	if tile0.subtitle != "ACTIVE" {
 		t.Errorf("expected switched scene tile subtitle ACTIVE, got %q", tile0.subtitle)
 	}
+	if !tile0.isActive() || tile0.state != 1 {
+		t.Errorf("expected switched scene tile to be active (state=1), got state=%d active=%v", tile0.state, tile0.isActive())
+	}
 	sceneMu.Lock()
 	gotScene := programScene
 	sceneMu.Unlock()
