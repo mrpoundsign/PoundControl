@@ -478,17 +478,20 @@ body[data-view="deck"] .app-shell {
   min-inline-size: 0;
   display: grid;
   place-items: center;
+  overflow: hidden;
   background: var(--bg-deep);
   border: 1px solid var(--surface-2);
   border-radius: 16px;
-  padding: clamp(0.35rem, 0.25rem + 0.6vmin, 0.9rem);
+  padding: clamp(0.25rem, 0.2rem + 0.5vmin, 0.75rem);
 }
 
 .key-grid {
-  --gap: clamp(0.35rem, 0.25rem + 0.5vmin, 0.75rem);
-  width: min(100%, 960px);
+  --gap: clamp(2px, 0.6vmin, 12px);
+  width: min(100%, calc(85dvh * var(--cols) / var(--rows)));
+  aspect-ratio: var(--cols) / var(--rows);
   display: grid;
   grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--rows), minmax(0, 1fr));
   gap: var(--gap);
   justify-content: center;
   align-content: center;
@@ -497,11 +500,13 @@ body[data-view="deck"] .app-shell {
 @supports (width: 1cqh) {
   .key-grid {
     width: auto;
+    aspect-ratio: auto;
+    --gap: clamp(2px, min(calc(100cqw / (var(--cols) * 14)), calc(100cqh / (var(--rows) * 14))), 12px);
     --tile-w: calc((100cqw - (var(--cols) - 1) * var(--gap)) / var(--cols));
     --tile-h: calc((100cqh - (var(--rows) - 1) * var(--gap)) / var(--rows));
-    --tile-size: max(28px, min(168px, min(var(--tile-w), var(--tile-h))));
+    --tile-size: max(1px, min(var(--tile-w), var(--tile-h)));
     grid-template-columns: repeat(var(--cols), var(--tile-size));
-    grid-auto-rows: var(--tile-size);
+    grid-template-rows: repeat(var(--rows), var(--tile-size));
   }
 }
 
@@ -512,13 +517,15 @@ body[data-view="deck"] .app-shell {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.2rem;
+  gap: clamp(1px, 2.5cqi, 4px);
+  width: 100%;
+  height: 100%;
   aspect-ratio: 1;
-  min-block-size: 24px;
-  min-inline-size: 24px;
-  padding: clamp(0.2rem, 4cqi, 0.65rem);
-  border-radius: clamp(8px, 12cqi, 16px);
-  border: 2px solid var(--border-slate);
+  min-block-size: 0;
+  min-inline-size: 0;
+  padding: clamp(2px, 5cqi, 10px);
+  border-radius: clamp(4px, 12cqi, 18px);
+  border: clamp(1px, 2cqi, 2px) solid var(--border-slate);
   background: var(--surface-1);
   color: var(--text-primary);
   text-align: center;
@@ -589,10 +596,10 @@ body[data-view="deck"] .app-shell {
 
 .key-accent-bar {
   position: absolute;
-  top: 6px;
+  top: clamp(2px, 6cqi, 7px);
   left: 16%;
   right: 16%;
-  height: 3px;
+  height: clamp(2px, 3cqi, 4px);
   border-radius: 999px;
   background: var(--tile-accent, var(--accent-sky));
 }
@@ -605,7 +612,7 @@ body[data-view="deck"] .app-shell {
 }
 
 .key-tile[data-fullart="true"] {
-  padding: 4px;
+  padding: clamp(2px, 3cqi, 5px);
 }
 
 .key-tile[data-fullart="true"] .key-art {
@@ -616,7 +623,7 @@ body[data-view="deck"] .app-shell {
 }
 
 .key-title {
-  font-size: clamp(0.62rem, 11cqi, 0.98rem);
+  font-size: clamp(0.5rem, 11cqi, 1.25rem);
   font-weight: 700;
   line-height: 1.12;
   overflow-wrap: break-word;
@@ -624,7 +631,7 @@ body[data-view="deck"] .app-shell {
 }
 
 .key-subtitle {
-  font-size: clamp(0.58rem, 10cqi, 0.88rem);
+  font-size: clamp(0.45rem, 9.5cqi, 1.1rem);
   font-weight: 700;
   color: var(--tile-sub-fg, var(--tile-accent, var(--accent-sky)));
   line-height: 1.1;
@@ -633,7 +640,7 @@ body[data-view="deck"] .app-shell {
 
 .key-empty-hint {
   color: #64748B;
-  font-size: clamp(0.56rem, 10cqi, 0.78rem);
+  font-size: clamp(0.45rem, 9cqi, 1.0rem);
   font-weight: 600;
 }
 
