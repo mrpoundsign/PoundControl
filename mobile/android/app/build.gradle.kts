@@ -11,12 +11,36 @@ android {
         applicationId = "com.mrpoundsign.poundcontrol"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = (project.findProperty("appVersionCode") as String?)?.toIntOrNull() ?: 1
+        versionName = (project.findProperty("appVersionName") as String?)?.takeIf { it.isNotBlank() } ?: "0.1.0"
+    }
+
+    val ksPath = System.getenv("ANDROID_KEYSTORE_PATH")
+    val ksPass = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+    val ksAlias = System.getenv("ANDROID_KEY_ALIAS")
+    val ksKeyPass = System.getenv("ANDROID_KEY_PASSWORD")
+    val hasReleaseSigning = !ksPath.isNullOrBlank() &&
+        !ksPass.isNullOrBlank() &&
+        !ksAlias.isNullOrBlank() &&
+        !ksKeyPass.isNullOrBlank() &&
+        file(ksPath).exists()
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(ksPath!!)
+                storePassword = ksPass
+                keyAlias = ksAlias
+                keyPassword = ksKeyPass
+            }
+        }
     }
 
     buildTypes {
         release {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

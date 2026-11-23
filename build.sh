@@ -6,6 +6,7 @@ set -euo pipefail
 #   ./build.sh           # Run lint, tests, and build Desktop Studio GUI
 #   ./build.sh gui       # Build native Desktop Studio GUI into build/bin/poundcontrol
 #   ./build.sh gui-win   # Cross-compile Windows Desktop Studio GUI via MinGW into build/bin/poundcontrol.exe
+#   ./build.sh installer # Cross-compile Windows Guided Setup Installer via MinGW into build/bin/PoundControl-Setup.exe
 #   ./build.sh wasm      # Build example WebAssembly plugins (WASI reactor) into build/bin/*.wasm
 #   ./build.sh test      # Run unit & headless UI tests
 #   ./build.sh lint      # Run go fix -diff & golangci-lint-v2
@@ -96,6 +97,46 @@ build_gui_win() {
     echo "✓ Successfully built $BIN_DIR/poundcontrol.exe"
 }
 
+clean_installer_payload() {
+    local PAYLOAD_DIR="$ROOT_DIR/cmd/installer/payload"
+    mkdir -p "$PAYLOAD_DIR"
+    find "$PAYLOAD_DIR" -mindepth 1 ! -name 'placeholder.txt' -exec rm -rf {} + 2>/dev/null || true
+    touch "$PAYLOAD_DIR/placeholder.txt"
+    rm -f "$ROOT_DIR/cmd/installer/rsrc_windows_amd64.syso"
+}
+
+build_installer_win() {
+    if [ ! -f "$BIN_DIR/poundcontrol.exe" ]; then
+        build_gui_win
+    fi
+
+    echo "==> Staging payload for PoundControl-Setup.exe..."
+    local PAYLOAD_DIR="$ROOT_DIR/cmd/installer/payload"
+    clean_installer_payload
+    trap 'clean_installer_payload' RETURN
+
+    cp -f "$BIN_DIR/poundcontrol.exe" "$PAYLOAD_DIR/poundcontrol.exe"
+    [ -f "$ROOT_DIR/LICENSE" ] && cp -f "$ROOT_DIR/LICENSE" "$PAYLOAD_DIR/LICENSE"
+    [ -f "$ROOT_DIR/README.md" ] && cp -f "$ROOT_DIR/README.md" "$PAYLOAD_DIR/README.md"
+
+    local VER_LDFLAG=""
+    if [ -n "${VERSION:-}" ]; then
+        VER_LDFLAG=" -X main.AppVersion=${VERSION#v}"
+    fi
+
+    generate_winres_syso "$ROOT_DIR/cmd/installer/rsrc" "PoundControl Setup" "PoundControl Guided Setup Installer" "PoundControl-Setup.exe"
+
+    echo "==> Cross-compiling PoundControl-Setup.exe (via MinGW)..."
+    CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
+        go build -trimpath -ldflags="-H windowsgui -s -w${VER_LDFLAG}" -o "$BIN_DIR/PoundControl-Setup.exe" ./cmd/installer
+    echo "✓ Successfully built $BIN_DIR/PoundControl-Setup.exe"
+
+    if command -v x86_64-w64-mingw32-objdump &>/dev/null; then
+        echo "==> Verifying PoundControl-Setup.exe DLL Dependencies..."
+        x86_64-w64-mingw32-objdump -p "$BIN_DIR/PoundControl-Setup.exe" | grep "DLL Name"
+    fi
+}
+
 build_wasm() {
     echo "==> Building example WebAssembly plugins (WASI reactor)..."
     GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 go build -buildmode=c-shared -o "$BIN_DIR/pomodoro.wasm" ./examples/wasm-pomodoro
@@ -127,6 +168,9 @@ case "$TARGET" in
     gui-win)
         build_gui_win
         ;;
+    installer)
+        build_installer_win
+        ;;
     wasm)
         build_wasm
         ;;
@@ -140,7 +184,7 @@ case "$TARGET" in
         clean_artifacts
         ;;
     *)
-        echo "Unknown target: $TARGET. Available: all, gui, gui-win, wasm, test, lint, clean"
+        echo "Unknown target: $TARGET. Available: all, gui, gui-win, installer, wasm, test, lint, clean"
         exit 1
         ;;
 esac

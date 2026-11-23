@@ -77,6 +77,26 @@ func buildSettingsTabsView(
 	})
 	popOutBtn.Importance = widget.HighImportance
 
+	updateStatusLbl := widget.NewLabel("Version v" + version.Version)
+	updateStatusLbl.Wrapping = fyne.TextWrapWord
+
+	var checkUpdatesBtn *widget.Button
+	checkUpdatesBtn = widget.NewButtonWithIcon("Check for Updates", theme.DownloadIcon(), func() {
+		checkForUpdatesManual(win, version.Version, updateStatusLbl, checkUpdatesBtn, onStatus)
+	})
+
+	autoUpdateCheck := widget.NewCheck("Check for updates on startup", nil)
+	if a := fyne.CurrentApp(); a != nil {
+		autoUpdateCheck.Checked = a.Preferences().BoolWithFallback(prefCheckUpdatesOnStartup, true)
+	} else {
+		autoUpdateCheck.Checked = true
+	}
+	autoUpdateCheck.OnChanged = func(checked bool) {
+		if a := fyne.CurrentApp(); a != nil {
+			a.Preferences().SetBool(prefCheckUpdatesOnStartup, checked)
+		}
+	}
+
 	paletteSection, generalCleanup := buildPaletteSettingsSection(win, engine, onStatus)
 	generalTab := container.NewVBox(
 		widget.NewForm(
@@ -87,7 +107,9 @@ func buildSettingsTabsView(
 			widget.NewFormItem("Global Hotkeys", widget.NewLabel(fmt.Sprintf("%d active on current page/folder", activeHotkeys))),
 		),
 		widget.NewSeparator(),
-		popOutBtn,
+		container.NewHBox(popOutBtn, checkUpdatesBtn),
+		autoUpdateCheck,
+		updateStatusLbl,
 		widget.NewSeparator(),
 		paletteSection,
 	)

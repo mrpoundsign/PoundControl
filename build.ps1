@@ -2,6 +2,7 @@
 # Usage:
 #   .\build.ps1                  # Run lint, tests, and build Desktop Studio GUI
 #   .\build.ps1 -Target gui      # Build Desktop Studio GUI (with Zig CGo) -> build\bin\poundcontrol.exe
+#   .\build.ps1 -Target installer # Build Windows Guided Setup Installer -> build\bin\PoundControl-Setup.exe
 #   .\build.ps1 -Target wasm     # Build example WebAssembly plugins (WASI reactor) -> build\bin\*.wasm
 #   .\build.ps1 -Target android  # Test & build Android Companion APK -> build\bin\poundcontrol-android.apk
 #   .\build.ps1 -Target test     # Run all unit & headless UI tests
@@ -10,7 +11,7 @@
 #   .\build.ps1 -Target clean    # Clean build artifacts
 
 param(
-    [ValidateSet("all", "gui", "wasm", "android", "test", "lint", "check", "clean")]
+    [ValidateSet("all", "gui", "installer", "wasm", "android", "test", "lint", "check", "clean")]
     [string]$Target = "all"
 )
 
@@ -112,6 +113,51 @@ function Build-GUI {
             Write-Error "Failed to build poundcontrol.exe."
         }
     } finally {
+        Remove-Item $sysoPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Build-Installer {
+    $guiExe = Join-Path $BinDir "poundcontrol.exe"
+    if (-not (Test-Path $guiExe)) {
+        Build-GUI
+    }
+
+    Write-Host "`n==> Building PoundControl Windows Guided Setup Installer..." -ForegroundColor Cyan
+    Enable-CGoToolchain
+
+    $payloadDir = Join-Path $PSScriptRoot "cmd\installer\payload"
+    if (-not (Test-Path $payloadDir)) { New-Item -ItemType Directory -Path $payloadDir | Out-Null }
+
+    $cleanupPayload = {
+        Get-ChildItem -Path $payloadDir -Force | Where-Object { $_.Name -ne "placeholder.txt" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $sysoPrefix = Join-Path $PSScriptRoot "cmd\installer\rsrc"
+    $sysoPath = "${sysoPrefix}_windows_amd64.syso"
+    try {
+        & $cleanupPayload
+        Copy-Item $guiExe (Join-Path $payloadDir "poundcontrol.exe") -Force
+        if (Test-Path (Join-Path $PSScriptRoot "LICENSE")) { Copy-Item (Join-Path $PSScriptRoot "LICENSE") (Join-Path $payloadDir "LICENSE") -Force }
+        if (Test-Path (Join-Path $PSScriptRoot "README.md")) { Copy-Item (Join-Path $PSScriptRoot "README.md") (Join-Path $payloadDir "README.md") -Force }
+
+        $ldflags = "-s -w -H=windowsgui -extldflags=-Wl,--subsystem,windows"
+        if ($env:VERSION) {
+            $ver = $env:VERSION.TrimStart('v')
+            $ldflags = "$ldflags -X main.AppVersion=$ver"
+        }
+
+        New-WinResSyso -OutPrefix $sysoPrefix -ProductName "PoundControl Setup" -Description "PoundControl Guided Setup Installer" -OriginalFilename "PoundControl-Setup.exe"
+
+        $setupOut = Join-Path $BinDir "PoundControl-Setup.exe"
+        & $GoExe build -trimpath -ldflags="$ldflags" -o $setupOut ./cmd/installer
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[OK] Successfully built $setupOut" -ForegroundColor Green
+        } else {
+            Write-Error "Failed to build PoundControl-Setup.exe."
+        }
+    } finally {
+        & $cleanupPayload
         Remove-Item $sysoPath -Force -ErrorAction SilentlyContinue
     }
 }
@@ -273,12 +319,13 @@ function Build-Android {
 }
 
 switch ($Target) {
-    "all"     { Run-Lint; Run-Tests; Build-GUI }
-    "gui"     { Build-GUI }
-    "wasm"    { Build-Wasm }
-    "android" { Build-Android }
-    "test"    { Run-Tests }
-    "lint"    { Run-Lint }
-    "check"   { Run-Check }
-    "clean"   { Clean-Artifacts }
+    "all"       { Run-Lint; Run-Tests; Build-GUI }
+    "gui"       { Build-GUI }
+    "installer" { Build-Installer }
+    "wasm"      { Build-Wasm }
+    "android"   { Build-Android }
+    "test"      { Run-Tests }
+    "lint"      { Run-Lint }
+    "check"     { Run-Check }
+    "clean"     { Clean-Artifacts }
 }

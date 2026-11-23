@@ -134,6 +134,8 @@ func main() {
 
 	obsProvider.StartFromGlobalSettings()
 
+	ui.CheckStartupUpdate(win.Window(), version.Version)
+
 	win.ShowAndRun()
 }
 

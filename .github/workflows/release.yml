@@ -1,0 +1,282 @@
+name: Release PoundControl
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Run Test Suite & Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Install Linux GUI & Font Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libgl1-mesa-dev xorg-dev libxcursor-dev libxrandr-dev \
+            libxinerama-dev libxi-dev libxxf86vm-dev libwayland-dev \
+            libxkbcommon-dev fonts-dejavu-core
+
+      - name: Run Full Test Suite
+        run: go test -count=1 -v ./...
+
+      - name: Check Go Modernization
+        run: |
+          diff=$(go fix -diff ./...)
+          if [ -n "$diff" ]; then
+            echo "Go modernization diff found:"
+            echo "$diff"
+            exit 1
+          fi
+
+      - name: Run golangci-lint (v2)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+
+      - name: Validate GoReleaser Config
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: check
+
+  build-gui-linux-windows:
+    name: Build Desktop GUI & Installer (Linux & Windows)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Install Linux GUI & MinGW Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            gcc-mingw-w64 gcc libgl1-mesa-dev xorg-dev \
+            libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
+            libxxf86vm-dev libwayland-dev libxkbcommon-dev fonts-dejavu-core
+
+      - name: Compile Linux and Windows Studio & Installer
+        run: |
+          mkdir -p gui-dist
+          TAG="${{ github.ref_name }}"
+          if [ -z "$TAG" ] || [[ ! "$TAG" =~ ^v ]]; then
+            TAG="snapshot"
+          fi
+          VER="${TAG#v}"
+          chmod +x ./build.sh
+
+          echo "Building Linux amd64 Studio archive..."
+          VERSION="$VER" ./build.sh gui
+          STAGE="build/stage/PoundControl_${TAG}_linux_amd64"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          cp -f build/bin/poundcontrol "$STAGE/poundcontrol"
+          [ -f LICENSE ] && cp -f LICENSE "$STAGE/LICENSE"
+          [ -f README.md ] && cp -f README.md "$STAGE/README.md"
+          [ -f assets/icon.png ] && cp -f assets/icon.png "$STAGE/icon.png"
+          tar -czf "gui-dist/PoundControl_${TAG}_linux_amd64.tar.gz" -C "$STAGE" .
+
+          echo "Cross-compiling Windows amd64 Studio portable binary..."
+          VERSION="$VER" ./build.sh gui-win
+          cp -f build/bin/poundcontrol.exe "gui-dist/PoundControl_${TAG}_windows_amd64.exe"
+
+          echo "Building Windows amd64 Guided Setup Installer..."
+          VERSION="$VER" ./build.sh installer
+          cp -f build/bin/PoundControl-Setup.exe "gui-dist/PoundControl_${TAG}_windows_amd64_setup.exe"
+
+      - name: Upload Linux & Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-dist-linux-windows
+          path: gui-dist/
+
+  build-gui-macos:
+    name: Build Desktop GUI (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Install Fyne CLI
+        run: go install fyne.io/tools/cmd/fyne@v1.7.3
+
+      - name: Build macOS GUI
+        run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          mkdir -p gui-dist
+          TAG="${{ github.ref_name }}"
+          if [ -z "$TAG" ] || [[ ! "$TAG" =~ ^v ]]; then
+            TAG="snapshot"
+          fi
+          VER="${TAG#v}"
+          APP_VER="$VER"
+          if [ "$VER" = "snapshot" ]; then
+            APP_VER="0.1.0"
+          fi
+
+          fyne package -os darwin -app-id com.github.mrpoundsign.poundcontrol -name PoundControl -app-version "$APP_VER" -icon "$PWD/assets/icon.png" -src ./cmd/poundcontrol
+          MAIN_BIN=$(find PoundControl.app/Contents/MacOS -maxdepth 1 -type f | head -n 1)
+          test -n "$MAIN_BIN" || (echo "macOS bundle executable not found" && exit 1)
+          CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X github.com/mrpoundsign/PoundControl/internal/version.Version=$VER" -o "$MAIN_BIN" ./cmd/poundcontrol
+          zip -r "gui-dist/PoundControl_${TAG}_darwin_all.zip" PoundControl.app
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-dist-macos
+          path: gui-dist/
+
+  build-android:
+    name: Build Android Companion APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Android SDK Components
+        run: |
+          SDK_MGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDK_MGR" --licenses >/dev/null || true
+          "$SDK_MGR" "platforms;android-37" "build-tools;36.0.0"
+
+      - name: Test & Assemble Android APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          mkdir -p gui-dist
+          TAG="${{ github.ref_name }}"
+          if [ -z "$TAG" ] || [[ ! "$TAG" =~ ^v ]]; then
+            TAG="snapshot"
+            VER_NAME="0.1.0-snapshot"
+            VER_CODE=1
+          else
+            VER_NAME="${TAG#v}"
+            BASE_VER="${VER_NAME%%-*}"
+            IFS='.' read -r MAJ MIN PAT <<< "$BASE_VER"
+            MAJ="${MAJ//[^0-9]/}"
+            MIN="${MIN//[^0-9]/}"
+            PAT="${PAT//[^0-9]/}"
+            VER_CODE=$(( ${MAJ:-0} * 10000 + ${MIN:-0} * 100 + ${PAT:-0} ))
+            if [ "$VER_CODE" -lt 1 ]; then
+              VER_CODE=1
+            fi
+          fi
+
+          cd mobile/android
+          chmod +x ./gradlew
+
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ] && [ -n "${ANDROID_KEYSTORE_PASSWORD:-}" ] && [ -n "${ANDROID_KEY_ALIAS:-}" ] && [ -n "${ANDROID_KEY_PASSWORD:-}" ]; then
+            echo "Building release-signed APK..."
+            KS_FILE="$(mktemp)"
+            trap 'rm -f "$KS_FILE"' EXIT
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KS_FILE"
+            ANDROID_KEYSTORE_PATH="$KS_FILE" ./gradlew testDebugUnitTest assembleRelease \
+              -PappVersionName="$VER_NAME" -PappVersionCode="$VER_CODE" --no-daemon
+            cp -f app/build/outputs/apk/release/app-release.apk "../../gui-dist/PoundControl_${TAG}_android.apk"
+          else
+            echo "No release keystore secrets configured; building installable debug-signed APK..."
+            ./gradlew testDebugUnitTest assembleDebug \
+              -PappVersionName="$VER_NAME" -PappVersionCode="$VER_CODE" --no-daemon
+            cp -f app/build/outputs/apk/debug/app-debug.apk "../../gui-dist/PoundControl_${TAG}_android.apk"
+          fi
+
+      - name: Upload Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-dist-android
+          path: gui-dist/
+
+  release:
+    name: Release PoundControl Artifacts
+    needs: [test, build-gui-linux-windows, build-gui-macos, build-android]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Verify Clean Git State
+        run: |
+          git status --porcelain
+          test -z "$(git status --porcelain)" || (echo "Dirty git state detected:" && git status && exit 1)
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: ${{ startsWith(github.ref, 'refs/tags/v') && 'release --clean' || 'release --clean --snapshot' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download All Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gui-dist-*
+          path: gui-dist
+          merge-multiple: true
+
+      - name: Consolidate Checksums
+        run: |
+          mkdir -p dist
+          touch dist/checksums.txt
+          cd gui-dist
+          sha256sum * >> ../dist/checksums.txt
+          cd ..
+          sort -u -k2 -o dist/checksums.txt dist/checksums.txt
+          cp -f dist/checksums.txt dist/SHA256SUMS.txt
+          echo "=== Final Consolidated dist/checksums.txt ==="
+          cat dist/checksums.txt
+
+      - name: Attach Artifacts to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            gh release create "${{ github.ref_name }}" --verify-tag --generate-notes
+          fi
+          gh release upload "${{ github.ref_name }}" gui-dist/* dist/checksums.txt dist/SHA256SUMS.txt --clobber

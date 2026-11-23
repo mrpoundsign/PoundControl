@@ -1,0 +1,1 @@
+Placeholder so //go:embed payload/* compiles during development and test runs.
