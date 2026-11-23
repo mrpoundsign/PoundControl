@@ -93,8 +93,6 @@ type MainWindow struct {
 	profileIDs         []string
 
 	profileSelect  *widget.Select
-	pageLabel      *widget.Label
-	backBtn        *widget.Button
 	undoBtn        *widget.Button
 	redoBtn        *widget.Button
 	obsBtn         *widget.Button
@@ -127,9 +125,10 @@ type MainWindow struct {
 	pairApproveBtn      *widget.Button
 	lastPairedCount     int
 
-	pageStrip    *fyne.Container
-	pageButtons  []*widget.Button
-	pageAddBtn   *widget.Button
+	pageStrip     *fyne.Container
+	pageButtons   []*widget.Button
+	pageAddBtn    *widget.Button
+	pageDeleteBtn *widget.Button
 	pageStripKey string
 
 	clipBanner    *fyne.Container
@@ -994,17 +993,6 @@ func (mw *MainWindow) applySnapshot(snap app.Snapshot) {
 		}
 	}
 
-	// Sync Page / Folder breadcrumb controls.
-	if mw.pageLabel != nil {
-		if snap.InFolder {
-			mw.pageLabel.SetText("Folder: " + strings.Join(snap.FolderPath, " / "))
-			mw.backBtn.Enable()
-		} else {
-			mw.pageLabel.SetText(fmt.Sprintf("Page %d / %d", snap.PageIndex+1, max(1, snap.PageCount)))
-			mw.backBtn.Disable()
-		}
-	}
-
 	if mw.deckTitle != nil {
 		mw.deckTitle.Text = fmt.Sprintf("Virtual Deck (%dx%d)", snap.Grid.Cols, snap.Grid.Rows)
 		mw.deckTitle.Refresh()
@@ -1081,29 +1069,6 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 	newProfileBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), mw.showCreateProfileDialog)
 	gridBtn := widget.NewButtonWithIcon("Grid", theme.GridIcon(), mw.showGridDialog)
 
-	prevPageBtn := widget.NewButtonWithIcon("", theme.NavigateBackIcon(), func() {
-		if err := mw.engine.PrevPage(true); err != nil {
-			mw.setStatus("Page switch failed: " + err.Error())
-		}
-	})
-	mw.pageLabel = widget.NewLabel("Page 1 / 1")
-	nextPageBtn := widget.NewButtonWithIcon("", theme.NavigateNextIcon(), func() {
-		if err := mw.engine.NextPage(true); err != nil {
-			mw.setStatus("Page switch failed: " + err.Error())
-		}
-	})
-	addPageBtn := widget.NewButton("+ Page", func() {
-		if _, err := mw.engine.AddPage(""); err != nil {
-			mw.setStatus("Add page failed: " + err.Error())
-		}
-	})
-	mw.backBtn = widget.NewButton("← Back", func() {
-		if err := mw.engine.CloseFolder(); err != nil {
-			mw.setStatus("Close folder failed: " + err.Error())
-		}
-	})
-	mw.backBtn.Disable()
-
 	mw.runModeCheck = widget.NewCheck("Run Mode", func(checked bool) {
 		if mw.syncing {
 			return
@@ -1139,12 +1104,6 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 		mw.profileSelect,
 		newProfileBtn,
 		gridBtn,
-		widget.NewSeparator(),
-		prevPageBtn,
-		mw.pageLabel,
-		nextPageBtn,
-		addPageBtn,
-		mw.backBtn,
 		layout.NewSpacer(),
 		mw.undoBtn,
 		mw.redoBtn,
@@ -1755,6 +1714,7 @@ func (mw *MainWindow) syncPageStrip(snap app.Snapshot) {
 	if snap.InFolder {
 		mw.pageButtons = nil
 		mw.pageAddBtn = nil
+		mw.pageDeleteBtn = nil
 		folderBtn := widget.NewButton("← Exit Folder ("+strings.Join(snap.FolderPath, " / ")+")", func() {
 			_ = mw.engine.CloseFolder()
 		})
@@ -1769,7 +1729,7 @@ func (mw *MainWindow) syncPageStrip(snap app.Snapshot) {
 		pageNames = []string{"Page 1"}
 	}
 	btns := make([]*widget.Button, len(pageNames))
-	objs := make([]fyne.CanvasObject, 0, len(pageNames)+1)
+	objs := make([]fyne.CanvasObject, 0, len(pageNames)+2)
 	for i, name := range pageNames {
 		pageNum := i + 1
 		b := widget.NewButton(name, func() {
@@ -1785,13 +1745,66 @@ func (mw *MainWindow) syncPageStrip(snap app.Snapshot) {
 			mw.setStatus("Add page failed: " + err.Error())
 		}
 	})
-	objs = append(objs, addBtn)
+	delBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), mw.confirmDeleteCurrentPage)
+	if len(pageNames) <= 1 {
+		delBtn.Disable()
+	}
+	objs = append(objs, addBtn, delBtn)
 
 	mw.pageButtons = btns
 	mw.pageAddBtn = addBtn
+	mw.pageDeleteBtn = delBtn
 	mw.refreshPageButtonImportance(snap)
 	mw.pageStrip.Objects = objs
 	mw.pageStrip.Refresh()
+}
+
+func (mw *MainWindow) confirmDeleteCurrentPage() {
+	snap := mw.engine.Snapshot()
+	if snap.InFolder || snap.PageCount <= 1 {
+		return
+	}
+	pageIdx := snap.PageIndex
+	pageName := fmt.Sprintf("Page %d", pageIdx+1)
+	if pageIdx >= 0 && pageIdx < len(snap.PageNames) && strings.TrimSpace(snap.PageNames[pageIdx]) != "" {
+		pageName = snap.PageNames[pageIdx]
+	}
+
+	assignedCount := 0
+	for _, slot := range snap.Slots {
+		if slot.Config != nil && strings.TrimSpace(slot.Config.ActionUUID) != "" {
+			assignedCount++
+		}
+	}
+	for _, d := range snap.DialSlots {
+		if d.Config != nil && strings.TrimSpace(d.Config.ActionUUID) != "" {
+			assignedCount++
+		}
+	}
+
+	msg := fmt.Sprintf("Delete %q? This will permanently remove the page.", pageName)
+	if assignedCount == 1 {
+		msg = fmt.Sprintf("Delete %q (1 assigned action)? This will permanently remove the page.", pageName)
+	} else if assignedCount > 1 {
+		msg = fmt.Sprintf("Delete %q (%d assigned actions)? This will permanently remove the page.", pageName, assignedCount)
+	}
+
+	dlg := dialog.NewConfirm("Delete Page", msg, func(confirmed bool) {
+		mw.confirmDlg = nil
+		if !confirmed {
+			return
+		}
+		if err := mw.engine.DeletePage(pageIdx); err != nil {
+			mw.setStatus("Delete page failed: " + err.Error())
+			return
+		}
+		mw.setStatus("Deleted " + pageName)
+	}, mw.win)
+	dlg.SetConfirmText("Delete")
+	dlg.SetConfirmImportance(widget.DangerImportance)
+	dlg.SetDismissText("Cancel")
+	mw.confirmDlg = dlg
+	dlg.Show()
 }
 
 func (mw *MainWindow) refreshPageButtonImportance(snap app.Snapshot) {

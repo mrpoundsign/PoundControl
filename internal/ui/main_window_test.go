@@ -225,8 +225,11 @@ func TestMainWindowFolderAutoBackAndPopOutPadSync(t *testing.T) {
 	test.Tap(folderTile)
 	drainUI()
 
-	if !strings.Contains(mw.pageLabel.Text, "Folder:") {
-		t.Fatalf("expected Studio pageLabel to show Folder breadcrumb, got %q", mw.pageLabel.Text)
+	if !mw.lastSnap.InFolder || len(mw.pageStrip.Objects) == 0 {
+		t.Fatalf("expected Studio to be inside folder with pageStrip exit control, got InFolder=%v", mw.lastSnap.InFolder)
+	}
+	if exitBtn, ok := mw.pageStrip.Objects[0].(*widget.Button); !ok || !strings.Contains(exitBtn.Text, "Exit Folder") {
+		t.Fatalf("expected Exit Folder button in pageStrip, got %#v", mw.pageStrip.Objects[0])
 	}
 	if studioBackTile := mw.surface.tiles[(deck.Coordinates{Row: 0, Col: 0}).SlotKey()]; studioBackTile.title != "← Back" {
 		t.Errorf("expected AutoBack tile on Studio (0,0), got %q", studioBackTile.title)
@@ -235,8 +238,9 @@ func TestMainWindowFolderAutoBackAndPopOutPadSync(t *testing.T) {
 	// Tap AutoBack (0, 0) on PopOutPad to exit folder.
 	test.Tap(pad.surface.tiles[(deck.Coordinates{Row: 0, Col: 0}).SlotKey()])
 	drainUI()
-	if !strings.Contains(mw.pageLabel.Text, "Page 1 / 2") {
-		t.Fatalf("expected Studio returned to Page 1 / 2, got %q", mw.pageLabel.Text)
+	if mw.lastSnap.InFolder || mw.lastSnap.PageIndex != 0 || mw.lastSnap.PageCount != 2 {
+		t.Fatalf("expected Studio returned to Page 1 / 2, got InFolder=%v page=%d/%d",
+			mw.lastSnap.InFolder, mw.lastSnap.PageIndex+1, mw.lastSnap.PageCount)
 	}
 
 	pad.Close()
@@ -2014,5 +2018,68 @@ func TestSettingsPluginsOpenActionDiagnosticsAndMarketplace(t *testing.T) {
 	}
 	if _, ok := mw.catalogButtons["com.example.uiinstall.ping"]; !ok {
 		t.Fatal("expected newly installed OpenAction Marketplace action in Action Catalog")
+	}
+}
+
+func TestPageStripDeleteWithConfirmation(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+
+	reg := plugin.NewRegistry()
+	if err := reg.RegisterProvider(core.New()); err != nil {
+		t.Fatalf("RegisterProvider(core) error = %v", err)
+	}
+	eng, err := app.NewEngine(deck.NewMemoryStore(nil), reg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	defer func() { _ = eng.Close() }()
+
+	mw := NewMainWindow(a, eng)
+
+	// With only 1 page, delete button must be disabled.
+	if mw.pageDeleteBtn == nil || !mw.pageDeleteBtn.Disabled() {
+		t.Fatal("expected pageDeleteBtn disabled when only 1 page exists")
+	}
+
+	// Add a second page -> delete button becomes enabled.
+	test.Tap(mw.pageAddBtn)
+	drainUI()
+	if eng.Snapshot().PageCount != 2 {
+		t.Fatalf("expected 2 pages after tapping pageAddBtn, got %d", eng.Snapshot().PageCount)
+	}
+	if mw.pageDeleteBtn == nil || mw.pageDeleteBtn.Disabled() {
+		t.Fatal("expected pageDeleteBtn enabled when 2 pages exist")
+	}
+
+	// Switch to Page 2 and tap delete -> confirmation dialog opens.
+	test.Tap(mw.pageButtons[1])
+	drainUI()
+	test.Tap(mw.pageDeleteBtn)
+	drainUI()
+	if mw.confirmDlg == nil {
+		t.Fatal("expected confirmation dialog before deleting page")
+	}
+
+	// Dismissing confirmation keeps both pages intact.
+	mw.confirmDlg.Dismiss()
+	drainUI()
+	if eng.Snapshot().PageCount != 2 {
+		t.Fatalf("expected 2 pages after dismissing delete confirmation, got %d", eng.Snapshot().PageCount)
+	}
+
+	// Confirming deletes Page 2 and disables pageDeleteBtn again.
+	test.Tap(mw.pageDeleteBtn)
+	drainUI()
+	if mw.confirmDlg == nil {
+		t.Fatal("expected confirmation dialog on second delete tap")
+	}
+	mw.confirmDlg.Confirm()
+	drainUI()
+	if eng.Snapshot().PageCount != 1 {
+		t.Fatalf("expected 1 page after confirming delete, got %d", eng.Snapshot().PageCount)
+	}
+	if mw.pageDeleteBtn == nil || !mw.pageDeleteBtn.Disabled() {
+		t.Fatal("expected pageDeleteBtn disabled again after returning to 1 page")
 	}
 }
