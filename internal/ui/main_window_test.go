@@ -33,6 +33,7 @@ import (
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/apps"
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/core"
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/obs"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/soundboard"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 	"github.com/mrpoundsign/PoundControl/pkg/sdplugin"
@@ -2235,5 +2236,177 @@ func TestActionCatalogGearIconsAndPluginConfigTabs(t *testing.T) {
 	gs3 := eng.GlobalSettings(twitchUUID)
 	if gs3["defaultChannel"] != "lobby" {
 		t.Fatalf("expected defaultChannel reset to lobby, got %+v", gs3)
+	}
+}
+
+type noopSoundEngine struct{ muted bool }
+
+func (n *noopSoundEngine) ListOutputDevices() ([]soundboard.OutputDevice, error) { return nil, nil }
+func (n *noopSoundEngine) SetOutputDevice(string) error                          { return nil }
+func (n *noopSoundEngine) OutputDevice() string                                  { return soundboard.SystemDefaultDevice }
+func (n *noopSoundEngine) Play(string, *soundboard.Clip, float32) (uint64, error) {
+	return 1, nil
+}
+func (n *noopSoundEngine) StopSlot(string, time.Duration)            {}
+func (n *noopSoundEngine) StopOthers(string, time.Duration)          {}
+func (n *noopSoundEngine) StopAll(time.Duration)                     {}
+func (n *noopSoundEngine) ActiveForSlot(string) (int, time.Duration) { return 0, 0 }
+func (n *noopSoundEngine) TotalActive() int                          { return 0 }
+func (n *noopSoundEngine) SetMasterVolume(float32)                   {}
+func (n *noopSoundEngine) MasterVolume() float32                     { return 1.0 }
+func (n *noopSoundEngine) SetMuted(m bool)                           { n.muted = m }
+func (n *noopSoundEngine) IsMuted() bool                             { return n.muted }
+func (n *noopSoundEngine) SetMaxVoices(int)                          {}
+func (n *noopSoundEngine) SetOnChange(func())                        {}
+func (n *noopSoundEngine) Close() error                              { return nil }
+
+func TestMainWindowEnableDisablePluginsAndPreserveButtonSettings(t *testing.T) {
+	drainUI()
+	testApp := test.NewApp()
+	t.Cleanup(func() {
+		drainUI()
+		testApp.Quit()
+	})
+	testApp.Settings().SetTheme(&StudioTheme{})
+
+	reg := plugin.NewRegistry()
+	_ = reg.RegisterProvider(core.New())
+	obsProv := obs.New(secrets.NewMemoryStore())
+	_ = reg.RegisterProvider(obsProv)
+	_ = reg.RegisterProvider(apps.New(&fakeAppsDriver{}))
+	sbProv := soundboard.NewWithOptions(soundboard.Options{
+		Engine:               &noopSoundEngine{},
+		FileCheckInterval:    -1,
+		PlaybackTickInterval: -1,
+		SyncDecode:           true,
+	})
+	_ = reg.RegisterProvider(sbProv)
+
+	eng, err := app.NewEngine(deck.NewMemoryStore(nil), reg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	t.Cleanup(func() { _ = eng.Close() })
+
+	mw := NewMainWindow(testApp, eng)
+	mw.SetOBSController(obsProv)
+	drainUI()
+
+	if !mw.obsBtn.Visible() {
+		t.Fatal("expected OBS header badge visible when OBS plugin enabled")
+	}
+
+	// Assign a Soundboard button with custom settings at (0,0).
+	c00 := deck.Coordinates{Row: 0, Col: 0}
+	if _, err := eng.AssignKeypadAction(c00, soundboard.ActionPlaySound); err != nil {
+		t.Fatalf("AssignKeypadAction(soundboard) error = %v", err)
+	}
+	if err := eng.UpdateKeypadSlot(c00, "Airhorn", "#A855F7", map[string]any{
+		"filePath":   `C:\Sounds\airhorn.wav`,
+		"volume":     75,
+		"stopOthers": true,
+	}); err != nil {
+		t.Fatalf("UpdateKeypadSlot() error = %v", err)
+	}
+	drainUI()
+
+	// Disable OBS and Soundboard via Plugins tab checkboxes.
+	mw.ShowSettingsTab(settingsTabPlugins)
+	drainUI()
+
+	findPluginCheck := func(labelPrefix string) *widget.Check {
+		var found *widget.Check
+		var walk func(fyne.CanvasObject)
+		walk = func(obj fyne.CanvasObject) {
+			if obj == nil || found != nil {
+				return
+			}
+			if ch, ok := obj.(*widget.Check); ok && strings.HasPrefix(ch.Text, labelPrefix) {
+				found = ch
+				return
+			}
+			if c, ok := obj.(*fyne.Container); ok {
+				for _, child := range c.Objects {
+					walk(child)
+				}
+			}
+			if sc, ok := obj.(*container.Scroll); ok {
+				walk(sc.Content)
+			}
+		}
+		walk(mw.pluginsTabItem.Content)
+		return found
+	}
+
+	coreChk := findPluginCheck("Core Navigation")
+	if coreChk == nil || !coreChk.Disabled() || !coreChk.Checked {
+		t.Fatalf("expected Core checkbox checked and disabled, got %#v", coreChk)
+	}
+	obsChk := findPluginCheck("OBS Studio")
+	sbChk := findPluginCheck("Soundboard")
+	if obsChk == nil || sbChk == nil {
+		t.Fatalf("expected OBS Studio and Soundboard checkboxes in Plugins tab, obs=%v sb=%v", obsChk != nil, sbChk != nil)
+	}
+
+	obsChk.SetChecked(false)
+	sbChk.SetChecked(false)
+	drainUI()
+
+	if mw.obsBtn.Visible() {
+		t.Fatal("expected OBS header badge hidden when OBS disabled")
+	}
+	if _, has := mw.catalogButtons[soundboard.ActionPlaySound]; has {
+		t.Fatal("expected Soundboard actions removed from catalog when disabled")
+	}
+	if _, has := mw.catalogButtons[obs.ActionStream]; has {
+		t.Fatal("expected OBS actions removed from catalog when disabled")
+	}
+
+	// Opening Settings -> Web Deck must select Web Deck even with OBS Studio tab hidden.
+	mw.ShowSettingsTab(settingsTabWeb)
+	drainUI()
+	if mw.settingsTabs.SelectedIndex() != mw.webTabIdx || mw.webTabIdx != 1 {
+		t.Fatalf("expected Web Deck tab at index 1 when OBS disabled, selected=%d webTabIdx=%d", mw.settingsTabs.SelectedIndex(), mw.webTabIdx)
+	}
+	if _, hasSBTab := mw.settingsPluginTabs[soundboard.PluginUUID]; hasSBTab {
+		t.Fatal("expected Soundboard config tab omitted when disabled")
+	}
+
+	// Select the disabled Soundboard slot, edit Title, Save -> saved filePath/volume/stopOthers MUST be preserved!
+	mw.ShowControlTab()
+	mw.SelectSlot(c00)
+	drainUI()
+	if !mw.inspector.triggerBtn.Disabled() {
+		t.Fatal("expected Inspector Trigger button disabled for disabled plugin slot")
+	}
+	mw.inspector.titleEntry.SetText("Airhorn Edited")
+	test.Tap(mw.inspector.saveBtn)
+	drainUI()
+
+	saved := eng.Snapshot().Slots[c00.SlotKey()]
+	if !saved.Disabled || saved.Config.Title != "Airhorn Edited" ||
+		saved.Config.Settings["filePath"] != `C:\Sounds\airhorn.wav` ||
+		saved.Config.Settings["stopOthers"] != true {
+		t.Fatalf("expected disabled slot edits to preserve plugin settings, got %+v", saved)
+	}
+
+	// Re-enable Soundboard via Inspector button and OBS via Plugins tab checkbox -> everything returns cleanly.
+	if err := mw.SetPluginEnabled(soundboard.PluginUUID, true); err != nil {
+		t.Fatalf("SetPluginEnabled(soundboard, true) error = %v", err)
+	}
+	if err := mw.SetPluginEnabled(obs.PluginUUID, true); err != nil {
+		t.Fatalf("SetPluginEnabled(obs, true) error = %v", err)
+	}
+	drainUI()
+
+	if !mw.obsBtn.Visible() {
+		t.Fatal("expected OBS header badge restored when re-enabled")
+	}
+	if _, has := mw.catalogButtons[soundboard.ActionPlaySound]; !has {
+		t.Fatal("expected Soundboard actions restored in catalog")
+	}
+	restored := eng.Snapshot().Slots[c00.SlotKey()]
+	if restored.Disabled || restored.Config.Title != "Airhorn Edited" || restored.Config.Settings["volume"] != 75 {
+		t.Fatalf("expected Soundboard slot cleanly restored with preserved settings, got %+v", restored)
 	}
 }

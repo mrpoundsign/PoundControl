@@ -318,6 +318,19 @@ func (e *MalgoEngine) SetOnChange(fn func()) {
 	e.mixer.SetOnChange(fn)
 }
 
+// ReleaseDevice stops and releases the active playback device while keeping the engine reusable.
+func (e *MalgoEngine) ReleaseDevice() {
+	e.mu.Lock()
+	dev := e.device
+	e.device = nil
+	e.mu.Unlock()
+
+	if dev != nil {
+		dev.Uninit()
+	}
+	e.cbBuf = nil
+}
+
 // Close stops audio hardware output and tears down the mixer cleanly.
 func (e *MalgoEngine) Close() error {
 	e.closeOnce.Do(func() {

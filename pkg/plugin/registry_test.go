@@ -15,6 +15,8 @@ type stubProvider struct {
 	actions   []ActionDescriptor
 	host      HostAPI
 	events    []ActionEvent
+	enabled   map[string]bool
+	optKey    string
 	closed    bool
 	closeErr  error
 }
@@ -28,13 +30,24 @@ func (s *stubProvider) Dispatch(_ context.Context, ev ActionEvent) error {
 	s.events = append(s.events, ev)
 	return nil
 }
+func (s *stubProvider) SetPluginEnabled(_ context.Context, pluginUUID string, enabled bool) error {
+	if s.enabled == nil {
+		s.enabled = make(map[string]bool)
+	}
+	s.enabled[pluginUUID] = enabled
+	return nil
+}
 func (s *stubProvider) Close() error {
 	s.closed = true
 	return s.closeErr
 }
 
 func (s *stubProvider) DynamicOptions(_ context.Context, key string, _ map[string]any) []SelectOption {
-	if key == "stub.items" {
+	wantKey := s.optKey
+	if wantKey == "" {
+		wantKey = "stub.items"
+	}
+	if key == wantKey {
 		return []SelectOption{{Label: "Item A", Value: "a"}}
 	}
 	return nil
@@ -170,5 +183,93 @@ func TestRegistryRegistrationSortingDispatchAndClose(t *testing.T) {
 	}
 	if len(reg.Actions()) != 0 || len(reg.Providers()) != 0 {
 		t.Error("expected registry to be empty after Close()")
+	}
+}
+
+func TestRegistryEnableDisableAndRequiredPlugins(t *testing.T) {
+	reg := NewRegistry()
+	reqProv := &stubProvider{
+		name:   "Required",
+		kind:   ProviderBuiltin,
+		optKey: "req.items",
+		manifests: []Manifest{{
+			UUID:     "com.example.req",
+			Name:     "Required Core",
+			Provider: ProviderBuiltin,
+			Required: true,
+			Actions:  []ActionDescriptor{{UUID: "com.example.req.act", Name: "Core Act"}},
+		}},
+	}
+	reqProv.actions = reqProv.manifests[0].Actions
+
+	optProv := &stubProvider{
+		name: "Optional",
+		kind: ProviderBuiltin,
+		manifests: []Manifest{{
+			UUID:     "com.example.opt",
+			Name:     "Optional Feature",
+			Provider: ProviderBuiltin,
+			Actions:  []ActionDescriptor{{UUID: "com.example.opt.act", Name: "Opt Act"}},
+		}},
+	}
+	optProv.actions = optProv.manifests[0].Actions
+
+	if err := reg.RegisterProvider(reqProv); err != nil {
+		t.Fatalf("RegisterProvider(reqProv) error = %v", err)
+	}
+	if err := reg.RegisterProvider(optProv); err != nil {
+		t.Fatalf("RegisterProvider(optProv) error = %v", err)
+	}
+
+	// Required plugins ignore SetDisabledPlugins and fail SetPluginEnabled(false).
+	reg.SetDisabledPlugins([]string{"com.example.req", "com.example.opt"})
+	if !reg.IsPluginEnabled("com.example.req") {
+		t.Fatal("expected required plugin to remain enabled")
+	}
+	if reg.IsPluginEnabled("com.example.opt") {
+		t.Fatal("expected optional plugin to be disabled")
+	}
+	if err := reg.SetPluginEnabled("com.example.req", false); err == nil {
+		t.Fatal("expected error disabling required plugin")
+	}
+
+	// Filtering hides disabled plugin from Manifests, Actions, Action, Dispatch, DynamicOptions, PI; keeps AllManifests & PluginForAction.
+	if len(reg.Manifests()) != 1 || len(reg.AllManifests()) != 2 {
+		t.Fatalf("unexpected Manifests/AllManifests counts: %d / %d", len(reg.Manifests()), len(reg.AllManifests()))
+	}
+	if _, ok := reg.Action("com.example.opt.act"); ok {
+		t.Fatal("expected disabled action hidden from Action()")
+	}
+	if len(reg.Actions()) != 1 {
+		t.Fatalf("expected 1 enabled action, got %d", len(reg.Actions()))
+	}
+	if m, ok := reg.PluginForAction("com.example.opt.act"); !ok || m.UUID != "com.example.opt" {
+		t.Fatalf("expected PluginForAction to resolve disabled plugin, got (%+v, %v)", m, ok)
+	}
+	if err := reg.Dispatch(context.Background(), ActionEvent{ActionUUID: "com.example.opt.act"}); err == nil {
+		t.Fatal("expected error dispatching disabled action")
+	}
+	if opts := reg.DynamicOptions(context.Background(), "stub.items", nil); len(opts) != 0 {
+		t.Fatalf("expected disabled provider skipped for DynamicOptions, got %+v", opts)
+	}
+	if _, ok := reg.PropertyInspectorSession("c", "com.example.opt.act", deck.ControllerKeypad, deck.Coordinates{}, 0, nil); ok {
+		t.Fatal("expected disabled action PI session false")
+	}
+
+	// Re-enabling restores lookups & notifies listener.
+	if err := reg.SetPluginEnabled("com.example.opt", true); err != nil {
+		t.Fatalf("SetPluginEnabled(true) error = %v", err)
+	}
+	if err := reg.NotifyPluginEnabled(context.Background(), "com.example.opt", true); err != nil {
+		t.Fatalf("NotifyPluginEnabled() error = %v", err)
+	}
+	if !optProv.enabled["com.example.opt"] {
+		t.Fatal("expected PluginLifecycleListener invoked on re-enable")
+	}
+	if opts := reg.DynamicOptions(context.Background(), "stub.items", nil); len(opts) != 1 {
+		t.Fatalf("expected DynamicOptions restored after re-enable, got %+v", opts)
+	}
+	if _, ok := reg.Action("com.example.opt.act"); !ok {
+		t.Fatal("expected action restored after SetPluginEnabled(true)")
 	}
 }

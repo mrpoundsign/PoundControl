@@ -60,6 +60,7 @@ type Manifest struct {
 	Icon                 string             `json:"icon,omitempty"`
 	CategoryIcon         string             `json:"categoryIcon,omitempty"`
 	Provider             ProviderKind       `json:"provider"`
+	Required             bool               `json:"required,omitempty"`
 	GlobalSettingsSchema []SettingField     `json:"globalSettingsSchema,omitempty"`
 	Actions              []ActionDescriptor `json:"actions"`
 }

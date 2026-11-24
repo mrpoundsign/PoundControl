@@ -1025,3 +1025,168 @@ func TestEngineVisualPatchBackgroundColorOverrideAndRestore(t *testing.T) {
 		t.Fatalf("expected configured background & accent restored, got %+v", visRestored)
 	}
 }
+
+type toggleableTestProvider struct {
+	mu       sync.Mutex
+	events   []plugin.ActionEvent
+	enabled  bool
+	host     plugin.HostAPI
+}
+
+func (p *toggleableTestProvider) Kind() plugin.ProviderKind { return plugin.ProviderBuiltin }
+func (p *toggleableTestProvider) Name() string              { return "Optional Feature" }
+func (p *toggleableTestProvider) Manifests() []plugin.Manifest {
+	return []plugin.Manifest{{
+		UUID:     "com.test.optional",
+		Name:     "Optional Feature",
+		Version:  "1.0.0",
+		Provider: plugin.ProviderBuiltin,
+		Actions: []plugin.ActionDescriptor{{
+			UUID:         "com.test.optional.act",
+			PluginUUID:   "com.test.optional",
+			Name:         "Optional Act",
+			Category:     "Optional",
+			DefaultColor: "#22C55E",
+			Provider:     plugin.ProviderBuiltin,
+		}},
+	}}
+}
+func (p *toggleableTestProvider) Actions() []plugin.ActionDescriptor {
+	return p.Manifests()[0].Actions
+}
+func (p *toggleableTestProvider) BindHost(host plugin.HostAPI) {
+	p.mu.Lock()
+	p.host = host
+	p.mu.Unlock()
+}
+func (p *toggleableTestProvider) Dispatch(_ context.Context, ev plugin.ActionEvent) error {
+	p.mu.Lock()
+	p.events = append(p.events, ev)
+	host := p.host
+	p.mu.Unlock()
+	if ev.Type == plugin.EventWillAppear && host != nil {
+		host.UpdateVisual(ev.Context, plugin.VisualPatch{Subtitle: new("READY"), State: new(1)})
+	}
+	return nil
+}
+func (p *toggleableTestProvider) SetPluginEnabled(_ context.Context, _ string, enabled bool) error {
+	p.mu.Lock()
+	p.enabled = enabled
+	p.mu.Unlock()
+	return nil
+}
+func (p *toggleableTestProvider) Close() error { return nil }
+
+func TestEngineSetPluginEnabledLifecyclePersistenceAndUndo(t *testing.T) {
+	reg := plugin.NewRegistry()
+	if err := reg.RegisterProvider(core.New()); err != nil {
+		t.Fatalf("RegisterProvider(core) error = %v", err)
+	}
+	opt := &toggleableTestProvider{enabled: true}
+	if err := reg.RegisterProvider(opt); err != nil {
+		t.Fatalf("RegisterProvider(opt) error = %v", err)
+	}
+
+	store := deck.NewMemoryStore(nil)
+	eng, err := NewEngine(store, reg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	defer func() { _ = eng.Close() }()
+
+	// Cannot disable required core plugin.
+	if err := eng.SetPluginEnabled(core.PluginUUID, false); err == nil {
+		t.Fatal("expected error disabling required core plugin")
+	}
+
+	c00 := deck.Coordinates{Row: 0, Col: 0}
+	if _, err := eng.AssignKeypadAction(c00, "com.test.optional.act"); err != nil {
+		t.Fatalf("AssignKeypadAction() error = %v", err)
+	}
+	if err := eng.UpdateKeypadSlot(c00, "My Opt", "#22C55E", map[string]any{"customKey": "keep-me"}); err != nil {
+		t.Fatalf("UpdateKeypadSlot() error = %v", err)
+	}
+
+	// Add missing-plugin slot at (0,1) directly via loaded store later or inspect disabled behavior first.
+	snapOn := eng.Snapshot()
+	if snapOn.Slots[c00.SlotKey()].Visual.Subtitle != "READY" || snapOn.Slots[c00.SlotKey()].Visual.State != 1 {
+		t.Fatalf("expected active visual READY on enabled slot, got %+v", snapOn.Slots[c00.SlotKey()].Visual)
+	}
+
+	// Disable optional plugin -> WillDisappear dispatched, listener notified, tile renders DISABLED, settings preserved.
+	if err := eng.SetPluginEnabled("com.test.optional", false); err != nil {
+		t.Fatalf("SetPluginEnabled(false) error = %v", err)
+	}
+	if eng.IsPluginEnabled("com.test.optional") {
+		t.Fatal("expected IsPluginEnabled(false)")
+	}
+	opt.mu.Lock()
+	sawDisappear := false
+	for _, ev := range opt.events {
+		if ev.Type == plugin.EventWillDisappear {
+			sawDisappear = true
+		}
+	}
+	stillEnabled := opt.enabled
+	opt.mu.Unlock()
+	if !sawDisappear || stillEnabled {
+		t.Fatalf("expected WillDisappear and enabled=false, sawDisappear=%v stillEnabled=%v", sawDisappear, stillEnabled)
+	}
+
+	snapOff := eng.Snapshot()
+	rOff := snapOff.Slots[c00.SlotKey()]
+	if !rOff.Disabled || rOff.Visual.Subtitle != "DISABLED" || rOff.Config.Settings["customKey"] != "keep-me" {
+		t.Fatalf("expected DISABLED visual with preserved settings, got %+v", rOff)
+	}
+	if err := eng.PressKey(context.Background(), c00); err == nil {
+		t.Fatal("expected pressing disabled plugin key to return error")
+	}
+
+	// Perform another slot edit & undo -> global DisabledPlugins must stay disabled.
+	c01 := deck.Coordinates{Row: 0, Col: 1}
+	if _, err := eng.AssignKeypadAction(c01, core.ActionDelay); err != nil {
+		t.Fatalf("AssignKeypadAction(delay) error = %v", err)
+	}
+	if _, err := eng.Undo(); err != nil {
+		t.Fatalf("Undo() error = %v", err)
+	}
+	if eng.IsPluginEnabled("com.test.optional") {
+		t.Fatal("expected Undo to preserve global DisabledPlugins state")
+	}
+
+	// Reload from persisted store -> optional plugin stays disabled and unavailable action renders MISSING PLUGIN.
+	cfgReloaded, _ := store.Load()
+	cfgReloaded.Profiles[0].Pages[0].Slots["0,1"] = &deck.SlotConfig{
+		Context:    deck.NewUUID(),
+		ActionUUID: "com.uninstalled.missing.act",
+		Title:      "Old",
+	}
+	_ = store.Save(cfgReloaded)
+
+	reg2 := plugin.NewRegistry()
+	_ = reg2.RegisterProvider(core.New())
+	opt2 := &toggleableTestProvider{enabled: true}
+	_ = reg2.RegisterProvider(opt2)
+	eng2, err := NewEngine(store, reg2)
+	if err != nil {
+		t.Fatalf("NewEngine(reload) error = %v", err)
+	}
+	defer func() { _ = eng2.Close() }()
+
+	if eng2.IsPluginEnabled("com.test.optional") {
+		t.Fatal("expected optional plugin disabled after reload")
+	}
+	snapReload := eng2.Snapshot()
+	if !snapReload.Slots["0,1"].Unavailable || snapReload.Slots["0,1"].Visual.Subtitle != "MISSING PLUGIN" {
+		t.Fatalf("expected MISSING PLUGIN visual on uninstalled slot, got %+v", snapReload.Slots["0,1"])
+	}
+
+	// Re-enable optional plugin -> listener notified, WillAppear dispatched, READY restored.
+	if err := eng2.SetPluginEnabled("com.test.optional", true); err != nil {
+		t.Fatalf("SetPluginEnabled(true) error = %v", err)
+	}
+	snapBack := eng2.Snapshot()
+	if snapBack.Slots[c00.SlotKey()].Disabled || snapBack.Slots[c00.SlotKey()].Visual.Subtitle != "READY" {
+		t.Fatalf("expected restored READY visual after re-enable, got %+v", snapBack.Slots[c00.SlotKey()])
+	}
+}

@@ -32,10 +32,14 @@ type SlotVisual struct {
 
 // RenderedSlot pairs a persisted SlotConfig with its live SlotVisual and resolved ActionDescriptor.
 type RenderedSlot struct {
-	Config   *deck.SlotConfig         `json:"config,omitempty"`
-	Visual   SlotVisual               `json:"visual"`
-	Action   *plugin.ActionDescriptor `json:"action,omitempty"`
-	AutoBack bool                     `json:"autoBack,omitempty"`
+	Config      *deck.SlotConfig         `json:"config,omitempty"`
+	Visual      SlotVisual               `json:"visual"`
+	Action      *plugin.ActionDescriptor `json:"action,omitempty"`
+	AutoBack    bool                     `json:"autoBack,omitempty"`
+	Disabled    bool                     `json:"disabled,omitempty"`
+	Unavailable bool                     `json:"unavailable,omitempty"`
+	PluginUUID  string                   `json:"pluginUuid,omitempty"`
+	PluginName  string                   `json:"pluginName,omitempty"`
 }
 
 // ProfileSummary describes one configured deck profile for headers and selectors.
@@ -70,8 +74,9 @@ type Snapshot struct {
 	InFolder          bool                    `json:"inFolder"`
 	Slots             map[string]RenderedSlot `json:"slots"`
 	DialSlots         map[int]RenderedSlot    `json:"dialSlots"`
-	ColorPalette      []deck.ColorSwatch      `json:"colorPalette,omitempty"`
-	PluginCount       int                     `json:"pluginCount"`
+	ColorPalette    []deck.ColorSwatch `json:"colorPalette,omitempty"`
+	DisabledPlugins []string           `json:"disabledPlugins,omitempty"`
+	PluginCount     int                `json:"pluginCount"`
 	ActionCount       int                     `json:"actionCount"`
 	CanUndo           bool                    `json:"canUndo"`
 	CanRedo           bool                    `json:"canRedo"`
@@ -146,6 +151,10 @@ func NewEngine(store deck.Store, reg *plugin.Registry) (*Engine, error) {
 		subs:        make(map[uint64]func(Snapshot)),
 	}
 	reg.SetHost(&engineHost{eng: eng})
+	reg.SetDisabledPlugins(cfg.DisabledPlugins)
+	for _, pid := range reg.DisabledPlugins() {
+		_ = reg.NotifyPluginEnabled(context.Background(), pid, false)
+	}
 
 	eng.mu.RLock()
 	appear := eng.visibleEventsLocked(plugin.EventWillAppear)
@@ -313,9 +322,10 @@ func (e *Engine) snapshotLocked() Snapshot {
 		Folders:           folders,
 		InFolder:          inFolder,
 		Slots:             renderedSlots,
-		DialSlots:         renderedDials,
-		ColorPalette:      slices.Clone(e.cfg.ColorPalette),
-		PluginCount:       len(e.registry.Providers()),
+		DialSlots:       renderedDials,
+		ColorPalette:    slices.Clone(e.cfg.ColorPalette),
+		DisabledPlugins: slices.Clone(e.cfg.DisabledPlugins),
+		PluginCount:     len(e.registry.Providers()),
 		ActionCount:       len(e.registry.Actions()),
 		CanUndo:           len(e.undoStack) > 0,
 		CanRedo:           len(e.redoStack) > 0,
@@ -331,6 +341,22 @@ func (e *Engine) renderSlotLocked(slot *deck.SlotConfig) RenderedSlot {
 	if desc, ok := e.registry.Action(cp.ActionUUID); ok {
 		descCopy := desc
 		descPtr = &descCopy
+	}
+
+	var (
+		disabledPlugin    bool
+		unavailablePlugin bool
+		pluginUUID        string
+		pluginName        string
+	)
+	if descPtr != nil {
+		pluginUUID = descPtr.PluginUUID
+	} else if m, known := e.registry.PluginForAction(cp.ActionUUID); known && !e.registry.IsPluginEnabled(m.UUID) {
+		disabledPlugin = true
+		pluginUUID = m.UUID
+		pluginName = m.Name
+	} else {
+		unavailablePlugin = true
 	}
 
 	title := cp.Title
@@ -357,46 +383,69 @@ func (e *Engine) renderSlotLocked(slot *deck.SlotConfig) RenderedSlot {
 		BackgroundImage: cp.BackgroundImage,
 		State:           cp.State,
 	}
-	live, hasLive := e.visuals[cp.Context]
-	if hasLive {
-		if live.hasTitle {
-			vis.Title = live.vis.Title
+	switch {
+	case disabledPlugin:
+		vis.Subtitle = "DISABLED"
+		vis.Color = "#64748B"
+		vis.BackgroundColor = "#14161D"
+		vis.BackgroundImage = ""
+		vis.State = 0
+		vis.Feedback = map[string]any{"value": "DISABLED"}
+	case unavailablePlugin:
+		vis.Subtitle = "MISSING PLUGIN"
+		vis.Color = "#F59E0B"
+		vis.State = 0
+		vis.Feedback = map[string]any{"value": "MISSING"}
+	default:
+		live, hasLive := e.visuals[cp.Context]
+		if hasLive {
+			if live.hasTitle {
+				vis.Title = live.vis.Title
+			}
+			if live.vis.Subtitle != "" {
+				vis.Subtitle = live.vis.Subtitle
+			}
+			if live.vis.Color != "" {
+				vis.Color = live.vis.Color
+			}
+			if live.vis.BackgroundColor != "" {
+				vis.BackgroundColor = live.vis.BackgroundColor
+				vis.BackgroundImage = ""
+			}
+			if live.vis.ImageURI != "" {
+				vis.ImageURI = live.vis.ImageURI
+			}
+			if len(live.vis.Feedback) > 0 {
+				vis.Feedback = maps.Clone(live.vis.Feedback)
+			}
+			if live.vis.Flash != "" {
+				vis.Flash = live.vis.Flash
+			}
+			vis.State = live.vis.State
 		}
-		if live.vis.Subtitle != "" {
-			vis.Subtitle = live.vis.Subtitle
+		if vis.ImageURI == "" && descPtr != nil && descPtr.DefaultImage != "" {
+			vis.ImageURI = descPtr.DefaultImage
 		}
-		if live.vis.Color != "" {
-			vis.Color = live.vis.Color
+		if cp.HideTitle {
+			vis.Title = ""
+		} else if descPtr != nil && descPtr.HideTitle && (!hasLive || !live.hasTitle) && vis.ImageURI != "" &&
+			(cp.Title == descPtr.DefaultTitle || cp.Title == descPtr.Name) {
+			vis.Title = ""
 		}
-		if live.vis.BackgroundColor != "" {
-			vis.BackgroundColor = live.vis.BackgroundColor
-			vis.BackgroundImage = ""
-		}
-		if live.vis.ImageURI != "" {
-			vis.ImageURI = live.vis.ImageURI
-		}
-		if len(live.vis.Feedback) > 0 {
-			vis.Feedback = maps.Clone(live.vis.Feedback)
-		}
-		if live.vis.Flash != "" {
-			vis.Flash = live.vis.Flash
-		}
-		vis.State = live.vis.State
 	}
-	if vis.ImageURI == "" && descPtr != nil && descPtr.DefaultImage != "" {
-		vis.ImageURI = descPtr.DefaultImage
-	}
-	if cp.HideTitle {
-		vis.Title = ""
-	} else if descPtr != nil && descPtr.HideTitle && (!hasLive || !live.hasTitle) && vis.ImageURI != "" &&
-		(cp.Title == descPtr.DefaultTitle || cp.Title == descPtr.Name) {
+
+	if cp.HideTitle && (disabledPlugin || unavailablePlugin) {
 		vis.Title = ""
 	}
 
 	return RenderedSlot{
-		Config: cp,
-		Visual: vis,
-		Action: descPtr,
+		Config:      cp,
+		Visual:      vis,
+		Action:      descPtr,
+		Disabled:    disabledPlugin,
+		Unavailable: unavailablePlugin,
+		PluginUUID:  pluginUUID,
+		PluginName:  pluginName,
 	}
 }
 
@@ -445,15 +494,34 @@ func (e *Engine) activeContainerLocked(prof *deck.Profile) (map[string]*deck.Slo
 }
 
 func (e *Engine) visibleEventsLocked(evType plugin.EventType) []plugin.ActionEvent {
+	return e.collectVisibleEventsLocked(evType, "")
+}
+
+func (e *Engine) visibleEventsForPluginLocked(evType plugin.EventType, pluginUUID string) []plugin.ActionEvent {
+	return e.collectVisibleEventsLocked(evType, strings.TrimSpace(pluginUUID))
+}
+
+func (e *Engine) collectVisibleEventsLocked(evType plugin.EventType, filterPluginUUID string) []plugin.ActionEvent {
 	prof := e.activeProfileLocked()
 	slotsMap, dialsMap, _ := e.activeContainerLocked(prof)
 	events := make([]plugin.ActionEvent, 0, prof.Grid.TotalSlots()+prof.Dials)
+
+	matchSlot := func(actionUUID string) bool {
+		if e.registry == nil {
+			return filterPluginUUID == ""
+		}
+		m, known := e.registry.PluginForAction(actionUUID)
+		if filterPluginUUID != "" {
+			return known && m.UUID == filterPluginUUID
+		}
+		return !known || e.registry.IsPluginEnabled(m.UUID)
+	}
 
 	for row := range prof.Grid.Rows {
 		for col := range prof.Grid.Cols {
 			c := deck.Coordinates{Row: row, Col: col}
 			slot := slotsMap[c.SlotKey()]
-			if slot == nil {
+			if slot == nil || !matchSlot(slot.ActionUUID) {
 				continue
 			}
 			events = append(events, plugin.ActionEvent{
@@ -470,7 +538,7 @@ func (e *Engine) visibleEventsLocked(evType plugin.EventType) []plugin.ActionEve
 
 	for i := range prof.Dials {
 		slot := dialsMap[i]
-		if slot == nil {
+		if slot == nil || !matchSlot(slot.ActionUUID) {
 			continue
 		}
 		events = append(events, plugin.ActionEvent{
@@ -484,6 +552,51 @@ func (e *Engine) visibleEventsLocked(evType plugin.EventType) []plugin.ActionEve
 		})
 	}
 	return events
+}
+
+func (e *Engine) clearPluginVisualsLocked(pluginUUID string) {
+	if e.cfg == nil || e.registry == nil {
+		return
+	}
+	clearSlotMap := func(m map[string]*deck.SlotConfig) {
+		for _, slot := range m {
+			if slot == nil {
+				continue
+			}
+			if mf, ok := e.registry.PluginForAction(slot.ActionUUID); ok && mf.UUID == pluginUUID {
+				delete(e.visuals, slot.Context)
+			}
+		}
+	}
+	clearDialMap := func(m map[int]*deck.SlotConfig) {
+		for _, slot := range m {
+			if slot == nil {
+				continue
+			}
+			if mf, ok := e.registry.PluginForAction(slot.ActionUUID); ok && mf.UUID == pluginUUID {
+				delete(e.visuals, slot.Context)
+			}
+		}
+	}
+	for _, prof := range e.cfg.Profiles {
+		if prof == nil {
+			continue
+		}
+		for _, pg := range prof.Pages {
+			if pg == nil {
+				continue
+			}
+			clearSlotMap(pg.Slots)
+			clearDialMap(pg.Dials)
+		}
+		for _, f := range prof.Folders {
+			if f == nil {
+				continue
+			}
+			clearSlotMap(f.Slots)
+			clearDialMap(f.Dials)
+		}
+	}
 }
 
 func (e *Engine) dispatchAll(ctx context.Context, events []plugin.ActionEvent) {
@@ -2079,8 +2192,11 @@ func (e *Engine) applyHistoryStep(isRedo bool) (string, error) {
 	topIdx := len(stack) - 1
 	target := stack[topIdx]
 	nextCfg := target.cfg.Clone()
-	if e.cfg != nil && e.cfg.ColorPalette != nil {
-		nextCfg.ColorPalette = slices.Clone(e.cfg.ColorPalette)
+	if e.cfg != nil {
+		if e.cfg.ColorPalette != nil {
+			nextCfg.ColorPalette = slices.Clone(e.cfg.ColorPalette)
+		}
+		nextCfg.DisabledPlugins = slices.Clone(e.cfg.DisabledPlugins)
 	}
 	nextCfg.Normalize()
 	e.mu.Unlock()
@@ -2263,6 +2379,110 @@ func (e *Engine) ReloadVisibleActions() {
 
 	e.dispatchAll(context.Background(), appear)
 	e.notifySubscribers()
+}
+
+// DisabledPlugins returns a cloned sorted list of disabled plugin UUIDs.
+func (e *Engine) DisabledPlugins() []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.cfg == nil {
+		return nil
+	}
+	return slices.Clone(e.cfg.DisabledPlugins)
+}
+
+// IsPluginEnabled reports whether pluginUUID is currently enabled.
+func (e *Engine) IsPluginEnabled(pluginUUID string) bool {
+	pid := strings.TrimSpace(pluginUUID)
+	if pid == "" {
+		return true
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.cfg == nil {
+		return true
+	}
+	return !slices.Contains(e.cfg.DisabledPlugins, pid)
+}
+
+// SetPluginEnabled enables or disables pluginUUID persistently and updates live plugin runtime & slot visuals.
+func (e *Engine) SetPluginEnabled(pluginUUID string, enabled bool) error {
+	pid := strings.TrimSpace(pluginUUID)
+	if pid == "" {
+		return errors.New("plugin UUID cannot be empty")
+	}
+	manifest, ok := e.registry.Manifest(pid)
+	if !ok {
+		return fmt.Errorf("unknown plugin %q", pid)
+	}
+	if !enabled && manifest.Required {
+		return fmt.Errorf("plugin %q is required and cannot be disabled", manifest.Name)
+	}
+
+	var disappear []plugin.ActionEvent
+	if !enabled {
+		e.mu.RLock()
+		curEnabled := e.cfg == nil || !slices.Contains(e.cfg.DisabledPlugins, pid)
+		if curEnabled {
+			disappear = e.visibleEventsForPluginLocked(plugin.EventWillDisappear, pid)
+		}
+		e.mu.RUnlock()
+		if len(disappear) > 0 {
+			e.dispatchAll(context.Background(), disappear)
+		}
+	}
+
+	e.opMu.Lock()
+	e.mu.Lock()
+	curEnabled := e.cfg == nil || !slices.Contains(e.cfg.DisabledPlugins, pid)
+	if curEnabled == enabled {
+		e.mu.Unlock()
+		_ = e.registry.SetPluginEnabled(pid, enabled)
+		e.opMu.Unlock()
+		return nil
+	}
+
+	prevDisabled := slices.Clone(e.cfg.DisabledPlugins)
+	var nextDisabled []string
+	if enabled {
+		for _, id := range prevDisabled {
+			if id != pid {
+				nextDisabled = append(nextDisabled, id)
+			}
+		}
+	} else {
+		nextDisabled = append(slices.Clone(prevDisabled), pid)
+	}
+	e.cfg.DisabledPlugins = deck.NormalizeDisabledPlugins(nextDisabled)
+	if !enabled {
+		e.clearPluginVisualsLocked(pid)
+	}
+	cfgCopy := e.cfg.Clone()
+	e.mu.Unlock()
+
+	if err := e.store.Save(cfgCopy); err != nil {
+		e.mu.Lock()
+		e.cfg.DisabledPlugins = prevDisabled
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return err
+	}
+
+	_ = e.registry.SetPluginEnabled(pid, enabled)
+	var appear []plugin.ActionEvent
+	if enabled {
+		e.mu.RLock()
+		appear = e.visibleEventsForPluginLocked(plugin.EventWillAppear, pid)
+		e.mu.RUnlock()
+	}
+	e.opMu.Unlock()
+
+	_ = e.registry.NotifyPluginEnabled(context.Background(), pid, enabled)
+	if len(appear) > 0 {
+		e.dispatchAll(context.Background(), appear)
+	}
+	e.notifySubscribers()
+	return nil
 }
 
 // PropertyInspectorSession returns an HTML/WebView Property Inspector session for the selected slot or dial, if supported.

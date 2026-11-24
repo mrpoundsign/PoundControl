@@ -137,8 +137,12 @@ func main() {
 		log.Printf("start web deck server: %v", webErr)
 	}
 
-	obsProvider.StartFromGlobalSettings()
-	sbProvider.StartFromGlobalSettings()
+	if eng.IsPluginEnabled(obs.PluginUUID) {
+		obsProvider.StartFromGlobalSettings()
+	}
+	if eng.IsPluginEnabled(soundboard.PluginUUID) {
+		sbProvider.StartFromGlobalSettings()
+	}
 
 	ui.CheckStartupUpdate(win.Window(), version.Version)
 
@@ -151,7 +155,7 @@ func collectHotkeyBindings(snap app.Snapshot) []hotkey.Binding {
 		for col := range snap.Grid.Cols {
 			c := deck.Coordinates{Row: row, Col: col}
 			r, ok := snap.Slots[c.SlotKey()]
-			if !ok || r.Config == nil || r.Config.Hotkey == "" {
+			if !ok || r.Config == nil || r.Config.Hotkey == "" || r.Disabled || r.Unavailable {
 				continue
 			}
 			bindings = append(bindings, hotkey.Binding{

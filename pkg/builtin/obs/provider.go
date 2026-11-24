@@ -573,6 +573,19 @@ func (p *Provider) StartFromGlobalSettings() {
 	}
 }
 
+// SetPluginEnabled pauses OBS WebSocket connectivity when disabled and restores AutoConnect when re-enabled.
+func (p *Provider) SetPluginEnabled(_ context.Context, pluginUUID string, enabled bool) error {
+	if pluginUUID != PluginUUID {
+		return nil
+	}
+	if !enabled {
+		p.Disconnect()
+		return nil
+	}
+	p.StartFromGlobalSettings()
+	return nil
+}
+
 // Close disconnects OBS, clears tracked state, and releases subscribers.
 func (p *Provider) Close() error {
 	p.mu.Lock()

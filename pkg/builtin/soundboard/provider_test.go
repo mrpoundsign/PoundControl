@@ -890,3 +890,55 @@ func TestSoundboardAsyncOverrideCancelsInFlightOtherSlot(t *testing.T) {
 		t.Fatalf("expected cancelled slow-btn never played after override, cSlow=%d playCalls=%d", cSlow, eng.playCalls)
 	}
 }
+
+func TestSoundboardSetPluginEnabledStopsAudioAndResumes(t *testing.T) {
+	dir := t.TempDir()
+	wavPath := filepath.Join(dir, "clip.wav")
+	writeTestWAV(t, wavPath, MixerSampleRate)
+
+	eng := newFakeAudioEngine()
+	host := newFakeHostAPI()
+	host.globalSettings[PluginUUID] = map[string]any{
+		"outputDevice": "Speakers (Realtek)",
+		"masterVolume": 60,
+		"maxVoices":    6,
+	}
+
+	prov := NewWithOptions(Options{
+		Engine:               eng,
+		FileCheckInterval:    -1,
+		PlaybackTickInterval: -1,
+		SyncDecode:           true,
+	})
+	t.Cleanup(func() { _ = prov.Close() })
+	prov.BindHost(host)
+	prov.StartFromGlobalSettings()
+
+	if err := prov.Dispatch(context.Background(), plugin.ActionEvent{
+		Type:       plugin.EventKeyDown,
+		Context:    "sb-slot",
+		ActionUUID: ActionPlaySound,
+		Settings:   map[string]any{"filePath": wavPath},
+	}); err != nil {
+		t.Fatalf("KeyDown(play) error = %v", err)
+	}
+	if eng.TotalActive() != 1 {
+		t.Fatalf("expected active sound before disable, got %d", eng.TotalActive())
+	}
+
+	if err := prov.SetPluginEnabled(context.Background(), PluginUUID, false); err != nil {
+		t.Fatalf("SetPluginEnabled(false) error = %v", err)
+	}
+	if eng.TotalActive() != 0 || !prov.disabled.Load() {
+		t.Fatalf("expected audio stopped and disabled=true, active=%d disabled=%v", eng.TotalActive(), prov.disabled.Load())
+	}
+
+	// Update saved volume while disabled; re-enabling applies global settings.
+	host.globalSettings[PluginUUID]["masterVolume"] = 80
+	if err := prov.SetPluginEnabled(context.Background(), PluginUUID, true); err != nil {
+		t.Fatalf("SetPluginEnabled(true) error = %v", err)
+	}
+	if prov.disabled.Load() || currentVolumePercent(eng.MasterVolume()) != 80 {
+		t.Fatalf("expected enabled and 80%% volume applied, disabled=%v vol=%v", prov.disabled.Load(), eng.MasterVolume())
+	}
+}

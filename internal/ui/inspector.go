@@ -29,6 +29,7 @@ type ActionInspector struct {
 	sdCtrl                  SDPluginController
 	onOpenPluginsSettings   func()
 	onOpenPaletteSettings   func()
+	onSetPluginEnabled      func(string, bool) error
 	onMoveSelected          func()
 	onCopySelected          func()
 	assetsDir               string
@@ -63,15 +64,19 @@ type ActionInspector struct {
 	copyBtn            *widget.Button
 	lastCapture        *hotkeyCaptureSession
 
-	selCtrl         deck.ControllerType
-	selCoords       deck.Coordinates
-	selDial         int
-	boundContext    string
-	boundActionID   string
-	boundAutoBack   bool
-	boundHistoryRev uint64
-	curSettings     map[string]any
-	syncing         bool
+	selCtrl          deck.ControllerType
+	selCoords        deck.Coordinates
+	selDial          int
+	boundContext     string
+	boundActionID    string
+	boundAutoBack    bool
+	boundDisabled    bool
+	boundUnavailable bool
+	boundHasSchema   bool
+	boundPluginUUID  string
+	boundHistoryRev  uint64
+	curSettings      map[string]any
+	syncing          bool
 }
 
 // NewActionInspector constructs an inspector panel bound to engine.
@@ -174,6 +179,11 @@ func (ins *ActionInspector) SetOnOpenPaletteSettings(fn func()) {
 	ins.onOpenPaletteSettings = fn
 }
 
+// SetOnSetPluginEnabled registers a callback invoked when the user clicks Enable on a disabled plugin's slot.
+func (ins *ActionInspector) SetOnSetPluginEnabled(fn func(string, bool) error) {
+	ins.onSetPluginEnabled = fn
+}
+
 // SetAssetsDir configures the directory where imported custom button images are stored.
 func (ins *ActionInspector) SetAssetsDir(dir string) {
 	ins.assetsDir = strings.TrimSpace(dir)
@@ -269,17 +279,24 @@ func (ins *ActionInspector) SetSelection(snap app.Snapshot, ctrl deck.Controller
 	sameBinding := ins.boundContext == cfg.Context &&
 		ins.boundActionID == cfg.ActionUUID &&
 		!ins.boundAutoBack &&
+		ins.boundDisabled == rendered.Disabled &&
+		ins.boundUnavailable == rendered.Unavailable &&
+		ins.boundHasSchema == (rendered.Action != nil) &&
 		ins.boundHistoryRev == snap.HistoryRevision
 	ins.boundContext = cfg.Context
 	ins.boundActionID = cfg.ActionUUID
 	ins.boundAutoBack = false
+	ins.boundDisabled = rendered.Disabled
+	ins.boundUnavailable = rendered.Unavailable
+	ins.boundHasSchema = rendered.Action != nil
+	ins.boundPluginUUID = rendered.PluginUUID
 	ins.boundHistoryRev = snap.HistoryRevision
 	ins.curSettings = cfg.Settings
 
 	if sameBinding {
 		return
 	}
-	ins.rebuildForm(cfg, rendered.Action)
+	ins.rebuildForm(rendered)
 }
 
 func (ins *ActionInspector) clearForm(title, message string, canTrigger bool) {
@@ -287,6 +304,10 @@ func (ins *ActionInspector) clearForm(title, message string, canTrigger bool) {
 	ins.accordion = nil
 	ins.actionLbl.SetText(title)
 	ins.metaLbl.SetText(message)
+	ins.boundDisabled = false
+	ins.boundUnavailable = false
+	ins.boundHasSchema = false
+	ins.boundPluginUUID = ""
 	ins.schemaForm.reset()
 	ins.titleEntry = nil
 	ins.accentColorCtrl = nil
@@ -316,9 +337,12 @@ func (ins *ActionInspector) clearForm(title, message string, canTrigger bool) {
 	}
 }
 
-func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.ActionDescriptor) {
+func (ins *ActionInspector) rebuildForm(rendered *app.RenderedSlot) {
 	ins.syncing = true
 	defer func() { ins.syncing = false }()
+
+	cfg := rendered.Config
+	desc := rendered.Action
 
 	ins.saveSectionOpenState()
 	ins.accordion = nil
@@ -328,13 +352,22 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 	name := cfg.ActionUUID
 	meta := string(plugin.ProviderBuiltin)
 	var schema []plugin.SettingField
-	if desc != nil {
+	switch {
+	case desc != nil:
 		name = desc.Name
 		meta = fmt.Sprintf("%s • %s", desc.Category, desc.Provider)
 		if desc.Tooltip != "" {
 			meta += "\n" + desc.Tooltip
 		}
 		schema = desc.SettingsSchema
+	case rendered.Disabled:
+		label := strings.TrimSpace(rendered.PluginName)
+		if label == "" {
+			label = rendered.PluginUUID
+		}
+		meta = fmt.Sprintf("Disabled Feature (%s) • %s", label, cfg.ActionUUID)
+	case rendered.Unavailable:
+		meta = "Missing Plugin • " + cfg.ActionUUID
 	}
 
 	ins.actionLbl.SetText(name)
@@ -394,7 +427,38 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 	}
 
 	var items []fyne.CanvasObject
-	if ins.sdCtrl != nil {
+	switch {
+	case rendered.Disabled:
+		label := strings.TrimSpace(rendered.PluginName)
+		if label == "" {
+			label = rendered.PluginUUID
+		}
+		warnLbl := widget.NewLabel(fmt.Sprintf(
+			"Feature %q is currently disabled. Your saved button settings are preserved.",
+			label,
+		))
+		warnLbl.Wrapping = fyne.TextWrapWord
+		warnLbl.Importance = widget.WarningImportance
+		items = append(items, warnLbl)
+		if ins.onSetPluginEnabled != nil && rendered.PluginUUID != "" {
+			pid := rendered.PluginUUID
+			enableBtn := widget.NewButton("Enable "+label, func() {
+				if err := ins.onSetPluginEnabled(pid, true); err != nil {
+					ins.reportStatus("Enable failed: " + err.Error())
+				}
+			})
+			enableBtn.Importance = widget.HighImportance
+			items = append(items, enableBtn)
+		}
+		items = append(items, widget.NewSeparator())
+	case rendered.Unavailable:
+		warnLbl := widget.NewLabel("The plugin for this action is not currently installed. Your saved button settings are preserved.")
+		warnLbl.Wrapping = fyne.TextWrapWord
+		warnLbl.Importance = widget.WarningImportance
+		items = append(items, warnLbl, widget.NewSeparator())
+	}
+
+	if ins.sdCtrl != nil && desc != nil {
 		if reqMajor, needsNode := ins.sdCtrl.NeedsNodeForAction(cfg.ActionUUID); needsNode {
 			warnLbl := widget.NewLabel(fmt.Sprintf(
 				"Node.js %d+ runtime is required for this external plugin to run. You can install or configure Node.js in Settings -> Plugins.",
@@ -491,7 +555,11 @@ func (ins *ActionInspector) rebuildForm(cfg *deck.SlotConfig, desc *plugin.Actio
 	ins.formScroll.ScrollToTop()
 
 	ins.saveBtn.Enable()
-	ins.triggerBtn.Enable()
+	if desc != nil && !rendered.Disabled && !rendered.Unavailable {
+		ins.triggerBtn.Enable()
+	} else {
+		ins.triggerBtn.Disable()
+	}
 	ins.clearBtn.Enable()
 	if ins.moveBtn != nil {
 		ins.moveBtn.Enable()
@@ -559,10 +627,14 @@ func (ins *ActionInspector) handleSave() {
 	}
 	hideTitle := ins.hideTitleCheck != nil && ins.hideTitleCheck.Checked
 
-	settings, err := ins.schemaForm.collectAndValidate()
-	if err != nil {
-		ins.reportStatus(err.Error())
-		return
+	var settings map[string]any
+	if ins.boundHasSchema {
+		var err error
+		settings, err = ins.schemaForm.collectAndValidate()
+		if err != nil {
+			ins.reportStatus(err.Error())
+			return
+		}
 	}
 
 	canonicalHotkey := ""

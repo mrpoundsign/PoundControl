@@ -23,6 +23,7 @@ import (
 
 	"github.com/mrpoundsign/PoundControl/internal/app"
 	"github.com/mrpoundsign/PoundControl/internal/version"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/obs"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 	"github.com/mrpoundsign/PoundControl/pkg/sdplugin"
@@ -44,6 +45,8 @@ const (
 
 type settingsTabsResult struct {
 	tabs        *container.AppTabs
+	obsTabIdx   int
+	webTabIdx   int
 	pluginTabs  map[string]int
 	pluginViews map[string]*pluginConfigTabView
 	cleanup     func()
@@ -114,8 +117,14 @@ func buildSettingsTabsView(
 		paletteSection,
 	)
 
-	// OBS Studio Tab
-	obsContent, obsCleanup := buildOBSConnectionContent(obsCtrl, onStatus)
+	// OBS Studio Tab (only shown when OBS plugin is enabled)
+	var (
+		obsContent fyne.CanvasObject
+		obsCleanup func()
+	)
+	if engine.IsPluginEnabled(obs.PluginUUID) {
+		obsContent, obsCleanup = buildOBSConnectionContent(obsCtrl, onStatus)
+	}
 
 	// Web Deck Tab
 	webTab, webCleanup := buildWebDeckSettingsTab(webCtrl, onStatus)
@@ -136,9 +145,14 @@ func buildSettingsTabsView(
 	tabItems := make([]*container.TabItem, 0, 3+len(configurable))
 	tabItems = append(tabItems,
 		container.NewTabItem("General", container.NewScroll(container.NewPadded(generalTab))),
-		container.NewTabItem("OBS Studio", container.NewScroll(container.NewPadded(obsContent))),
-		container.NewTabItem("Web Deck", webTab),
 	)
+	obsTabIdx := -1
+	if obsContent != nil {
+		obsTabIdx = len(tabItems)
+		tabItems = append(tabItems, container.NewTabItem("OBS Studio", container.NewScroll(container.NewPadded(obsContent))))
+	}
+	webTabIdx := len(tabItems)
+	tabItems = append(tabItems, container.NewTabItem("Web Deck", webTab))
 
 	pluginTabs := make(map[string]int, len(configurable))
 	pluginViews := make(map[string]*pluginConfigTabView, len(configurable))
@@ -171,6 +185,8 @@ func buildSettingsTabsView(
 	}
 	return settingsTabsResult{
 		tabs:        tabs,
+		obsTabIdx:   obsTabIdx,
+		webTabIdx:   webTabIdx,
 		pluginTabs:  pluginTabs,
 		pluginViews: pluginViews,
 		cleanup:     cleanup,
@@ -322,15 +338,82 @@ func buildPluginsSettingsTab(
 	piViewer PIViewer,
 	onReloadPlugins func() error,
 	onConfigurePlugin func(string),
+	onSetPluginEnabled func(string, bool) error,
 	onStatus func(string),
 ) (fyne.CanvasObject, func()) {
 	providersBox := container.NewVBox()
-	rebuildProviders := func() {
+	var rebuildProviders func()
+	rebuildProviders = func() {
 		providersBox.Objects = nil
-		for _, p := range engine.Registry().Providers() {
-			cardTitle := widget.NewLabel(fmt.Sprintf("%s (%s) — %d actions", p.Name(), p.Kind(), len(p.Actions())))
-			cardTitle.TextStyle = fyne.TextStyle{Bold: true}
-			providersBox.Add(cardTitle)
+		manifests := engine.Registry().AllManifests()
+		slices.SortFunc(manifests, func(a, b plugin.Manifest) int {
+			aBuilt := a.Provider == plugin.ProviderBuiltin
+			bBuilt := b.Provider == plugin.ProviderBuiltin
+			if aBuilt != bBuilt {
+				if aBuilt {
+					return -1
+				}
+				return 1
+			}
+			if c := cmp.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name)); c != 0 {
+				return c
+			}
+			return cmp.Compare(a.UUID, b.UUID)
+		})
+
+		for _, m := range manifests {
+			curEnabled := engine.IsPluginEnabled(m.UUID)
+			var headerRow fyne.CanvasObject
+			if m.Required {
+				chk := widget.NewCheck(m.Name+" (Required)", nil)
+				chk.SetChecked(true)
+				chk.Disable()
+				headerRow = chk
+			} else {
+				var chk *widget.Check
+				reverting := false
+				chk = widget.NewCheck(m.Name, nil)
+				chk.SetChecked(curEnabled)
+				pid := m.UUID
+				chk.OnChanged = func(checked bool) {
+					if reverting {
+						return
+					}
+					var err error
+					if onSetPluginEnabled != nil {
+						err = onSetPluginEnabled(pid, checked)
+					} else {
+						err = engine.SetPluginEnabled(pid, checked)
+					}
+					if err != nil {
+						reverting = true
+						chk.SetChecked(!checked)
+						reverting = false
+						if onStatus != nil {
+							onStatus(err.Error())
+						}
+						return
+					}
+					rebuildProviders()
+				}
+
+				if curEnabled && onConfigurePlugin != nil && (m.UUID == obs.PluginUUID || len(m.GlobalSettingsSchema) > 0) {
+					cfgBtn := widget.NewButtonWithIcon("Configure", theme.SettingsIcon(), func() {
+						onConfigurePlugin(pid)
+					})
+					headerRow = container.NewBorder(nil, nil, nil, cfgBtn, chk)
+				} else {
+					headerRow = chk
+				}
+			}
+
+			meta := fmt.Sprintf("%s • %d actions", m.Provider, len(m.Actions))
+			if desc := strings.TrimSpace(m.Description); desc != "" {
+				meta += " — " + desc
+			}
+			metaLbl := widget.NewLabel(meta)
+			metaLbl.Wrapping = fyne.TextWrapWord
+			providersBox.Add(container.NewVBox(headerRow, metaLbl, widget.NewSeparator()))
 		}
 		providersBox.Refresh()
 	}
@@ -368,7 +451,7 @@ func buildPluginsSettingsTab(
 	}
 
 	items := []fyne.CanvasObject{
-		widget.NewLabelWithStyle("Active Providers", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewLabelWithStyle("Features & Plugins", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		providersBox,
 	}
 

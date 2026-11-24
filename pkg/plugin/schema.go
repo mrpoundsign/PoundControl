@@ -85,6 +85,12 @@ type GlobalSettingsListener interface {
 	OnGlobalSettingsChanged(ctx context.Context, pluginUUID string, settings map[string]any) error
 }
 
+// PluginLifecycleListener can be implemented optionally by a Provider to pause or resume
+// connections, audio engines, or background workers when a plugin is disabled or re-enabled.
+type PluginLifecycleListener interface {
+	SetPluginEnabled(ctx context.Context, pluginUUID string, enabled bool) error
+}
+
 // PropertyInspectorSession describes an HTML/WebView Property Inspector endpoint for a slot or dial.
 type PropertyInspectorSession struct {
 	Title string `json:"title"`

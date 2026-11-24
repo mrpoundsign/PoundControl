@@ -197,6 +197,32 @@ type Config struct {
 	Profiles        []*Profile                `json:"profiles"`
 	ColorPalette    []ColorSwatch             `json:"colorPalette"`
 	PluginSettings  map[string]map[string]any `json:"pluginSettings,omitempty"`
+	DisabledPlugins []string                  `json:"disabledPlugins,omitempty"`
+}
+
+// NormalizeDisabledPlugins trims, deduplicates, and sorts disabled plugin UUIDs cleanly.
+func NormalizeDisabledPlugins(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	slices.Sort(out)
+	return out
 }
 
 // DefaultConfig returns a valid baseline configuration with a 5x3 "Default" profile.
@@ -246,6 +272,7 @@ func (c *Config) Clone() *Config {
 		Profiles:        profiles,
 		ColorPalette:    slices.Clone(c.ColorPalette),
 		PluginSettings:  pluginSettings,
+		DisabledPlugins: slices.Clone(c.DisabledPlugins),
 	}
 }
 
@@ -258,6 +285,7 @@ func (c *Config) Normalize() {
 		c.SchemaVersion = CurrentSchemaVersion
 	}
 	c.ColorPalette = NormalizeColorPalette(c.ColorPalette)
+	c.DisabledPlugins = NormalizeDisabledPlugins(c.DisabledPlugins)
 	if c.PluginSettings == nil {
 		c.PluginSettings = make(map[string]map[string]any)
 	} else {

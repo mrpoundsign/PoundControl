@@ -98,6 +98,7 @@ type Provider struct {
 
 	bgMu      sync.Mutex
 	closed    bool
+	disabled  atomic.Bool
 	stopCh    chan struct{}
 	closeOnce sync.Once
 	wg        sync.WaitGroup
@@ -336,7 +337,9 @@ func (p *Provider) startBackgroundLoops(fileInt, playInt time.Duration) {
 				case <-p.stopCh:
 					return
 				case <-ticker.C:
-					p.CheckVisibleFiles()
+					if !p.disabled.Load() {
+						p.CheckVisibleFiles()
+					}
 				}
 			}
 		})
@@ -350,7 +353,7 @@ func (p *Provider) startBackgroundLoops(fileInt, playInt time.Duration) {
 				case <-p.stopCh:
 					return
 				case <-ticker.C:
-					if p.engine.TotalActive() > 0 {
+					if !p.disabled.Load() && p.engine.TotalActive() > 0 {
 						p.RefreshVisiblePlaybackVisuals()
 					}
 				}
@@ -377,6 +380,9 @@ func (p *Provider) BindHost(host plugin.HostAPI) {
 
 // StartFromGlobalSettings loads persisted Soundboard settings from HostAPI into the audio engine.
 func (p *Provider) StartFromGlobalSettings() {
+	if p.disabled.Load() {
+		return
+	}
 	p.mu.RLock()
 	host := p.host
 	p.mu.RUnlock()
@@ -388,6 +394,27 @@ func (p *Provider) StartFromGlobalSettings() {
 		return
 	}
 	_ = p.OnGlobalSettingsChanged(context.Background(), PluginUUID, cfg)
+}
+
+// SetPluginEnabled pauses playback and releases the audio device when disabled, and restores settings when enabled.
+func (p *Provider) SetPluginEnabled(_ context.Context, pluginUUID string, enabled bool) error {
+	if pluginUUID != PluginUUID {
+		return nil
+	}
+	if !enabled {
+		p.disabled.Store(true)
+		p.stopAllGen.Add(1)
+		p.cancelAllSlotAttempts()
+		p.engine.StopAll(0)
+		p.flushDebouncedMasterVolume()
+		if releaser, ok := p.engine.(interface{ ReleaseDevice() }); ok {
+			releaser.ReleaseDevice()
+		}
+		return nil
+	}
+	p.disabled.Store(false)
+	p.StartFromGlobalSettings()
+	return nil
 }
 
 // OnGlobalSettingsChanged applies updated output device, master volume, and voice cap settings live.
@@ -684,6 +711,15 @@ func (p *Provider) cancelOtherSlotAttempts(exceptCtxID string) {
 	}
 }
 
+func (p *Provider) cancelAllSlotAttempts() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, slot := range p.slots {
+		slot.playGen++
+		slot.cancelGen++
+	}
+}
+
 func (p *Provider) beginPlayAttempt(ctxID string) (playGen, cancelGen uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -876,6 +912,9 @@ func (p *Provider) writeMasterVolumeGlobalSetting(pct int) {
 
 // CheckVisibleFiles re-checks every visible Play Sound button's file path on disk and updates tile visuals.
 func (p *Provider) CheckVisibleFiles() {
+	if p.disabled.Load() {
+		return
+	}
 	p.refreshSlotsMatching(false, "", func(s *trackedSlot) bool {
 		return s.actionUUID == ActionPlaySound
 	})
@@ -883,6 +922,9 @@ func (p *Provider) CheckVisibleFiles() {
 
 // RefreshVisiblePlaybackVisuals updates all visible Play Sound and Stop All slots whose visual state changed.
 func (p *Provider) RefreshVisiblePlaybackVisuals() {
+	if p.disabled.Load() {
+		return
+	}
 	p.refreshSlotsMatching(false, "", func(s *trackedSlot) bool {
 		return s.actionUUID == ActionPlaySound || s.actionUUID == ActionStopAll
 	})

@@ -7,6 +7,7 @@ import (
 	"image/color"
 	"image/png"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -104,6 +105,8 @@ type MainWindow struct {
 	pluginsTabItem       *container.TabItem
 	settingsTabItem      *container.TabItem
 	settingsTabs         *container.AppTabs
+	obsTabIdx            int
+	webTabIdx            int
 	settingsPluginTabs   map[string]int
 	settingsPluginViews  map[string]*pluginConfigTabView
 	pluginsCleanup       func()
@@ -166,12 +169,14 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 	win.Resize(fyne.NewSize(1240, 760))
 
 	mw := &MainWindow{
-		app:                a,
-		win:                win,
-		engine:             engine,
-		selectedController: deck.ControllerKeypad,
-		selectedSlot:       deck.Coordinates{Row: 0, Col: 0},
-		statusNote:          "Ready",
+		app:                  a,
+		win:                  win,
+		engine:               engine,
+		selectedController:   deck.ControllerKeypad,
+		selectedSlot:         deck.Coordinates{Row: 0, Col: 0},
+		statusNote:           "Ready",
+		obsTabIdx:            -1,
+		webTabIdx:            -1,
 		catalogButtons:       make(map[string]*widget.Button),
 		catalogGroupHeaders:  make(map[string]*widget.Button),
 		catalogConfigButtons: make(map[string]*widget.Button),
@@ -187,6 +192,7 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 	mw.inspector.SetOnOpenPaletteSettings(func() {
 		mw.ShowSettingsTab(settingsTabGeneral)
 	})
+	mw.inspector.SetOnSetPluginEnabled(mw.SetPluginEnabled)
 	mw.inspector.SetOnMoveSelected(mw.StartMoveSelected)
 	mw.inspector.SetOnCopySelected(mw.CopySelected)
 
@@ -479,14 +485,17 @@ func (mw *MainWindow) ShowSettingsTab(tab int) {
 		mw.ShowPluginsTab()
 		return
 	}
-	sub := settingsSubTabGeneral
+	mw.rebuildSettingsTab(settingsSubTabGeneral)
 	switch tab {
 	case settingsTabOBS:
-		sub = settingsSubTabOBS
+		if mw.obsTabIdx >= 0 && mw.settingsTabs != nil && mw.obsTabIdx < len(mw.settingsTabs.Items) {
+			mw.settingsTabs.SelectIndex(mw.obsTabIdx)
+		}
 	case settingsTabWeb:
-		sub = settingsSubTabWeb
+		if mw.webTabIdx >= 0 && mw.settingsTabs != nil && mw.webTabIdx < len(mw.settingsTabs.Items) {
+			mw.settingsTabs.SelectIndex(mw.webTabIdx)
+		}
 	}
-	mw.rebuildSettingsTab(sub)
 	mw.selectMainTabNoRebuild(mainTabSettings)
 }
 
@@ -494,6 +503,11 @@ func (mw *MainWindow) ShowSettingsTab(tab int) {
 func (mw *MainWindow) ShowPluginConfigTab(pluginUUID string) {
 	pid := strings.TrimSpace(pluginUUID)
 	if pid == "" {
+		return
+	}
+	if !mw.engine.IsPluginEnabled(pid) {
+		mw.ShowPluginsTab()
+		mw.setStatus("Plugin is disabled — enable it in Plugins first")
 		return
 	}
 	if pid == obs.PluginUUID {
@@ -505,6 +519,30 @@ func (mw *MainWindow) ShowPluginConfigTab(pluginUUID string) {
 		mw.settingsTabs.SelectIndex(idx)
 	}
 	mw.selectMainTabNoRebuild(mainTabSettings)
+}
+
+// SetPluginEnabled enables or disables pluginUUID persistently and updates Studio catalog, Settings tabs, and header badges.
+func (mw *MainWindow) SetPluginEnabled(pluginUUID string, enabled bool) error {
+	if err := mw.engine.SetPluginEnabled(pluginUUID, enabled); err != nil {
+		mw.setStatus(err.Error())
+		return err
+	}
+	label := pluginUUID
+	if m, ok := mw.engine.Registry().Manifest(pluginUUID); ok && m.Name != "" {
+		label = m.Name
+	}
+	if enabled {
+		mw.setStatus("Enabled " + label)
+	} else {
+		mw.setStatus("Disabled " + label)
+	}
+	mw.syncOBSBadgeVisibility()
+	mw.RefreshActionCatalog()
+	if mw.inspector != nil {
+		mw.inspector.InvalidateBinding()
+	}
+	mw.applySnapshot(mw.engine.Snapshot())
+	return nil
 }
 
 func (mw *MainWindow) rebuildPluginsTab() {
@@ -524,6 +562,7 @@ func (mw *MainWindow) rebuildPluginsTab() {
 		mw.piViewer,
 		mw.ReloadExternalPlugins,
 		mw.ShowPluginConfigTab,
+		mw.SetPluginEnabled,
 		mw.setStatus,
 	)
 	mw.pluginsCleanup = cleanup
@@ -563,6 +602,8 @@ func (mw *MainWindow) rebuildSettingsTab(subTab int) {
 		mw.hotkeySuspender,
 		mw.setStatus,
 	)
+	mw.obsTabIdx = res.obsTabIdx
+	mw.webTabIdx = res.webTabIdx
 	if subTab >= 0 && subTab < len(res.tabs.Items) {
 		res.tabs.SelectIndex(subTab)
 	}
@@ -644,17 +685,28 @@ func (mw *MainWindow) SetOBSController(ctrl OBSController) {
 	}
 	mw.obsCtrl = ctrl
 	if ctrl == nil {
-		mw.obsBtn.Hide()
+		mw.syncOBSBadgeVisibility()
 		return
 	}
 
-	mw.obsBtn.Show()
-	mw.applyOBSStatus(ctrl.Status())
+	mw.syncOBSBadgeVisibility()
 	mw.obsUnsub = ctrl.SubscribeStatus(func(st obs.ClientStatus) {
 		dispatchUI(func() {
 			mw.applyOBSStatus(st)
 		})
 	})
+}
+
+func (mw *MainWindow) syncOBSBadgeVisibility() {
+	if mw.obsBtn == nil {
+		return
+	}
+	if mw.obsCtrl != nil && mw.engine.IsPluginEnabled(obs.PluginUUID) {
+		mw.obsBtn.Show()
+		mw.applyOBSStatus(mw.obsCtrl.Status())
+	} else {
+		mw.obsBtn.Hide()
+	}
 }
 
 func (mw *MainWindow) applyOBSStatus(st obs.ClientStatus) {
@@ -1005,6 +1057,7 @@ func (mw *MainWindow) handleDialPress(dial int) {
 }
 
 func (mw *MainWindow) applySnapshot(snap app.Snapshot) {
+	prevDisabled := mw.lastSnap.DisabledPlugins
 	mw.lastSnap = snap
 	mw.syncing = true
 
@@ -1067,6 +1120,12 @@ func (mw *MainWindow) applySnapshot(snap app.Snapshot) {
 	mw.syncClipboardUI()
 	mw.inspector.SetSelection(snap, mw.selectedController, mw.selectedSlot, mw.selectedDial)
 	mw.refreshStatusBar(snap)
+	if !slices.Equal(prevDisabled, snap.DisabledPlugins) {
+		mw.syncOBSBadgeVisibility()
+		if len(mw.catalogButtons) > 0 || mw.catalogList != nil {
+			mw.RefreshActionCatalog()
+		}
+	}
 }
 
 func (mw *MainWindow) refreshStatusBar(snap app.Snapshot) {

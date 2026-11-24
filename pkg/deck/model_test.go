@@ -2,6 +2,7 @@ package deck
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -124,5 +125,35 @@ func TestColorPaletteNormalizeHexDedupeAndEmptyPreservation(t *testing.T) {
 	got := cp.Profiles[0].Pages[0].Slots["0,0"]
 	if got.Color != "#38BDF8" || got.BackgroundColor != "#00FF00" || got.BackgroundImage != "/tmp/bg.png" || !got.HideTitle {
 		t.Fatalf("unexpected normalized slot background fields: %+v", got)
+	}
+}
+
+func TestConfigDisabledPluginsNormalizeCloneAndJSON(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DisabledPlugins = []string{"  com.example.b ", "", "com.example.a", "com.example.b"}
+	cfg.Normalize()
+
+	want := []string{"com.example.a", "com.example.b"}
+	if !slices.Equal(cfg.DisabledPlugins, want) {
+		t.Fatalf("DisabledPlugins = %v, want %v", cfg.DisabledPlugins, want)
+	}
+
+	cp := cfg.Clone()
+	cp.DisabledPlugins[0] = "mutated"
+	if cfg.DisabledPlugins[0] != "com.example.a" {
+		t.Fatalf("Clone leaked DisabledPlugins mutation: %v", cfg.DisabledPlugins)
+	}
+
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	var decoded Config
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	decoded.Normalize()
+	if !slices.Equal(decoded.DisabledPlugins, want) {
+		t.Fatalf("DisabledPlugins after JSON roundtrip = %v, want %v", decoded.DisabledPlugins, want)
 	}
 }

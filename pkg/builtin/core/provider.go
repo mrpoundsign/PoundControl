@@ -256,6 +256,7 @@ func buildManifest() plugin.Manifest {
 		Author:      "PoundControl",
 		Description: "Built-in page, profile, folder, multi-action, delay, and counter actions.",
 		Provider:    plugin.ProviderBuiltin,
+		Required:    true,
 		Actions:     actions,
 	}
 }
