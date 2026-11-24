@@ -368,6 +368,10 @@ func (e *Engine) renderSlotLocked(slot *deck.SlotConfig) RenderedSlot {
 		if live.vis.Color != "" {
 			vis.Color = live.vis.Color
 		}
+		if live.vis.BackgroundColor != "" {
+			vis.BackgroundColor = live.vis.BackgroundColor
+			vis.BackgroundImage = ""
+		}
 		if live.vis.ImageURI != "" {
 			vis.ImageURI = live.vis.ImageURI
 		}
@@ -2521,6 +2525,9 @@ func (e *Engine) updateVisual(ctxID string, patch plugin.VisualPatch) {
 	}
 	if patch.Color != nil {
 		cur.vis.Color = *patch.Color
+	}
+	if patch.BackgroundColor != nil {
+		cur.vis.BackgroundColor = *patch.BackgroundColor
 	}
 	if patch.ImageURI != nil {
 		cur.vis.ImageURI = *patch.ImageURI

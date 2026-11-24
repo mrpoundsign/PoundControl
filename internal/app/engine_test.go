@@ -315,6 +315,7 @@ func TestEngineUndoRedoAssignEditClearAndPersistence(t *testing.T) {
 
 type testLifecycleProvider struct {
 	mu       sync.Mutex
+	host     plugin.HostAPI
 	recorded []plugin.ActionEvent
 }
 
@@ -352,7 +353,11 @@ func (p *testLifecycleProvider) Actions() []plugin.ActionDescriptor {
 	}
 }
 
-func (p *testLifecycleProvider) BindHost(plugin.HostAPI) {}
+func (p *testLifecycleProvider) BindHost(host plugin.HostAPI) {
+	p.mu.Lock()
+	p.host = host
+	p.mu.Unlock()
+}
 
 func (p *testLifecycleProvider) Dispatch(_ context.Context, ev plugin.ActionEvent) error {
 	p.mu.Lock()
@@ -968,5 +973,55 @@ func TestEngineGlobalSettingsSecretsAndListener(t *testing.T) {
 	}
 	if _, stillHas := eng.GlobalSettings(pluginUUID)["apiToken"]; stillHas {
 		t.Fatalf("expected apiToken removed from GlobalSettings, got %+v", eng.GlobalSettings(pluginUUID))
+	}
+}
+
+func TestEngineVisualPatchBackgroundColorOverrideAndRestore(t *testing.T) {
+	eng, prov := newMoveTestEngine(t)
+
+	c00 := deck.Coordinates{Row: 0, Col: 0}
+	slot, err := eng.AssignKeypadAction(c00, "test.lifecycle.action")
+	if err != nil {
+		t.Fatalf("AssignKeypadAction(c00) error = %v", err)
+	}
+	if err := eng.UpdateKeypadSlotAppearance(c00, SlotAppearance{
+		Title:           "Airhorn",
+		Color:           "#A855F7",
+		BackgroundColor: "#1E293B",
+		BackgroundImage: "/tmp/custom-bg.png",
+	}, nil); err != nil {
+		t.Fatalf("UpdateKeypadSlotAppearance() error = %v", err)
+	}
+
+	prov.mu.Lock()
+	host := prov.host
+	prov.mu.Unlock()
+	if host == nil {
+		t.Fatal("expected HostAPI to be bound to provider")
+	}
+
+	// Non-empty VisualPatch.BackgroundColor overrides configured BackgroundColor and temporarily suppresses BackgroundImage.
+	host.UpdateVisual(slot.Context, plugin.VisualPatch{
+		Subtitle:        new("MISSING"),
+		Color:           new("#EF4444"),
+		BackgroundColor: new("#5C1922"),
+		State:           new(0),
+		Flash:           "alert",
+	})
+	vis := eng.Snapshot().Slots[c00.SlotKey()].Visual
+	if vis.BackgroundColor != "#5C1922" || vis.BackgroundImage != "" || vis.Color != "#EF4444" || vis.Subtitle != "MISSING" {
+		t.Fatalf("expected missing-file VisualPatch override, got %+v", vis)
+	}
+
+	// Clearing VisualPatch.BackgroundColor restores the configured BackgroundColor and BackgroundImage.
+	host.UpdateVisual(slot.Context, plugin.VisualPatch{
+		Subtitle:        new(""),
+		Color:           new(""),
+		BackgroundColor: new(""),
+		State:           new(0),
+	})
+	visRestored := eng.Snapshot().Slots[c00.SlotKey()].Visual
+	if visRestored.BackgroundColor != "#1E293B" || visRestored.BackgroundImage != "/tmp/custom-bg.png" || visRestored.Color != "#A855F7" || visRestored.Subtitle != "" {
+		t.Fatalf("expected configured background & accent restored, got %+v", visRestored)
 	}
 }

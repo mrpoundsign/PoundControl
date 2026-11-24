@@ -42,16 +42,17 @@ type SelectOption struct {
 // SettingField declares one configurable property of an action so PoundControl can render
 // a native Obsidian-Slate inspector form automatically without HTML.
 type SettingField struct {
-	Key         string         `json:"key"`
-	Label       string         `json:"label"`
-	Type        FieldType      `json:"type"`
-	Section     string         `json:"section,omitempty"`
-	Default     any            `json:"default,omitempty"`
-	Placeholder string         `json:"placeholder,omitempty"`
-	Help        string         `json:"help,omitempty"`
-	Options     []SelectOption `json:"options,omitempty"`
-	OptionsKey  string         `json:"optionsKey,omitempty"`
-	Required    bool           `json:"required,omitempty"`
+	Key            string         `json:"key"`
+	Label          string         `json:"label"`
+	Type           FieldType      `json:"type"`
+	Section        string         `json:"section,omitempty"`
+	Default        any            `json:"default,omitempty"`
+	Placeholder    string         `json:"placeholder,omitempty"`
+	Help           string         `json:"help,omitempty"`
+	Options        []SelectOption `json:"options,omitempty"`
+	OptionsKey     string         `json:"optionsKey,omitempty"`
+	FileExtensions []string       `json:"fileExtensions,omitempty"`
+	Required       bool           `json:"required,omitempty"`
 }
 
 // NormalizeSection maps raw (case-insensitively) to a canonical inspector section when it matches

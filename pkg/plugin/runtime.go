@@ -34,14 +34,17 @@ type ActionEvent struct {
 
 // VisualPatch carries partial visual updates pushed from a plugin to an active slot or dial.
 // Nil pointer fields leave the corresponding visual property unchanged.
+// Setting a non-empty BackgroundColor overrides the slot's configured background (and temporarily
+// suppresses any configured BackgroundImage while active); setting BackgroundColor to "" restores both.
 type VisualPatch struct {
-	Title    *string        `json:"title,omitempty"`
-	Subtitle *string        `json:"subtitle,omitempty"`
-	Color    *string        `json:"color,omitempty"`
-	ImageURI *string        `json:"image,omitempty"`
-	State    *int           `json:"state,omitempty"`
-	Feedback map[string]any `json:"feedback,omitempty"`
-	Flash    string         `json:"flash,omitempty"` // "", "ok", or "alert"
+	Title           *string        `json:"title,omitempty"`
+	Subtitle        *string        `json:"subtitle,omitempty"`
+	Color           *string        `json:"color,omitempty"`
+	BackgroundColor *string        `json:"backgroundColor,omitempty"`
+	ImageURI        *string        `json:"image,omitempty"`
+	State           *int           `json:"state,omitempty"`
+	Feedback        map[string]any `json:"feedback,omitempty"`
+	Flash           string         `json:"flash,omitempty"` // "", "ok", or "alert"
 }
 
 // DeckControl exposes deck navigation and macro orchestration operations to plugins.

@@ -16,6 +16,7 @@ import (
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/apps"
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/core"
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/obs"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/soundboard"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 	"github.com/mrpoundsign/PoundControl/pkg/sdplugin"
@@ -41,6 +42,10 @@ func main() {
 	}
 	if err := reg.RegisterProvider(apps.New(nil)); err != nil {
 		log.Fatalf("register built-in apps plugin: %v", err)
+	}
+	sbProvider := soundboard.New(nil)
+	if err := reg.RegisterProvider(sbProvider); err != nil {
+		log.Fatalf("register built-in soundboard plugin: %v", err)
 	}
 	sdHost := sdplugin.NewProvider(sdplugin.Options{
 		DefaultPluginsDir: filepath.Join(filepath.Dir(cfgPath), "plugins"),
@@ -133,6 +138,7 @@ func main() {
 	}
 
 	obsProvider.StartFromGlobalSettings()
+	sbProvider.StartFromGlobalSettings()
 
 	ui.CheckStartupUpdate(win.Window(), version.Version)
 

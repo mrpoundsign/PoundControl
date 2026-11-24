@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"math"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -481,20 +482,44 @@ func (c *imageFieldControl) openFileDialog() {
 }
 
 type fileFieldControl struct {
-	win       fyne.Window
-	root      *fyne.Container
-	entry     *widget.Entry
-	browseBtn *widget.Button
+	win        fyne.Window
+	root       *fyne.Container
+	entry      *widget.Entry
+	browseBtn  *widget.Button
+	extensions []string
 }
 
-func newFileFieldControl(win fyne.Window, initialPath, placeholder string) *fileFieldControl {
-	c := &fileFieldControl{win: win}
+func newFileFieldControl(win fyne.Window, initialPath, placeholder string, extensions []string) *fileFieldControl {
+	c := &fileFieldControl{
+		win:        win,
+		extensions: normalizeFileExtensions(extensions),
+	}
 	c.entry = widget.NewEntry()
 	c.entry.SetPlaceHolder(placeholder)
 	c.entry.SetText(initialPath)
 	c.browseBtn = widget.NewButton("Browse", c.openFileDialog)
 	c.root = container.NewBorder(nil, nil, nil, c.browseBtn, c.entry)
 	return c
+}
+
+func normalizeFileExtensions(extensions []string) []string {
+	if len(extensions) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(extensions))
+	for _, ext := range extensions {
+		t := strings.TrimSpace(ext)
+		if t == "" {
+			continue
+		}
+		if !strings.HasPrefix(t, ".") {
+			t = "." + t
+		}
+		if !slices.Contains(out, t) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func (c *fileFieldControl) Object() fyne.CanvasObject {
@@ -521,6 +546,9 @@ func (c *fileFieldControl) openFileDialog() {
 		_ = r.Close()
 		c.SetValue(filePath)
 	}, c.win)
+	if len(c.extensions) > 0 {
+		fd.SetFilter(storage.NewExtensionFileFilter(c.extensions))
+	}
 	fd.Resize(fyne.NewSize(760, 520))
 	fd.Show()
 }

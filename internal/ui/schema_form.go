@@ -271,7 +271,7 @@ func (s *schemaFormState) buildField(field plugin.SettingField, settings map[str
 		if val != nil {
 			valStr = fmt.Sprint(val)
 		}
-		ctrl := newFileFieldControl(s.opts.win, valStr, field.Placeholder)
+		ctrl := newFileFieldControl(s.opts.win, valStr, field.Placeholder, field.FileExtensions)
 		s.fields[field.Key] = schemaFieldBinding{
 			schema:   field,
 			widget:   ctrl.entry,
