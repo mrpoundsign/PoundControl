@@ -208,7 +208,7 @@ func TestMainWindowFolderAutoBackAndPopOutPadSync(t *testing.T) {
 	test.Tap(mw.catalogButtons[core.ActionCounter])
 	drainUI()
 
-	// Open Pop-Out Pad (always in Run Mode) and verify sync across both windows.
+	// Open Pop-Out Pad (starts Independent on Studio's current profile) and verify live dial sync.
 	pad := mw.OpenPopOutPad()
 	if pad == nil || pad.Window() == nil {
 		t.Fatal("expected non-nil PopOutPad")
@@ -221,8 +221,32 @@ func TestMainWindowFolderAutoBackAndPopOutPadSync(t *testing.T) {
 		t.Errorf("expected Studio Dial 0 value 1 after PopOutPad +, got %q", got)
 	}
 
-	// Tap Folder Open on PopOutPad, verify Studio enters folder with AutoBack at (0, 0).
+	// While Independent, tapping Folder Open on PopOutPad enters folder ONLY on PopOutPad (Studio stays on Page 1).
 	folderTile := pad.surface.tiles[(deck.Coordinates{Row: 1, Col: 1}).SlotKey()]
+	test.Tap(folderTile)
+	drainUI()
+	if !pad.lastSnap.InFolder || mw.lastSnap.InFolder {
+		t.Fatalf("expected PopOutPad inside folder while Studio stays independent, got pad=%v studio=%v",
+			pad.lastSnap.InFolder, mw.lastSnap.InFolder)
+	}
+	if backTile := pad.surface.tiles[(deck.Coordinates{Row: 0, Col: 0}).SlotKey()]; backTile.title != "← Back" {
+		t.Errorf("expected AutoBack tile on PopOutPad (0,0), got %q", backTile.title)
+	}
+	test.Tap(pad.surface.tiles[(deck.Coordinates{Row: 0, Col: 0}).SlotKey()])
+	drainUI()
+	if pad.lastSnap.InFolder {
+		t.Fatal("expected PopOutPad exited folder after independent AutoBack")
+	}
+
+	// Switching PopOutPad to "Follow Studio" mirrors folder navigation with Studio.
+	pad.profileSelect.SetSelected(followStudioOption)
+	drainUI()
+	if !pad.lastSnap.FollowHost {
+		t.Fatal("expected PopOutPad FollowHost=true after selecting Follow Studio")
+	}
+
+	// Tap Folder Open on PopOutPad, verify Studio enters folder with AutoBack at (0, 0).
+	folderTile = pad.surface.tiles[(deck.Coordinates{Row: 1, Col: 1}).SlotKey()]
 	test.Tap(folderTile)
 	drainUI()
 
@@ -242,6 +266,23 @@ func TestMainWindowFolderAutoBackAndPopOutPadSync(t *testing.T) {
 	if mw.lastSnap.InFolder || mw.lastSnap.PageIndex != 0 || mw.lastSnap.PageCount != 2 {
 		t.Fatalf("expected Studio returned to Page 1 / 2, got InFolder=%v page=%d/%d",
 			mw.lastSnap.InFolder, mw.lastSnap.PageIndex+1, mw.lastSnap.PageCount)
+	}
+
+	// Creating and switching profiles in Studio leaves an independent PopOutPad on its pinned profile.
+	origProfID := mw.lastSnap.ActiveProfileID
+	pad.profileSelect.SetSelectedIndex(1)
+	drainUI()
+	prof2, err := eng.CreateProfile("Stream", deck.GridSize{Cols: 3, Rows: 2}, 1)
+	if err != nil {
+		t.Fatalf("CreateProfile() error = %v", err)
+	}
+	drainUI()
+	if mw.lastSnap.ActiveProfileID != prof2.ID {
+		t.Fatalf("expected Studio switched to %s, got %s", prof2.ID, mw.lastSnap.ActiveProfileID)
+	}
+	if pad.lastSnap.ActiveProfileID != origProfID || pad.lastSnap.FollowHost {
+		t.Fatalf("expected PopOutPad stayed independent on %s, got profile=%s follow=%v",
+			origProfID, pad.lastSnap.ActiveProfileID, pad.lastSnap.FollowHost)
 	}
 
 	pad.Close()

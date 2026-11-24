@@ -71,6 +71,7 @@
     menuCloseBtn: document.getElementById('menu-close-btn'),
     deckMenu: document.getElementById('deck-menu'),
     wakeBtn: document.getElementById('wake-btn'),
+    followHostBtn: document.getElementById('follow-host-btn'),
     fullscreenBtn: document.getElementById('fullscreen-btn'),
     logoutBtn: document.getElementById('logout-btn'),
     pairView: document.getElementById('pair-view'),
@@ -111,6 +112,7 @@
   let expectedHostFp = '';
   let activePair = null;
   let renderedGridKey = '';
+  let renderedProfilesKey = '';
   let renderedTiles = [];
 
   function storageKey() {
@@ -519,15 +521,27 @@
     document.documentElement.style.setProperty('--cols', String(cols));
     document.documentElement.style.setProperty('--rows', String(rows));
 
-    els.profileSelect.replaceChildren();
-    for (const p of snap.profiles || []) {
-      const opt = document.createElement('option');
-      opt.value = p.id;
-      opt.textContent = p.name;
-      if (p.id === snap.activeProfileId) {
-        opt.selected = true;
+    const profiles = Array.isArray(snap.profiles) ? snap.profiles : [];
+    const profilesKey = JSON.stringify(profiles.map((p) => [p.id, p.name]));
+    if (profilesKey !== renderedProfilesKey) {
+      renderedProfilesKey = profilesKey;
+      const frag = document.createDocumentFragment();
+      for (const p of profiles) {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name;
+        frag.appendChild(opt);
       }
-      els.profileSelect.appendChild(opt);
+      els.profileSelect.replaceChildren(frag);
+    }
+    if (snap.activeProfileId && els.profileSelect.value !== snap.activeProfileId) {
+      els.profileSelect.value = snap.activeProfileId;
+    }
+
+    if (els.followHostBtn) {
+      const following = Boolean(snap.followHost);
+      els.followHostBtn.setAttribute('aria-pressed', String(following));
+      els.followHostBtn.textContent = following ? 'Follow Studio: On' : 'Follow Studio: Off';
     }
 
     els.backFolderBtn.hidden = !snap.inFolder;
@@ -1121,11 +1135,18 @@
   });
 
   els.profileSelect.addEventListener('change', () => {
-    if (lastSnapshot && els.profileSelect.value !== lastSnapshot.activeProfileId) {
+    if (lastSnapshot && (els.profileSelect.value !== lastSnapshot.activeProfileId || lastSnapshot.followHost)) {
       sendCmd({ type: 'switchProfile', profileId: els.profileSelect.value });
       setMenuOpen(false);
     }
   });
+
+  if (els.followHostBtn) {
+    els.followHostBtn.addEventListener('click', () => {
+      const nextFollow = !(lastSnapshot && lastSnapshot.followHost);
+      sendCmd({ type: 'setFollowHost', followHost: nextFollow });
+    });
+  }
 
   els.backFolderBtn.addEventListener('click', () => sendCmd({ type: 'closeFolder' }));
 

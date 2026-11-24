@@ -139,7 +139,7 @@ func buildSettingsTabsView(
 	}
 
 	// Web Deck Tab
-	webTab, webCleanup := buildWebDeckSettingsTab(webCtrl, onStatus)
+	webTab, webCleanup := buildWebDeckSettingsTab(engine, webCtrl, onStatus)
 
 	var configurable []plugin.Manifest
 	for _, m := range engine.Registry().Manifests() {

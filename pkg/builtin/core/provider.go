@@ -330,7 +330,7 @@ func (p *Provider) Dispatch(ctx context.Context, ev plugin.ActionEvent) error {
 		if ev.Type != plugin.EventKeyDown && ev.Type != plugin.EventDialPress {
 			return nil
 		}
-		return p.handleNavigation(host, ev)
+		return p.handleNavigation(ctx, host, ev)
 	default:
 		return fmt.Errorf("core provider: unsupported action %q", ev.ActionUUID)
 	}
@@ -345,11 +345,11 @@ func (p *Provider) Close() error {
 	return nil
 }
 
-func (p *Provider) handleNavigation(host plugin.HostAPI, ev plugin.ActionEvent) error {
-	if host == nil || host.Deck() == nil {
+func (p *Provider) handleNavigation(ctx context.Context, host plugin.HostAPI, ev plugin.ActionEvent) error {
+	deckCtrl := plugin.DeckForContext(host, ctx)
+	if deckCtrl == nil {
 		return errors.New("core provider: deck controller unavailable")
 	}
-	deckCtrl := host.Deck()
 
 	switch ev.ActionUUID {
 	case ActionPageNext:

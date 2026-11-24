@@ -338,7 +338,7 @@ func (p *Provider) reloadLocked() error {
 }
 
 // Dispatch implements plugin.Provider by serializing ev as JSON to the owning module's pc_handle_event export.
-func (p *Provider) Dispatch(_ context.Context, ev plugin.ActionEvent) error {
+func (p *Provider) Dispatch(ctx context.Context, ev plugin.ActionEvent) error {
 	p.mu.RLock()
 	key, hasAct := p.actionToPlugin[ev.ActionUUID]
 	inst := p.instances[key]
@@ -356,7 +356,7 @@ func (p *Provider) Dispatch(_ context.Context, ev plugin.ActionEvent) error {
 		return err
 	}
 
-	_, err = inst.callWithBytes(inst.eventFn, raw)
+	_, err = inst.callWithBytesCtx(ctx, inst.eventFn, raw)
 	return err
 }
 
@@ -711,7 +711,7 @@ func (p *Provider) instantiateHostModule(ctx context.Context, rt wazero.Runtime,
 		Export("pc_set_timer")
 
 	builder.NewFunctionBuilder().
-		WithFunc(func(_ context.Context, m api.Module, cmdPtr, cmdLen uint32) int32 {
+		WithFunc(func(callCtx context.Context, m api.Module, cmdPtr, cmdLen uint32) int32 {
 			raw, ok := readGuestBytes(m, cmdPtr, cmdLen)
 			if !ok {
 				return -1
@@ -723,10 +723,10 @@ func (p *Provider) instantiateHostModule(ctx context.Context, rt wazero.Runtime,
 			p.mu.RLock()
 			host := p.host
 			p.mu.RUnlock()
-			if host == nil || host.Deck() == nil {
+			deckCtrl := plugin.DeckForContext(host, callCtx)
+			if deckCtrl == nil {
 				return -3
 			}
-			deckCtrl := host.Deck()
 			var err error
 			switch cmd.Action {
 			case "nextPage":
@@ -848,14 +848,22 @@ func (inst *wasmInstance) readManifest(manifestFn api.Function) (GuestManifest, 
 }
 
 func (inst *wasmInstance) callWithBytes(fn api.Function, payload []byte) (int32, error) {
+	return inst.callWithBytesCtx(context.Background(), fn, payload)
+}
+
+func (inst *wasmInstance) callWithBytesCtx(callerCtx context.Context, fn api.Function, payload []byte) (int32, error) {
 	var timeout time.Duration
 	if inst.provider != nil {
 		timeout = inst.provider.callTimeout
 	}
-	return inst.callWithBytesTimeout(fn, payload, timeout)
+	return inst.callWithBytesTimeoutCtx(callerCtx, fn, payload, timeout)
 }
 
 func (inst *wasmInstance) callWithBytesTimeout(fn api.Function, payload []byte, timeout time.Duration) (int32, error) {
+	return inst.callWithBytesTimeoutCtx(context.Background(), fn, payload, timeout)
+}
+
+func (inst *wasmInstance) callWithBytesTimeoutCtx(callerCtx context.Context, fn api.Function, payload []byte, timeout time.Duration) (int32, error) {
 	if timeout <= 0 {
 		timeout = defaultCallTimeout
 	}
@@ -868,6 +876,9 @@ func (inst *wasmInstance) callWithBytesTimeout(fn api.Function, payload []byte, 
 
 	ctx, cancel := context.WithTimeout(inst.lifeCtx, timeout)
 	defer cancel()
+	if vpID := plugin.ViewportFromContext(callerCtx); vpID != "" {
+		ctx = plugin.WithViewport(ctx, vpID)
+	}
 
 	allocRes, err := inst.allocFn.Call(ctx, uint64(len(payload)))
 	if err != nil || len(allocRes) == 0 || allocRes[0] == 0 {

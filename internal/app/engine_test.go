@@ -1268,3 +1268,210 @@ func TestEngineSetPluginEnabledLifecyclePersistenceAndUndo(t *testing.T) {
 		t.Fatalf("expected restored READY visual after re-enable, got %+v", snapBack.Slots[c00.SlotKey()])
 	}
 }
+
+func TestEngineIndependentViewportsLifecycleAndClamping(t *testing.T) {
+	eng, rec := newMoveTestEngine(t)
+	ctx := context.Background()
+
+	prof1ID := eng.Snapshot().ActiveProfileID
+	c00 := deck.Coordinates{Row: 0, Col: 0}
+	c01 := deck.Coordinates{Row: 0, Col: 1}
+	c02 := deck.Coordinates{Row: 0, Col: 2}
+	c10 := deck.Coordinates{Row: 1, Col: 0}
+	c11 := deck.Coordinates{Row: 1, Col: 1}
+
+	sharedSlot, err := eng.AssignKeypadAction(c00, "test.lifecycle.action")
+	if err != nil {
+		t.Fatalf("AssignKeypadAction(shared) error = %v", err)
+	}
+	if _, err := eng.AssignKeypadAction(c01, core.ActionPageNext); err != nil {
+		t.Fatalf("AssignKeypadAction(pageNext) error = %v", err)
+	}
+	if _, err := eng.AssignKeypadAction(c02, core.ActionFolderOpen); err != nil {
+		t.Fatalf("AssignKeypadAction(folderOpen) error = %v", err)
+	}
+	_ = eng.UpdateKeypadSlot(c02, "Sub", "#FBBF24", map[string]any{"folderName": "Sub"})
+	if _, err := eng.AddPage("P1-Page2"); err != nil {
+		t.Fatalf("AddPage(P1-Page2) error = %v", err)
+	}
+	p1Page2Slot, err := eng.AssignKeypadAction(c00, "test.lifecycle.action")
+	if err != nil {
+		t.Fatalf("AssignKeypadAction(p1Page2Slot) error = %v", err)
+	}
+	if err := eng.GoToPage(1); err != nil {
+		t.Fatalf("GoToPage(1) error = %v", err)
+	}
+
+	// Create Profile 2 with 2 pages and MultiAction + ProfileSwitch actions.
+	prof2, err := eng.CreateProfile("Watch", deck.GridSize{Cols: 2, Rows: 2}, 1)
+	if err != nil {
+		t.Fatalf("CreateProfile(Watch) error = %v", err)
+	}
+	p2Slot, err := eng.AssignKeypadAction(c00, "test.lifecycle.action")
+	if err != nil {
+		t.Fatalf("AssignKeypadAction(p2Slot) error = %v", err)
+	}
+	if _, err := eng.AssignKeypadAction(c10, core.ActionProfileSwitch); err != nil {
+		t.Fatalf("AssignKeypadAction(profileSwitch) error = %v", err)
+	}
+	_ = eng.UpdateKeypadSlot(c10, "ToDefault", "#A855F7", map[string]any{"profile": prof1ID})
+	if _, err := eng.AssignKeypadAction(c11, core.ActionMultiAction); err != nil {
+		t.Fatalf("AssignKeypadAction(multi) error = %v", err)
+	}
+	_ = eng.UpdateKeypadSlot(c11, "MultiNav", "#22C55E", map[string]any{
+		"steps": []core.MultiActionStep{{ActionUUID: core.ActionPageNext, Settings: map[string]any{"wrap": true}}},
+	})
+	if _, err := eng.AddPage("Watch-P2"); err != nil {
+		t.Fatalf("AddPage(Watch-P2) error = %v", err)
+	}
+	if err := eng.GoToPage(1); err != nil {
+		t.Fatalf("GoToPage(1) error = %v", err)
+	}
+
+	// Switch Studio back to Profile 1 Page 1.
+	if err := eng.SwitchProfile(prof1ID); err != nil {
+		t.Fatalf("SwitchProfile(prof1) error = %v", err)
+	}
+
+	// Register Viewport A on Profile 1 (independent) and Viewport B on Profile 2 (Watch).
+	vpA, unregA := eng.RegisterViewport(Viewport{ProfileID: prof1ID})
+	defer unregA()
+	vpB, unregB := eng.RegisterViewport(Viewport{ProfileID: prof2.ID})
+	defer unregB()
+
+	var vpBSubCount atomic.Int32
+	unsubB := eng.SubscribeViewport(vpB, func(Snapshot) {
+		vpBSubCount.Add(1)
+	})
+	defer unsubB()
+
+	// Ref-counting: Studio and vpA both view sharedSlot. Moving Studio to Profile 2 must NOT disappear sharedSlot,
+	// while p2Slot was already appeared via vpB and must NOT double-appear when Studio moves to Profile 2.
+	rec.reset()
+	if err := eng.SwitchProfile(prof2.ID); err != nil {
+		t.Fatalf("SwitchProfile(prof2) error = %v", err)
+	}
+	for _, ev := range rec.events() {
+		if ev.Context == sharedSlot.Context && ev.Type == plugin.EventWillDisappear {
+			t.Fatalf("sharedSlot disappeared while vpA was still viewing it: %+v", ev)
+		}
+		if ev.Context == p2Slot.Context && ev.Type == plugin.EventWillAppear {
+			t.Fatalf("p2Slot double-appeared even though vpB already had it visible: %+v", ev)
+		}
+	}
+
+	// Verify vpA stayed on Profile 1 Page 0 while Studio is on Profile 2.
+	if sA := eng.ViewportSnapshot(vpA); sA.ActiveProfileID != prof1ID || sA.PageIndex != 0 {
+		t.Fatalf("expected vpA isolated on prof1 page 0, got profile=%s page=%d", sA.ActiveProfileID, sA.PageIndex)
+	}
+
+	// Scoped Core navigation: pressing PageNext on vpA advances ONLY vpA to Page 2 (appearing p1Page2Slot and disappearing sharedSlot).
+	rec.reset()
+	if err := eng.ViewportPressKey(ctx, vpA, c01); err != nil {
+		t.Fatalf("ViewportPressKey(vpA, PageNext) error = %v", err)
+	}
+	if sA := eng.ViewportSnapshot(vpA); sA.ActiveProfileID != prof1ID || sA.PageIndex != 1 {
+		t.Fatalf("expected vpA at prof1 page 1, got profile=%s page=%d", sA.ActiveProfileID, sA.PageIndex)
+	}
+	if stStudio := eng.Snapshot(); stStudio.ActiveProfileID != prof2.ID || stStudio.PageIndex != 0 {
+		t.Fatalf("Studio moved unexpectedly when vpA navigated: profile=%s page=%d", stStudio.ActiveProfileID, stStudio.PageIndex)
+	}
+	var sawSharedDisappear, sawPage2Appear bool
+	for _, ev := range rec.events() {
+		if ev.Context == sharedSlot.Context && ev.Type == plugin.EventWillDisappear {
+			sawSharedDisappear = true
+		}
+		if ev.Context == p1Page2Slot.Context && ev.Type == plugin.EventWillAppear {
+			sawPage2Appear = true
+		}
+	}
+	if !sawSharedDisappear || !sawPage2Appear {
+		t.Fatalf("expected sharedSlot WillDisappear and p1Page2Slot WillAppear when last viewer moved, got %+v", rec.events())
+	}
+
+	// Return vpA to Page 1, open Folder & AutoBack independently.
+	if err := eng.ViewportPrevPage(vpA, true); err != nil {
+		t.Fatalf("ViewportPrevPage(vpA) error = %v", err)
+	}
+	if err := eng.ViewportPressKey(ctx, vpA, c02); err != nil {
+		t.Fatalf("ViewportPressKey(vpA, FolderOpen) error = %v", err)
+	}
+	if sA := eng.ViewportSnapshot(vpA); !sA.InFolder || len(sA.FolderPath) != 1 || sA.FolderPath[0] != "Sub" {
+		t.Fatalf("expected vpA inside folder Sub, got %+v", sA.FolderPath)
+	}
+	if eng.Snapshot().InFolder {
+		t.Fatal("expected Studio not inside folder when vpA opened folder")
+	}
+	if err := eng.ViewportPressKey(ctx, vpA, c00); err != nil {
+		t.Fatalf("ViewportPressKey(vpA, AutoBack) error = %v", err)
+	}
+	if eng.ViewportSnapshot(vpA).InFolder {
+		t.Fatal("expected vpA exited folder after AutoBack")
+	}
+
+	// Scoped Multi-Action on vpB advances vpB to Watch-P2 without affecting Studio.
+	if err := eng.ViewportPressKey(ctx, vpB, c11); err != nil {
+		t.Fatalf("ViewportPressKey(vpB, MultiAction) error = %v", err)
+	}
+	if sB := eng.ViewportSnapshot(vpB); sB.ActiveProfileID != prof2.ID || sB.PageIndex != 1 {
+		t.Fatalf("expected vpB on Watch-P2, got profile=%s page=%d", sB.ActiveProfileID, sB.PageIndex)
+	}
+	if eng.Snapshot().PageIndex != 0 {
+		t.Fatalf("expected Studio still on Watch Page 0, got %d", eng.Snapshot().PageIndex)
+	}
+
+	// Scoped Profile Switch button on vpB switches vpB to prof1ID without changing Studio.
+	if err := eng.ViewportGoToPage(vpB, 1); err != nil {
+		t.Fatalf("ViewportGoToPage(vpB, 1) error = %v", err)
+	}
+	if err := eng.ViewportPressKey(ctx, vpB, c10); err != nil {
+		t.Fatalf("ViewportPressKey(vpB, ProfileSwitch) error = %v", err)
+	}
+	if sB := eng.ViewportSnapshot(vpB); sB.ActiveProfileID != prof1ID {
+		t.Fatalf("expected vpB switched to %s, got %s", prof1ID, sB.ActiveProfileID)
+	}
+	if eng.Snapshot().ActiveProfileID != prof2.ID {
+		t.Fatalf("expected Studio still on %s", prof2.ID)
+	}
+	if vpBSubCount.Load() == 0 {
+		t.Fatal("expected vpB subscriber notified on viewport navigation")
+	}
+
+	// FollowHost mirrors Studio and captures current position when turned off.
+	if err := eng.SetViewportFollowHost(vpB, true); err != nil {
+		t.Fatalf("SetViewportFollowHost(true) error = %v", err)
+	}
+	if err := eng.NextPage(true); err != nil {
+		t.Fatalf("Studio NextPage error = %v", err)
+	}
+	if sB := eng.ViewportSnapshot(vpB); !sB.FollowHost || sB.ActiveProfileID != prof2.ID || sB.PageIndex != 1 {
+		t.Fatalf("expected FollowHost vpB mirroring Studio Watch Page 1, got follow=%v profile=%s page=%d",
+			sB.FollowHost, sB.ActiveProfileID, sB.PageIndex)
+	}
+	if err := eng.SetViewportFollowHost(vpB, false); err != nil {
+		t.Fatalf("SetViewportFollowHost(false) error = %v", err)
+	}
+	if err := eng.PrevPage(true); err != nil {
+		t.Fatalf("Studio PrevPage error = %v", err)
+	}
+	if sB := eng.ViewportSnapshot(vpB); sB.FollowHost || sB.ActiveProfileID != prof2.ID || sB.PageIndex != 1 {
+		t.Fatalf("expected vpB frozen at Watch Page 1 after disabling FollowHost, got follow=%v profile=%s page=%d",
+			sB.FollowHost, sB.ActiveProfileID, sB.PageIndex)
+	}
+
+	// Deleting the profile vpB is viewing clamps vpB cleanly onto Studio's active fallback profile.
+	if err := eng.SwitchProfile(prof1ID); err != nil {
+		t.Fatalf("SwitchProfile(prof1) error = %v", err)
+	}
+	if err := eng.DeleteProfile(prof2.ID); err != nil {
+		t.Fatalf("DeleteProfile(prof2) error = %v", err)
+	}
+	if sB := eng.ViewportSnapshot(vpB); sB.ActiveProfileID != prof1ID || sB.PageIndex != 0 {
+		t.Fatalf("expected vpB clamped to %s page 0 after profile deletion, got profile=%s page=%d",
+			prof1ID, sB.ActiveProfileID, sB.PageIndex)
+	}
+
+	// Unregistering vpA (while Studio is on Page 0) leaves sharedSlot appeared; unregistering does not panic.
+	unregA()
+	unregA()
+}

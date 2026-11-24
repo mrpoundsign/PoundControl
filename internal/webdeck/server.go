@@ -57,6 +57,9 @@ type DeviceStatus struct {
 	PairedAt    string `json:"pairedAt"`
 	LastSeen    string `json:"lastSeen,omitempty"`
 	Connected   bool   `json:"connected"`
+	ProfileID   string `json:"profileId,omitempty"`
+	ProfileName string `json:"profileName,omitempty"`
+	FollowHost  bool   `json:"followHost,omitempty"`
 }
 
 // PendingPairInfo describes a SPAKE2-verified pairing request awaiting dual-screen confirmation.
@@ -129,6 +132,9 @@ type wsClient struct {
 	conn         *websocket.Conn
 	deviceID     string
 	sessionID    string
+	viewportID   string
+	unsubVP      func()
+	unregVP      func()
 	clientMacKey []byte
 	serverMacKey []byte
 	assetMacKey  []byte
@@ -238,15 +244,13 @@ type Server struct {
 	boundPort  int
 	lastErr    string
 
-	listener    net.Listener
-	httpSrv     *http.Server
-	unsubEngine func()
+	listener net.Listener
+	httpSrv  *http.Server
 
 	clients         map[*wsClient]struct{}
 	sessions        map[string]*wsClient
 	assets          map[string]assetEntry
 	assetOrder      []string
-	lastSnap        *ClientSnapshot
 	limiter         *pairRateLimiter
 	pairWindow      *activePairingWindow
 	pendingAttempts map[string]*pendingPairAttempt
@@ -388,9 +392,6 @@ func (s *Server) startLocked() error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	s.refreshSnapshotFromEngine(s.engine.Snapshot())
-	unsub := s.engine.Subscribe(s.onEngineSnapshot)
-
 	s.mu.Lock()
 	s.listener = ln
 	s.httpSrv = srv
@@ -398,7 +399,6 @@ func (s *Server) startLocked() error {
 	s.boundPort = tcpPort
 	s.running = true
 	s.lastErr = ""
-	s.unsubEngine = unsub
 	s.mu.Unlock()
 
 	go func() {
@@ -433,7 +433,6 @@ func (s *Server) stopLocked() error {
 	s.mu.Lock()
 	srv := s.httpSrv
 	ln := s.listener
-	unsub := s.unsubEngine
 	clients := make([]*wsClient, 0, len(s.clients))
 	for c := range s.clients {
 		clients = append(clients, c)
@@ -443,15 +442,11 @@ func (s *Server) stopLocked() error {
 	s.closePairingWindowLocked()
 	s.httpSrv = nil
 	s.listener = nil
-	s.unsubEngine = nil
 	s.running = false
 	s.listenAddr = ""
 	s.boundPort = 0
 	s.mu.Unlock()
 
-	if unsub != nil {
-		unsub()
-	}
 	for _, c := range clients {
 		c.closeConn()
 	}
@@ -709,9 +704,95 @@ func (s *Server) revokeClients(clients []*wsClient, reason string) {
 	}
 }
 
+// SetDeviceViewport updates the persisted profile assignment and FollowHost mode for deviceID,
+// and immediately updates any live WebSocket sessions belonging to that device.
+func (s *Server) SetDeviceViewport(deviceID, profileID string, followHost bool) error {
+	devID := strings.TrimSpace(deviceID)
+	if devID == "" {
+		return errors.New("device ID is required")
+	}
+	profRef := strings.TrimSpace(profileID)
+	resolvedProfileID := ""
+	if !followHost && profRef != "" {
+		engSnap := s.engine.Snapshot()
+		for _, p := range engSnap.Profiles {
+			if p.ID == profRef || strings.EqualFold(p.Name, profRef) {
+				resolvedProfileID = p.ID
+				break
+			}
+		}
+		if resolvedProfileID == "" {
+			return fmt.Errorf("profile %q not found", profRef)
+		}
+	}
+
+	s.opMu.Lock()
+	s.mu.Lock()
+	idx := -1
+	for i := range s.cfg.Devices {
+		if s.cfg.Devices[i].ID == devID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		s.mu.Unlock()
+		s.opMu.Unlock()
+		return fmt.Errorf("device %q not found", devID)
+	}
+	next := s.cfg
+	next.Devices = slices.Clone(s.cfg.Devices)
+	next.Devices[idx].FollowHost = followHost
+	if !followHost && resolvedProfileID != "" {
+		next.Devices[idx].ProfileID = resolvedProfileID
+	}
+	changed := s.cfg.Devices[idx].FollowHost != next.Devices[idx].FollowHost ||
+		s.cfg.Devices[idx].ProfileID != next.Devices[idx].ProfileID
+	s.cfg = next
+
+	var targets []*wsClient
+	for c := range s.clients {
+		if c.deviceID == devID && c.viewportID != "" {
+			targets = append(targets, c)
+		}
+	}
+	s.mu.Unlock()
+
+	if changed {
+		if err := s.engine.SaveGlobalSettings(SettingsPluginUUID, configToSettings(next)); err != nil {
+			s.opMu.Unlock()
+			return err
+		}
+	}
+	s.opMu.Unlock()
+
+	for _, c := range targets {
+		if followHost {
+			_ = s.engine.SetViewportFollowHost(c.viewportID, true)
+			continue
+		}
+		if resolvedProfileID != "" {
+			if vp, ok := s.engine.ViewportState(c.viewportID); ok && vp.ProfileID == resolvedProfileID {
+				_ = s.engine.SetViewportFollowHost(c.viewportID, false)
+			} else {
+				_ = s.engine.ViewportSwitchProfile(c.viewportID, resolvedProfileID)
+			}
+		} else {
+			_ = s.engine.SetViewportFollowHost(c.viewportID, false)
+		}
+	}
+	s.notifyStatus()
+	return nil
+}
+
 // Status returns a snapshot of current server state, host fingerprint, pairing window, and paired devices.
 func (s *Server) Status() Status {
 	addrs := DiscoverLANAddresses()
+	engSnap := s.engine.Snapshot()
+	profileNames := make(map[string]string, len(engSnap.Profiles))
+	for _, p := range engSnap.Profiles {
+		profileNames[p.ID] = p.Name
+	}
 	now := time.Now()
 
 	s.mu.RLock()
@@ -728,12 +809,41 @@ func (s *Server) Status() Status {
 	lastErr := s.lastErr
 
 	connectedByDev := make(map[string]bool, len(s.clients))
+	liveViewportByDev := make(map[string]string, len(s.clients))
 	for c := range s.clients {
 		connectedByDev[c.deviceID] = true
+		if _, exists := liveViewportByDev[c.deviceID]; !exists && c.viewportID != "" {
+			liveViewportByDev[c.deviceID] = c.viewportID
+		}
+	}
+	s.mu.RUnlock()
+
+	liveProfileByDev := make(map[string]string, len(liveViewportByDev))
+	for devID, vpID := range liveViewportByDev {
+		if vp, ok := s.engine.ViewportState(vpID); ok {
+			liveProfileByDev[devID] = vp.ProfileID
+		}
 	}
 
+	s.mu.RLock()
 	devices := make([]DeviceStatus, len(cfg.Devices))
 	for i, d := range cfg.Devices {
+		profID := d.ProfileID
+		profName := ""
+		if d.FollowHost {
+			profName = "Follow Studio"
+		} else {
+			if profID == "" {
+				profID = liveProfileByDev[d.ID]
+			}
+			if profID != "" {
+				if name, exists := profileNames[profID]; exists {
+					profName = name
+				} else {
+					profID = ""
+				}
+			}
+		}
 		devices[i] = DeviceStatus{
 			ID:          d.ID,
 			Name:        d.Name,
@@ -741,6 +851,9 @@ func (s *Server) Status() Status {
 			PairedAt:    d.PairedAt,
 			LastSeen:    d.LastSeen,
 			Connected:   connectedByDev[d.ID],
+			ProfileID:   profID,
+			ProfileName: profName,
+			FollowHost:  d.FollowHost,
 		}
 	}
 
@@ -871,29 +984,6 @@ func selectDisplayHost(mode BindMode, preferred string, addrs []InterfaceAddress
 		return addrs[0].IP
 	}
 	return "127.0.0.1"
-}
-
-func (s *Server) onEngineSnapshot(snap app.Snapshot) {
-	clientSnap := s.refreshSnapshotFromEngine(snap)
-
-	s.mu.RLock()
-	clients := make([]*wsClient, 0, len(s.clients))
-	for c := range s.clients {
-		clients = append(clients, c)
-	}
-	s.mu.RUnlock()
-
-	for _, c := range clients {
-		c.sendSnapshot(clientSnap)
-	}
-}
-
-func (s *Server) refreshSnapshotFromEngine(snap app.Snapshot) ClientSnapshot {
-	clientSnap := buildClientSnapshot(snap, s.registerLocalAsset)
-	s.mu.Lock()
-	s.lastSnap = &clientSnap
-	s.mu.Unlock()
-	return clientSnap
 }
 
 func signAssetURL(raw, sessionID string, assetMacKey []byte) (string, bool) {
@@ -1423,19 +1513,30 @@ func (s *Server) serveWSClient(conn *websocket.Conn) {
 		return
 	}
 
+	dev, ok := s.lookupPairedDevice(client.deviceID)
+	initialVP := app.Viewport{}
+	if ok {
+		initialVP = app.Viewport{
+			ProfileID:  dev.ProfileID,
+			FollowHost: dev.FollowHost,
+		}
+	}
+	vpID, unregVP := s.engine.RegisterViewport(initialVP)
+	client.viewportID = vpID
+	client.unregVP = unregVP
+
 	s.touchDeviceLastSeen(client.deviceID)
 
 	s.mu.Lock()
 	s.clients[client] = struct{}{}
 	s.sessions[client.sessionID] = client
-	snapCopy := s.lastSnap
 	s.mu.Unlock()
 
-	if snapCopy == nil {
-		cs := s.refreshSnapshotFromEngine(s.engine.Snapshot())
-		snapCopy = &cs
-	}
-	client.sendSnapshot(*snapCopy)
+	client.unsubVP = s.engine.SubscribeViewport(vpID, func(snap app.Snapshot) {
+		client.sendSnapshot(buildClientSnapshot(snap, s.registerLocalAsset))
+	})
+
+	client.sendSnapshot(buildClientSnapshot(s.engine.ViewportSnapshot(vpID), s.registerLocalAsset))
 	s.notifyStatus()
 
 	var wg sync.WaitGroup
@@ -1520,6 +1621,12 @@ func (s *Server) serveWSClient(conn *websocket.Conn) {
 	client.closeConn()
 	wg.Wait()
 
+	if client.unsubVP != nil {
+		client.unsubVP()
+	}
+	if client.unregVP != nil {
+		client.unregVP()
+	}
 	s.mu.Lock()
 	delete(s.clients, client)
 	delete(s.sessions, client.sessionID)
@@ -1681,9 +1788,40 @@ func (s *Server) touchDeviceLastSeen(deviceID string) {
 	}
 }
 
+func (s *Server) syncDeviceViewportFromEngine(deviceID, viewportID string) {
+	vp, ok := s.engine.ViewportState(viewportID)
+	if !ok || strings.TrimSpace(deviceID) == "" {
+		return
+	}
+
+	s.opMu.Lock()
+	s.mu.Lock()
+	var updatedCfg *Config
+	for i := range s.cfg.Devices {
+		if s.cfg.Devices[i].ID == deviceID {
+			if s.cfg.Devices[i].ProfileID != vp.ProfileID || s.cfg.Devices[i].FollowHost != vp.FollowHost {
+				s.cfg.Devices[i].ProfileID = vp.ProfileID
+				s.cfg.Devices[i].FollowHost = vp.FollowHost
+				cp := s.cfg
+				cp.Devices = slices.Clone(s.cfg.Devices)
+				updatedCfg = &cp
+			}
+			break
+		}
+	}
+	s.mu.Unlock()
+	if updatedCfg != nil {
+		_ = s.engine.SaveGlobalSettings(SettingsPluginUUID, configToSettings(*updatedCfg))
+		s.opMu.Unlock()
+		s.notifyStatus()
+		return
+	}
+	s.opMu.Unlock()
+}
+
 func (s *Server) executeCommand(client *wsClient, cmd ClientCommand) error {
 	ctx := context.Background()
-	snap := s.engine.Snapshot()
+	snap := s.engine.ViewportSnapshot(client.viewportID)
 
 	switch cmd.Type {
 	case "ping":
@@ -1696,13 +1834,17 @@ func (s *Server) executeCommand(client *wsClient, cmd ClientCommand) error {
 		if !snap.Grid.Contains(coords) {
 			return fmt.Errorf("invalid keypad coordinates (%d, %d)", cmd.Row, cmd.Col)
 		}
-		return s.engine.PressKey(ctx, coords)
+		if err := s.engine.ViewportPressKey(ctx, client.viewportID, coords); err != nil {
+			return err
+		}
+		s.syncDeviceViewportFromEngine(client.deviceID, client.viewportID)
+		return nil
 	case "keyUp":
 		coords := deck.Coordinates{Row: cmd.Row, Col: cmd.Col}
 		if !snap.Grid.Contains(coords) {
 			return nil
 		}
-		return s.engine.ReleaseKey(ctx, coords)
+		return s.engine.ViewportReleaseKey(ctx, client.viewportID, coords)
 	case "dialRotate":
 		if cmd.Dial < 0 || cmd.Dial >= snap.Dials {
 			return fmt.Errorf("invalid dial index %d", cmd.Dial)
@@ -1711,23 +1853,37 @@ func (s *Server) executeCommand(client *wsClient, cmd ClientCommand) error {
 		if ticks == 0 {
 			return nil
 		}
-		return s.engine.RotateDial(ctx, cmd.Dial, ticks)
+		return s.engine.ViewportRotateDial(ctx, client.viewportID, cmd.Dial, ticks)
 	case "dialPress":
 		if cmd.Dial < 0 || cmd.Dial >= snap.Dials {
 			return fmt.Errorf("invalid dial index %d", cmd.Dial)
 		}
-		return s.engine.PressDial(ctx, cmd.Dial)
+		if err := s.engine.ViewportPressDial(ctx, client.viewportID, cmd.Dial); err != nil {
+			return err
+		}
+		s.syncDeviceViewportFromEngine(client.deviceID, client.viewportID)
+		return nil
 	case "prevPage":
-		return s.engine.PrevPage(true)
+		return s.engine.ViewportPrevPage(client.viewportID, true)
 	case "nextPage":
-		return s.engine.NextPage(true)
+		return s.engine.ViewportNextPage(client.viewportID, true)
 	case "closeFolder":
-		return s.engine.CloseFolder()
+		return s.engine.ViewportCloseFolder(client.viewportID)
 	case "switchProfile":
 		if strings.TrimSpace(cmd.ProfileID) == "" {
 			return nil
 		}
-		return s.engine.SwitchProfile(cmd.ProfileID)
+		if err := s.engine.ViewportSwitchProfile(client.viewportID, cmd.ProfileID); err != nil {
+			return err
+		}
+		s.syncDeviceViewportFromEngine(client.deviceID, client.viewportID)
+		return nil
+	case "setFollowHost":
+		if err := s.engine.SetViewportFollowHost(client.viewportID, cmd.FollowHost); err != nil {
+			return err
+		}
+		s.syncDeviceViewportFromEngine(client.deviceID, client.viewportID)
+		return nil
 	default:
 		return fmt.Errorf("unsupported command %q", cmd.Type)
 	}

@@ -14,12 +14,14 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/mrpoundsign/PoundControl/internal/app"
 	"github.com/mrpoundsign/PoundControl/internal/webdeck"
 )
 
 const (
 	bindLabelLAN       = "LAN (All Interfaces)"
 	bindLabelLocalhost = "Localhost Only"
+	followStudioOption = "Follow Studio"
 )
 
 // WebDeckController defines the LAN Web Touch Deck server operations exposed to Studio UI surfaces.
@@ -33,6 +35,7 @@ type WebDeckController interface {
 	ResolvePendingPair(attemptID string, approve bool) error
 	RevokeDevice(deviceID string) error
 	RevokeAllSessions() error
+	SetDeviceViewport(deviceID, profileID string, followHost bool) error
 	Status() webdeck.Status
 	SubscribeStatus(fn func(webdeck.Status)) func()
 	QRImage(size int) (image.Image, error)
@@ -51,7 +54,7 @@ func webDeckBadgeLabel(st webdeck.Status) string {
 	return "Web Deck: :" + portStr
 }
 
-func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyne.CanvasObject, func()) {
+func buildWebDeckSettingsTab(engine *app.Engine, ctrl WebDeckController, onStatus func(string)) (fyne.CanvasObject, func()) {
 	if ctrl == nil {
 		msg := widget.NewLabel("LAN Web Touch Deck controller is not attached in this mode.")
 		msg.Wrapping = fyne.TextWrapWord
@@ -235,11 +238,23 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 	})
 
 	var (
-		lastPairURL  string
-		pairExpAt    time.Time
-		pairingIsOpn bool
-		closedFlag   atomic.Bool
+		lastPairURL     string
+		pairExpAt       time.Time
+		pairingIsOpn    bool
+		lastProfilesSig string
+		closedFlag      atomic.Bool
 	)
+
+	profilesSigFor := func(snap app.Snapshot) string {
+		var b strings.Builder
+		for _, p := range snap.Profiles {
+			b.WriteString(p.ID)
+			b.WriteByte('=')
+			b.WriteString(p.Name)
+			b.WriteByte(';')
+		}
+		return b.String()
+	}
 
 	updateCountdown := func() {
 		if !pairingIsOpn || pairExpAt.IsZero() {
@@ -308,6 +323,11 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 			revokeAllBtn.Disable()
 		} else {
 			revokeAllBtn.Enable()
+			var engSnap app.Snapshot
+			if engine != nil {
+				engSnap = engine.Snapshot()
+				lastProfilesSig = profilesSigFor(engSnap)
+			}
 			for _, dev := range st.Devices {
 				devID := dev.ID
 				devName := dev.Name
@@ -324,8 +344,69 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 				} else if dev.PairedAt != "" {
 					meta += " • Paired " + dev.PairedAt
 				}
+				if engine == nil && dev.ProfileName != "" {
+					meta += " • Profile: " + dev.ProfileName
+				}
 				metaLbl := widget.NewLabel(meta)
 				metaLbl.Wrapping = fyne.TextWrapBreak
+
+				var profCtrl fyne.CanvasObject
+				if engine != nil {
+					options := make([]string, 0, len(engSnap.Profiles)+1)
+					optionIDs := make([]string, 0, len(engSnap.Profiles)+1)
+					options = append(options, followStudioOption)
+					optionIDs = append(optionIDs, "")
+					selectedIdx := -1
+					if dev.FollowHost {
+						selectedIdx = 0
+					}
+					for i, p := range engSnap.Profiles {
+						options = append(options, p.Name)
+						optionIDs = append(optionIDs, p.ID)
+						if !dev.FollowHost && dev.ProfileID != "" && p.ID == dev.ProfileID {
+							selectedIdx = i + 1
+						}
+					}
+					if selectedIdx < 0 {
+						for i, p := range engSnap.Profiles {
+							if p.ID == engSnap.ActiveProfileID {
+								selectedIdx = i + 1
+								break
+							}
+						}
+					}
+					localSync := true
+					var sel *widget.Select
+					sel = widget.NewSelect(options, func(_ string) {
+						if localSync {
+							return
+						}
+						idx := sel.SelectedIndex()
+						if idx < 0 || idx >= len(optionIDs) {
+							return
+						}
+						targetID := optionIDs[idx]
+						isFollow := targetID == ""
+						if err := ctrl.SetDeviceViewport(devID, targetID, isFollow); err != nil {
+							if onStatus != nil {
+								onStatus("Update device profile failed: " + err.Error())
+							}
+							return
+						}
+						if onStatus != nil {
+							if isFollow {
+								onStatus(devName + " set to Follow Studio")
+							} else {
+								onStatus(devName + " assigned to " + options[idx])
+							}
+						}
+					})
+					if selectedIdx >= 0 && selectedIdx < len(options) {
+						sel.SetSelectedIndex(selectedIdx)
+					}
+					localSync = false
+					profCtrl = sel
+				}
 
 				revBtn := widget.NewButtonWithIcon("Revoke", theme.DeleteIcon(), func() {
 					if err := ctrl.RevokeDevice(devID); err != nil {
@@ -338,7 +419,11 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 						onStatus("Revoked device: " + devName)
 					}
 				})
-				row := container.NewBorder(nil, nil, nil, revBtn, container.NewVBox(titleLbl, metaLbl))
+				var rightControls fyne.CanvasObject = revBtn
+				if profCtrl != nil {
+					rightControls = container.NewHBox(profCtrl, revBtn)
+				}
+				row := container.NewBorder(nil, nil, nil, rightControls, container.NewVBox(titleLbl, metaLbl))
 				devicesBox.Add(row)
 			}
 		}
@@ -354,6 +439,20 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 			applyStatus(st)
 		})
 	})
+	var unsubEngine func()
+	if engine != nil {
+		lastProfilesSig = profilesSigFor(engine.Snapshot())
+		unsubEngine = engine.Subscribe(func(snap app.Snapshot) {
+			sig := profilesSigFor(snap)
+			dispatchUI(func() {
+				if closedFlag.Load() || sig == lastProfilesSig {
+					return
+				}
+				lastProfilesSig = sig
+				applyStatus(ctrl.Status())
+			})
+		})
+	}
 
 	stopTick := make(chan struct{})
 	go func() {
@@ -379,6 +478,9 @@ func buildWebDeckSettingsTab(ctrl WebDeckController, onStatus func(string)) (fyn
 		close(stopTick)
 		if unsub != nil {
 			unsub()
+		}
+		if unsubEngine != nil {
+			unsubEngine()
 		}
 	}
 

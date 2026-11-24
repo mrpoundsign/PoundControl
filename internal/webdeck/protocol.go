@@ -49,6 +49,7 @@ type ClientDial struct {
 type ClientSnapshot struct {
 	ActiveProfileID   string                `json:"activeProfileId"`
 	ActiveProfileName string                `json:"activeProfileName"`
+	FollowHost        bool                  `json:"followHost"`
 	Profiles          []ClientProfile       `json:"profiles"`
 	Grid              deck.GridSize         `json:"grid"`
 	Dials             int                   `json:"dials"`
@@ -69,14 +70,15 @@ type ServerMessage struct {
 }
 
 // ClientCommand is an inbound interactive command received over WebSocket.
-// Supported types include ping, keyDown, keyUp, dialRotate, dialPress, prevPage, nextPage, closeFolder, switchProfile, and unpair.
+// Supported types include ping, keyDown, keyUp, dialRotate, dialPress, prevPage, nextPage, closeFolder, switchProfile, setFollowHost, and unpair.
 type ClientCommand struct {
-	Type      string `json:"type"`
-	Row       int    `json:"row"`
-	Col       int    `json:"col"`
-	Dial      int    `json:"dial"`
-	Ticks     int    `json:"ticks"`
-	ProfileID string `json:"profileId,omitempty"`
+	Type       string `json:"type"`
+	Row        int    `json:"row"`
+	Col        int    `json:"col"`
+	Dial       int    `json:"dial"`
+	Ticks      int    `json:"ticks"`
+	ProfileID  string `json:"profileId,omitempty"`
+	FollowHost bool   `json:"followHost,omitempty"`
 }
 
 // WSAuthHello is sent by the host immediately after WebSocket upgrade to initiate mutual authentication.
@@ -193,6 +195,7 @@ func buildClientSnapshot(snap app.Snapshot, mapImage func(string) string) Client
 	return ClientSnapshot{
 		ActiveProfileID:   snap.ActiveProfileID,
 		ActiveProfileName: snap.ActiveProfileName,
+		FollowHost:        snap.FollowHost,
 		Profiles:          profiles,
 		Grid:              snap.Grid,
 		Dials:             snap.Dials,

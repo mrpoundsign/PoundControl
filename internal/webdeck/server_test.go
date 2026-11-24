@@ -775,13 +775,24 @@ func TestServerWSMutualHandshakeSignedFramesAssetsAndRevoke(t *testing.T) {
 		time.Sleep(15 * time.Millisecond)
 	}
 
-	// Live Engine page switch broadcasts signed snapshot.
+	// Live Engine page addition broadcasts updated snapshot without hijacking independent client's page,
+	// while client nextPage advances only that client.
 	if _, err := eng.AddPage("Page 2"); err != nil {
 		t.Fatalf("AddPage error = %v", err)
 	}
-	if err := eng.NextPage(true); err != nil {
-		t.Fatalf("NextPage error = %v", err)
+	var sawPageCount2 bool
+	for range 6 {
+		m := wsA.recvSigned(t, 2*time.Second)
+		if m.Type == "snapshot" && m.Snapshot != nil && m.Snapshot.PageCount == 2 && m.Snapshot.PageIndex == 0 {
+			sawPageCount2 = true
+			break
+		}
 	}
+	if !sawPageCount2 {
+		t.Fatal("expected signed snapshot with PageCount=2 and independent PageIndex=0")
+	}
+
+	wsA.sendSigned(t, ClientCommand{Type: "nextPage"})
 	var sawPage2 bool
 	for range 6 {
 		m := wsA.recvSigned(t, 2*time.Second)
@@ -791,7 +802,7 @@ func TestServerWSMutualHandshakeSignedFramesAssetsAndRevoke(t *testing.T) {
 		}
 	}
 	if !sawPage2 {
-		t.Fatal("expected signed Page 2 snapshot broadcast")
+		t.Fatal("expected signed Page 2 snapshot after client nextPage")
 	}
 
 	// Tampered frame MAC must be rejected with auth_revoked and NOT dispatched.
@@ -902,5 +913,148 @@ func TestServerWSMutualHandshakeSignedFramesAssetsAndRevoke(t *testing.T) {
 
 	if stEnd := srv.Status(); stEnd.PairedDevices != 0 {
 		t.Fatalf("expected 0 paired devices after revoke + unpair, got %d", stEnd.PairedDevices)
+	}
+}
+
+func TestServerIndependentDeviceViewportsPersistenceAndFollowHost(t *testing.T) {
+	eng, _, srv := newTestEngineAndServer(t)
+
+	prof1ID := eng.Snapshot().ActiveProfileID
+	prof2, err := eng.CreateProfile("Stream", deck.GridSize{Cols: 3, Rows: 2}, 1)
+	if err != nil {
+		t.Fatalf("CreateProfile(Stream) error = %v", err)
+	}
+	prof3, err := eng.CreateProfile("Watch", deck.GridSize{Cols: 2, Rows: 2}, 1)
+	if err != nil {
+		t.Fatalf("CreateProfile(Watch) error = %v", err)
+	}
+	if _, err := eng.AddPage("Watch P2"); err != nil {
+		t.Fatalf("AddPage error = %v", err)
+	}
+	if err := eng.GoToPage(1); err != nil {
+		t.Fatalf("GoToPage(1) error = %v", err)
+	}
+	if err := eng.SwitchProfile(prof1ID); err != nil {
+		t.Fatalf("SwitchProfile(prof1) error = %v", err)
+	}
+
+	devA := performTestPairing(t, srv, "Phone A")
+	devB := performTestPairing(t, srv, "Watch B")
+
+	wsA := dialAuthenticatedWS(t, devA)
+	defer func() { _ = wsA.conn.Close() }()
+	wsB := dialAuthenticatedWS(t, devB)
+	defer func() { _ = wsB.conn.Close() }()
+
+	snapA := wsA.recvSigned(t, 2*time.Second)
+	snapB := wsB.recvSigned(t, 2*time.Second)
+	if snapA.Snapshot == nil || snapA.Snapshot.ActiveProfileID != prof1ID || snapA.Snapshot.FollowHost {
+		t.Fatalf("expected wsA independent on %s, got %+v", prof1ID, snapA.Snapshot)
+	}
+	if snapB.Snapshot == nil || snapB.Snapshot.ActiveProfileID != prof1ID || snapB.Snapshot.FollowHost {
+		t.Fatalf("expected wsB independent on %s, got %+v", prof1ID, snapB.Snapshot)
+	}
+
+	// Switching wsA to prof2 and wsB to prof3 leaves Studio and each other isolated.
+	wsA.sendSigned(t, ClientCommand{Type: "switchProfile", ProfileID: prof2.ID})
+	wsB.sendSigned(t, ClientCommand{Type: "switchProfile", ProfileID: prof3.ID})
+
+	waitProfile := func(ws *testWSSession, wantID string) ClientSnapshot {
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			rem := time.Until(deadline)
+			if rem <= 0 {
+				break
+			}
+			m := ws.recvSigned(t, rem)
+			if m.Type == "snapshot" && m.Snapshot != nil && m.Snapshot.ActiveProfileID == wantID {
+				return *m.Snapshot
+			}
+		}
+		t.Fatalf("timed out waiting for profile %s", wantID)
+		return ClientSnapshot{}
+	}
+
+	gotA := waitProfile(wsA, prof2.ID)
+	gotB := waitProfile(wsB, prof3.ID)
+	if gotA.Grid != prof2.Grid || gotB.Grid != prof3.Grid {
+		t.Fatalf("unexpected client grids: A=%+v B=%+v", gotA.Grid, gotB.Grid)
+	}
+	if eng.Snapshot().ActiveProfileID != prof1ID {
+		t.Fatalf("expected Studio still on %s after client switches, got %s", prof1ID, eng.Snapshot().ActiveProfileID)
+	}
+
+	// Switching Studio to prof3 must not pull wsA off prof2.
+	if err := eng.SwitchProfile(prof3.ID); err != nil {
+		t.Fatalf("Studio SwitchProfile(prof3) error = %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+	if err := eng.SwitchProfile(prof1ID); err != nil {
+		t.Fatalf("Studio SwitchProfile(prof1) error = %v", err)
+	}
+
+	// Reconnecting devB restores its persisted prof3 profile automatically.
+	_ = wsB.conn.Close()
+	wsB2 := dialAuthenticatedWS(t, devB)
+	defer func() { _ = wsB2.conn.Close() }()
+	reconnB := wsB2.recvSigned(t, 2*time.Second)
+	if reconnB.Snapshot == nil || reconnB.Snapshot.ActiveProfileID != prof3.ID {
+		t.Fatalf("expected devB reconnect restored to %s, got %+v", prof3.ID, reconnB.Snapshot)
+	}
+
+	// Client setFollowHost toggles Follow Studio live and persists FollowHost.
+	wsB2.sendSigned(t, ClientCommand{Type: "setFollowHost", FollowHost: true})
+	var sawFollowOn bool
+	deadlineFollow := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadlineFollow) {
+		m := wsB2.recvSigned(t, time.Until(deadlineFollow))
+		if m.Type == "snapshot" && m.Snapshot != nil && m.Snapshot.FollowHost && m.Snapshot.ActiveProfileID == prof1ID {
+			sawFollowOn = true
+			break
+		}
+	}
+	if !sawFollowOn {
+		t.Fatal("expected wsB2 to mirror Studio prof1 when FollowHost=true")
+	}
+	if err := eng.SwitchProfile(prof3.ID); err != nil {
+		t.Fatalf("Studio SwitchProfile(prof3) error = %v", err)
+	}
+	if err := eng.NextPage(true); err != nil {
+		t.Fatalf("Studio NextPage error = %v", err)
+	}
+	var sawFollowPage2 bool
+	deadlinePage2 := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadlinePage2) {
+		m := wsB2.recvSigned(t, time.Until(deadlinePage2))
+		if m.Type == "snapshot" && m.Snapshot != nil && m.Snapshot.ActiveProfileID == prof3.ID && m.Snapshot.PageIndex == 1 {
+			sawFollowPage2 = true
+			break
+		}
+	}
+	if !sawFollowPage2 {
+		t.Fatal("expected FollowHost wsB2 to mirror Studio switch to prof3 page 1")
+	}
+
+	// Host SetDeviceViewport assigns devA to prof3 and devB to independent prof2 immediately.
+	if err := srv.SetDeviceViewport(devA.deviceID, prof3.ID, false); err != nil {
+		t.Fatalf("SetDeviceViewport(devA) error = %v", err)
+	}
+	waitProfile(wsA, prof3.ID)
+
+	if err := srv.SetDeviceViewport(devB.deviceID, prof2.ID, false); err != nil {
+		t.Fatalf("SetDeviceViewport(devB) error = %v", err)
+	}
+	waitProfile(wsB2, prof2.ID)
+
+	st := srv.Status()
+	seenProf := map[string]string{}
+	for _, d := range st.Devices {
+		seenProf[d.ID] = d.ProfileID
+		if d.FollowHost {
+			t.Fatalf("expected FollowHost=false on device %s after SetDeviceViewport", d.ID)
+		}
+	}
+	if seenProf[devA.deviceID] != prof3.ID || seenProf[devB.deviceID] != prof2.ID {
+		t.Fatalf("unexpected persisted device profiles: %+v", seenProf)
 	}
 }

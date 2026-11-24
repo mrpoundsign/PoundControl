@@ -16,53 +16,82 @@ import (
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 )
 
-// PopOutPad presents a distraction-free, always-live Virtual Deck window synchronized with the Engine.
+// PopOutPad presents a distraction-free, always-live Virtual Deck window with an independent viewport.
 type PopOutPad struct {
-	win     fyne.Window
-	engine  *app.Engine
-	surface *deckSurfaceView
-	unsub   func()
+	win        fyne.Window
+	engine     *app.Engine
+	viewportID string
+	unregVP    func()
+	surface    *deckSurfaceView
+	unsub      func()
+	lastSnap   app.Snapshot
 
-	headerLbl *widget.Label
-	prevBtn   *widget.Button
-	nextBtn   *widget.Button
-	backBtn   *widget.Button
+	headerLbl     *widget.Label
+	profileSelect *widget.Select
+	profileIDs    []string
+	syncingSelect bool
+	prevBtn       *widget.Button
+	nextBtn       *widget.Button
+	backBtn       *widget.Button
 }
 
-// NewPopOutPad constructs a floating Run Mode deck pad attached to engine.
+// NewPopOutPad constructs a floating Run Mode deck pad attached to engine on its own independent viewport.
 func NewPopOutPad(a fyne.App, engine *app.Engine, onClosed func()) *PopOutPad {
 	win := a.NewWindow("PoundControl Pad")
 	win.Resize(fyne.NewSize(560, 460))
 
+	initProfileID := engine.Snapshot().ActiveProfileID
+	vpID, unregVP := engine.RegisterViewport(app.Viewport{
+		ProfileID:  initProfileID,
+		FollowHost: false,
+	})
+
 	pad := &PopOutPad{
-		win:    win,
-		engine: engine,
+		win:        win,
+		engine:     engine,
+		viewportID: vpID,
+		unregVP:    unregVP,
 	}
 
 	pad.headerLbl = widget.NewLabel("Default • Page 1 / 1")
 	pad.headerLbl.TextStyle = fyne.TextStyle{Bold: true}
+	pad.profileSelect = widget.NewSelect([]string{followStudioOption}, func(_ string) {
+		if pad.syncingSelect {
+			return
+		}
+		idx := pad.profileSelect.SelectedIndex()
+		if idx < 0 || idx >= len(pad.profileIDs) {
+			return
+		}
+		targetID := pad.profileIDs[idx]
+		if targetID == "" {
+			_ = engine.SetViewportFollowHost(pad.viewportID, true)
+		} else {
+			_ = engine.ViewportSwitchProfile(pad.viewportID, targetID)
+		}
+	})
 	pad.prevBtn = widget.NewButtonWithIcon("", theme.NavigateBackIcon(), func() {
-		_ = engine.PrevPage(true)
+		_ = engine.ViewportPrevPage(pad.viewportID, true)
 	})
 	pad.nextBtn = widget.NewButtonWithIcon("", theme.NavigateNextIcon(), func() {
-		_ = engine.NextPage(true)
+		_ = engine.ViewportNextPage(pad.viewportID, true)
 	})
 	pad.backBtn = widget.NewButton("← Back", func() {
-		_ = engine.CloseFolder()
+		_ = engine.ViewportCloseFolder(pad.viewportID)
 	})
 
 	pad.surface = newDeckSurfaceView(
 		func(c deck.Coordinates) {
-			_ = engine.PressKey(context.Background(), c)
+			_ = engine.ViewportPressKey(context.Background(), pad.viewportID, c)
 		},
 		func(dial int) {
-			_ = engine.PressDial(context.Background(), dial)
+			_ = engine.ViewportPressDial(context.Background(), pad.viewportID, dial)
 		},
 		func(dial, delta int) {
-			_ = engine.RotateDial(context.Background(), dial, delta)
+			_ = engine.ViewportRotateDial(context.Background(), pad.viewportID, dial, delta)
 		},
 		func(dial int) {
-			_ = engine.PressDial(context.Background(), dial)
+			_ = engine.ViewportPressDial(context.Background(), pad.viewportID, dial)
 		},
 	)
 
@@ -71,6 +100,7 @@ func NewPopOutPad(a fyne.App, engine *app.Engine, onClosed func()) *PopOutPad {
 		container.NewPadded(container.NewHBox(
 			pad.headerLbl,
 			layout.NewSpacer(),
+			pad.profileSelect,
 			pad.backBtn,
 			pad.prevBtn,
 			pad.nextBtn,
@@ -84,8 +114,8 @@ func NewPopOutPad(a fyne.App, engine *app.Engine, onClosed func()) *PopOutPad {
 
 	win.SetContent(container.NewBorder(topBar, nil, nil, nil, body))
 
-	pad.ApplySnapshot(engine.Snapshot())
-	pad.unsub = engine.Subscribe(func(s app.Snapshot) {
+	pad.ApplySnapshot(engine.ViewportSnapshot(pad.viewportID))
+	pad.unsub = engine.SubscribeViewport(pad.viewportID, func(s app.Snapshot) {
 		dispatchUI(func() {
 			pad.ApplySnapshot(s)
 		})
@@ -98,6 +128,10 @@ func NewPopOutPad(a fyne.App, engine *app.Engine, onClosed func()) *PopOutPad {
 		if pad.unsub != nil {
 			pad.unsub()
 			pad.unsub = nil
+		}
+		if pad.unregVP != nil {
+			pad.unregVP()
+			pad.unregVP = nil
 		}
 		if onClosed != nil {
 			onClosed()
@@ -123,8 +157,28 @@ func (p *PopOutPad) Close() {
 	p.win.Close()
 }
 
-// ApplySnapshot updates the pop-out pad tiles, dials, and breadcrumb header to reflect snap.
+// ApplySnapshot updates the pop-out pad tiles, dials, profile selector, and breadcrumb header to reflect snap.
 func (p *PopOutPad) ApplySnapshot(snap app.Snapshot) {
+	p.lastSnap = snap
+	if p.profileSelect != nil {
+		p.syncingSelect = true
+		names := make([]string, 0, len(snap.Profiles)+1)
+		ids := make([]string, 0, len(snap.Profiles)+1)
+		names = append(names, followStudioOption)
+		ids = append(ids, "")
+		selectedIdx := 0
+		for i, prof := range snap.Profiles {
+			names = append(names, prof.Name)
+			ids = append(ids, prof.ID)
+			if !snap.FollowHost && prof.ID == snap.ActiveProfileID {
+				selectedIdx = i + 1
+			}
+		}
+		p.profileIDs = ids
+		p.profileSelect.SetOptions(names)
+		p.profileSelect.SetSelectedIndex(selectedIdx)
+		p.syncingSelect = false
+	}
 	if snap.InFolder {
 		p.headerLbl.SetText(fmt.Sprintf("%s • Folder: %s", snap.ActiveProfileName, strings.Join(snap.FolderPath, " / ")))
 		p.backBtn.Enable()

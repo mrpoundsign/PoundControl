@@ -57,11 +57,21 @@ type FolderSummary struct {
 	Name string `json:"name"`
 }
 
+// Viewport describes an independent deck surface's viewing position and Studio-following preference.
+type Viewport struct {
+	ID          string   `json:"id"`
+	ProfileID   string   `json:"profileId"`
+	PageIndex   int      `json:"pageIndex"`
+	FolderStack []string `json:"folderStack,omitempty"`
+	FollowHost  bool     `json:"followHost"`
+}
+
 // Snapshot is an immutable point-in-time view of the active deck state for UI and remote surfaces.
 type Snapshot struct {
 	Profiles          []ProfileSummary        `json:"profiles"`
 	ActiveProfileID   string                  `json:"activeProfileId"`
 	ActiveProfileName string                  `json:"activeProfileName"`
+	FollowHost        bool                    `json:"followHost,omitempty"`
 	Grid              deck.GridSize           `json:"grid"`
 	Dials             int                     `json:"dials"`
 	PageIndex         int                     `json:"pageIndex"`
@@ -102,6 +112,14 @@ type liveSlotVisual struct {
 	hasTitle bool
 }
 
+type viewportState struct {
+	profileID   string
+	pageIdx     int
+	folderStack []string
+	followHost  bool
+	subs        map[uint64]func(Snapshot)
+}
+
 // Engine coordinates deck configuration, persistence, navigation, plugin lifecycle, and live state updates.
 type Engine struct {
 	opMu        sync.Mutex
@@ -115,6 +133,10 @@ type Engine struct {
 	folderStack []string
 	visuals     map[string]liveSlotVisual
 	logs        []string
+
+	viewports map[string]*viewportState
+	vpSeq     uint64
+	appeared  map[string]plugin.ActionEvent
 
 	undoStack  []historyEntry
 	redoStack  []historyEntry
@@ -148,6 +170,8 @@ func NewEngine(store deck.Store, reg *plugin.Registry) (*Engine, error) {
 		registry:    reg,
 		cfg:         cfg,
 		visuals:     make(map[string]liveSlotVisual),
+		viewports:   make(map[string]*viewportState),
+		appeared:    make(map[string]plugin.ActionEvent),
 		subs:        make(map[uint64]func(Snapshot)),
 	}
 	reg.SetHost(&engineHost{eng: eng})
@@ -156,9 +180,9 @@ func NewEngine(store deck.Store, reg *plugin.Registry) (*Engine, error) {
 		_ = reg.NotifyPluginEnabled(context.Background(), pid, false)
 	}
 
-	eng.mu.RLock()
-	appear := eng.visibleEventsLocked(plugin.EventWillAppear)
-	eng.mu.RUnlock()
+	eng.mu.Lock()
+	_, appear := eng.syncAppearedLocked()
+	eng.mu.Unlock()
 
 	eng.dispatchAll(context.Background(), appear)
 	return eng, nil
@@ -184,6 +208,8 @@ func (e *Engine) SetSecretStore(store secrets.Store) {
 func (e *Engine) Close() error {
 	e.mu.Lock()
 	clear(e.subs)
+	clear(e.viewports)
+	clear(e.appeared)
 	e.mu.Unlock()
 	if e.registry != nil {
 		return e.registry.Close()
@@ -216,8 +242,20 @@ func (e *Engine) Snapshot() Snapshot {
 	return e.snapshotLocked()
 }
 
+// ViewportSnapshot returns a deep, thread-safe snapshot of the deck state for viewportID.
+// When viewportID is empty, it returns the Studio GUI snapshot.
+func (e *Engine) ViewportSnapshot(viewportID string) Snapshot {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.snapshotForViewportLocked(strings.TrimSpace(viewportID))
+}
+
 func (e *Engine) snapshotLocked() Snapshot {
-	prof := e.activeProfileLocked()
+	return e.snapshotForViewportLocked("")
+}
+
+func (e *Engine) snapshotForViewportLocked(vpID string) Snapshot {
+	prof, pageIdx, folderStack, followHost := e.resolveViewportLocked(vpID)
 	summaries := make([]ProfileSummary, len(e.cfg.Profiles))
 	for i, p := range e.cfg.Profiles {
 		summaries[i] = ProfileSummary{
@@ -229,15 +267,14 @@ func (e *Engine) snapshotLocked() Snapshot {
 		}
 	}
 
-	slotsMap, dialsMap, folderNames := e.activeContainerLocked(prof)
+	slotsMap, dialsMap, folderNames := e.containerForLocked(prof, pageIdx, folderStack)
 	inFolder := len(folderNames) > 0
 	var activeFolderID string
-	if inFolder && len(e.folderStack) > 0 {
-		idx := min(len(folderNames), len(e.folderStack)) - 1
-		activeFolderID = e.folderStack[idx]
+	if inFolder && len(folderStack) > 0 {
+		idx := min(len(folderNames), len(folderStack)) - 1
+		activeFolderID = folderStack[idx]
 	}
 
-	pageIdx := min(max(e.pageIdx, 0), max(0, len(prof.Pages)-1))
 	pageNames := make([]string, len(prof.Pages))
 	for i, pg := range prof.Pages {
 		name := strings.TrimSpace(pg.Name)
@@ -311,6 +348,7 @@ func (e *Engine) snapshotLocked() Snapshot {
 		Profiles:          summaries,
 		ActiveProfileID:   prof.ID,
 		ActiveProfileName: prof.Name,
+		FollowHost:        followHost,
 		Grid:              prof.Grid,
 		Dials:             prof.Dials,
 		PageIndex:         pageIdx,
@@ -450,10 +488,67 @@ func (e *Engine) renderSlotLocked(slot *deck.SlotConfig) RenderedSlot {
 }
 
 func (e *Engine) notifySubscribers() {
+	type vpDelivery struct {
+		snap Snapshot
+		cbs  []func(Snapshot)
+	}
+
 	e.mu.RLock()
-	snap := e.snapshotLocked()
-	cbs := make([]func(Snapshot), 0, len(e.subs))
+	studioSnap := e.snapshotForViewportLocked("")
+	studioCbs := make([]func(Snapshot), 0, len(e.subs))
 	for _, fn := range e.subs {
+		studioCbs = append(studioCbs, fn)
+	}
+
+	var vpDeliveries []vpDelivery
+	if len(e.viewports) > 0 {
+		vpIDs := make([]string, 0, len(e.viewports))
+		for vpID, vp := range e.viewports {
+			if vp != nil && len(vp.subs) > 0 {
+				vpIDs = append(vpIDs, vpID)
+			}
+		}
+		slices.Sort(vpIDs)
+		for _, vpID := range vpIDs {
+			vp := e.viewports[vpID]
+			cbs := make([]func(Snapshot), 0, len(vp.subs))
+			for _, fn := range vp.subs {
+				cbs = append(cbs, fn)
+			}
+			vpDeliveries = append(vpDeliveries, vpDelivery{
+				snap: e.snapshotForViewportLocked(vpID),
+				cbs:  cbs,
+			})
+		}
+	}
+	e.mu.RUnlock()
+
+	for _, fn := range studioCbs {
+		fn(studioSnap)
+	}
+	for _, d := range vpDeliveries {
+		for _, fn := range d.cbs {
+			fn(d.snap)
+		}
+	}
+}
+
+func (e *Engine) notifyViewport(viewportID string) {
+	id := strings.TrimSpace(viewportID)
+	if id == "" {
+		e.notifySubscribers()
+		return
+	}
+
+	e.mu.RLock()
+	vp, ok := e.viewports[id]
+	if !ok || vp == nil || len(vp.subs) == 0 {
+		e.mu.RUnlock()
+		return
+	}
+	snap := e.snapshotForViewportLocked(id)
+	cbs := make([]func(Snapshot), 0, len(vp.subs))
+	for _, fn := range vp.subs {
 		cbs = append(cbs, fn)
 	}
 	e.mu.RUnlock()
@@ -472,11 +567,70 @@ func (e *Engine) activeProfileLocked() *deck.Profile {
 	return e.cfg.Profiles[0]
 }
 
+func validFolderStackLocked(prof *deck.Profile, stack []string) []string {
+	if prof == nil || len(stack) == 0 || len(prof.Folders) == 0 {
+		return nil
+	}
+	var out []string
+	for _, fid := range stack {
+		if prof.Folders[fid] == nil {
+			break
+		}
+		out = append(out, fid)
+	}
+	return out
+}
+
+func (e *Engine) resolveViewportLocked(vpID string) (prof *deck.Profile, pageIdx int, folderStack []string, followHost bool) {
+	if vpID != "" {
+		if vp, ok := e.viewports[vpID]; ok && vp != nil {
+			if !vp.followHost {
+				prof = e.findProfileByIDLocked(vp.profileID)
+				if prof == nil {
+					prof = e.activeProfileLocked()
+					return prof, 0, nil, false
+				}
+				pIdx := min(max(vp.pageIdx, 0), max(0, len(prof.Pages)-1))
+				fStack := validFolderStackLocked(prof, vp.folderStack)
+				return prof, pIdx, fStack, false
+			}
+			followHost = true
+		}
+	}
+	prof = e.activeProfileLocked()
+	pIdx := min(max(e.pageIdx, 0), max(0, len(prof.Pages)-1))
+	fStack := validFolderStackLocked(prof, e.folderStack)
+	return prof, pIdx, fStack, followHost
+}
+
+func (e *Engine) clampViewportsLocked() {
+	active := e.activeProfileLocked()
+	for _, vp := range e.viewports {
+		if vp == nil || vp.followHost {
+			continue
+		}
+		prof := e.findProfileByIDLocked(vp.profileID)
+		if prof == nil {
+			vp.profileID = active.ID
+			vp.pageIdx = 0
+			vp.folderStack = nil
+			continue
+		}
+		vp.profileID = prof.ID
+		vp.pageIdx = min(max(vp.pageIdx, 0), max(0, len(prof.Pages)-1))
+		vp.folderStack = validFolderStackLocked(prof, vp.folderStack)
+	}
+}
+
 func (e *Engine) activeContainerLocked(prof *deck.Profile) (map[string]*deck.SlotConfig, map[int]*deck.SlotConfig, []string) {
-	if len(e.folderStack) > 0 {
-		names := make([]string, 0, len(e.folderStack))
+	return e.containerForLocked(prof, e.pageIdx, e.folderStack)
+}
+
+func (e *Engine) containerForLocked(prof *deck.Profile, pageIdx int, folderStack []string) (map[string]*deck.SlotConfig, map[int]*deck.SlotConfig, []string) {
+	if len(folderStack) > 0 {
+		names := make([]string, 0, len(folderStack))
 		var top *deck.Folder
-		for _, fid := range e.folderStack {
+		for _, fid := range folderStack {
 			f, ok := prof.Folders[fid]
 			if !ok || f == nil {
 				break
@@ -488,22 +642,17 @@ func (e *Engine) activeContainerLocked(prof *deck.Profile) (map[string]*deck.Slo
 			return top.Slots, top.Dials, names
 		}
 	}
-	idx := min(max(e.pageIdx, 0), max(0, len(prof.Pages)-1))
+	if len(prof.Pages) == 0 {
+		return nil, nil, nil
+	}
+	idx := min(max(pageIdx, 0), len(prof.Pages)-1)
 	pg := prof.Pages[idx]
 	return pg.Slots, pg.Dials, nil
 }
 
-func (e *Engine) visibleEventsLocked(evType plugin.EventType) []plugin.ActionEvent {
-	return e.collectVisibleEventsLocked(evType, "")
-}
-
-func (e *Engine) visibleEventsForPluginLocked(evType plugin.EventType, pluginUUID string) []plugin.ActionEvent {
-	return e.collectVisibleEventsLocked(evType, strings.TrimSpace(pluginUUID))
-}
-
-func (e *Engine) collectVisibleEventsLocked(evType plugin.EventType, filterPluginUUID string) []plugin.ActionEvent {
-	prof := e.activeProfileLocked()
-	slotsMap, dialsMap, _ := e.activeContainerLocked(prof)
+func (e *Engine) collectVisibleEventsForViewportLocked(vpID string, evType plugin.EventType, filterPluginUUID string) []plugin.ActionEvent {
+	prof, pageIdx, folderStack, _ := e.resolveViewportLocked(vpID)
+	slotsMap, dialsMap, _ := e.containerForLocked(prof, pageIdx, folderStack)
 	events := make([]plugin.ActionEvent, 0, prof.Grid.TotalSlots()+prof.Dials)
 
 	matchSlot := func(actionUUID string) bool {
@@ -552,6 +701,104 @@ func (e *Engine) collectVisibleEventsLocked(evType plugin.EventType, filterPlugi
 		})
 	}
 	return events
+}
+
+func (e *Engine) collectAllVisibleEventsLocked(evType plugin.EventType, filterPluginUUID string) map[string]plugin.ActionEvent {
+	out := make(map[string]plugin.ActionEvent)
+	addAll := func(events []plugin.ActionEvent) {
+		for _, ev := range events {
+			if _, exists := out[ev.Context]; !exists {
+				out[ev.Context] = ev
+			}
+		}
+	}
+	addAll(e.collectVisibleEventsForViewportLocked("", evType, filterPluginUUID))
+	if len(e.viewports) > 0 {
+		vpIDs := make([]string, 0, len(e.viewports))
+		for vpID := range e.viewports {
+			vpIDs = append(vpIDs, vpID)
+		}
+		slices.Sort(vpIDs)
+		for _, vpID := range vpIDs {
+			vp := e.viewports[vpID]
+			if vp == nil || vp.followHost {
+				continue
+			}
+			addAll(e.collectVisibleEventsForViewportLocked(vpID, evType, filterPluginUUID))
+		}
+	}
+	return out
+}
+
+func actionEventsMatch(a, b plugin.ActionEvent) bool {
+	if a.Context != b.Context || a.ActionUUID != b.ActionUUID || a.Controller != b.Controller {
+		return false
+	}
+	if a.Controller == deck.ControllerEncoder {
+		return a.DialIndex == b.DialIndex
+	}
+	return a.Coordinates == b.Coordinates
+}
+
+func sortActionEvents(evs []plugin.ActionEvent) {
+	slices.SortFunc(evs, func(a, b plugin.ActionEvent) int {
+		if c := cmp.Compare(a.Controller, b.Controller); c != 0 {
+			return c
+		}
+		if a.Controller == deck.ControllerEncoder {
+			if c := cmp.Compare(a.DialIndex, b.DialIndex); c != 0 {
+				return c
+			}
+		} else {
+			if c := cmp.Compare(a.Coordinates.Row, b.Coordinates.Row); c != 0 {
+				return c
+			}
+			if c := cmp.Compare(a.Coordinates.Col, b.Coordinates.Col); c != 0 {
+				return c
+			}
+		}
+		return cmp.Compare(a.Context, b.Context)
+	})
+}
+
+func (e *Engine) syncAppearedLocked() (disappear, appear []plugin.ActionEvent) {
+	desired := e.collectAllVisibleEventsLocked(plugin.EventWillAppear, "")
+
+	for ctxID, prev := range e.appeared {
+		next, ok := desired[ctxID]
+		if !ok || !actionEventsMatch(prev, next) {
+			ev := prev
+			ev.Type = plugin.EventWillDisappear
+			disappear = append(disappear, ev)
+		}
+	}
+	for ctxID, next := range desired {
+		prev, ok := e.appeared[ctxID]
+		if !ok || !actionEventsMatch(prev, next) {
+			ev := next
+			ev.Type = plugin.EventWillAppear
+			appear = append(appear, ev)
+		}
+	}
+
+	sortActionEvents(disappear)
+	sortActionEvents(appear)
+	e.appeared = desired
+	return disappear, appear
+}
+
+func (e *Engine) clearAppearedLocked() []plugin.ActionEvent {
+	if len(e.appeared) == 0 {
+		return nil
+	}
+	disappear := make([]plugin.ActionEvent, 0, len(e.appeared))
+	for _, ev := range e.appeared {
+		ev.Type = plugin.EventWillDisappear
+		disappear = append(disappear, ev)
+	}
+	sortActionEvents(disappear)
+	clear(e.appeared)
+	return disappear
 }
 
 func (e *Engine) clearPluginVisualsLocked(pluginUUID string) {
@@ -683,7 +930,6 @@ func (e *Engine) CreateProfile(name string, grid deck.GridSize, dials int) (*dec
 	e.opMu.Lock()
 	e.mu.Lock()
 	before := e.captureHistoryLocked("")
-	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 
 	prof := &deck.Profile{
 		ID:    deck.NewUUID(),
@@ -704,16 +950,19 @@ func (e *Engine) CreateProfile(name string, grid deck.GridSize, dials int) (*dec
 	e.cfg.ActiveProfileID = prof.ID
 	e.pageIdx = 0
 	e.folderStack = nil
-	appear := e.visibleEventsLocked(plugin.EventWillAppear)
 	cfgCopy := e.cfg.Clone()
 	profCopy := prof.Clone()
 	e.mu.Unlock()
 
 	err := e.finishMutation(before, cfgCopy, "Create profile")
-	e.opMu.Unlock()
 	if err != nil {
+		e.opMu.Unlock()
 		return nil, err
 	}
+	e.mu.Lock()
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
 
 	e.dispatchAll(context.Background(), disappear)
 	e.dispatchAll(context.Background(), appear)
@@ -745,18 +994,20 @@ func (e *Engine) UpdateProfileGrid(profileID string, grid deck.GridSize, dials i
 		return fmt.Errorf("profile %q not found", profileID)
 	}
 	before := e.captureHistoryLocked("")
-	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 	target.Grid = grid
 	target.Dials = dials
-	appear := e.visibleEventsLocked(plugin.EventWillAppear)
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
 	err := e.finishMutation(before, cfgCopy, "Resize grid")
-	e.opMu.Unlock()
 	if err != nil {
+		e.opMu.Unlock()
 		return err
 	}
+	e.mu.Lock()
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
 
 	e.dispatchAll(context.Background(), disappear)
 	e.dispatchAll(context.Background(), appear)
@@ -788,22 +1039,25 @@ func (e *Engine) DeleteProfile(profileID string) error {
 	}
 
 	before := e.captureHistoryLocked("")
-	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 	e.cfg.Profiles = slices.Delete(e.cfg.Profiles, idx, idx+1)
 	if e.cfg.ActiveProfileID == profileID {
 		e.cfg.ActiveProfileID = e.cfg.Profiles[0].ID
 		e.pageIdx = 0
 		e.folderStack = nil
 	}
-	appear := e.visibleEventsLocked(plugin.EventWillAppear)
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
 	err := e.finishMutation(before, cfgCopy, "Delete profile")
-	e.opMu.Unlock()
 	if err != nil {
+		e.opMu.Unlock()
 		return err
 	}
+	e.mu.Lock()
+	e.clampViewportsLocked()
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
 
 	e.dispatchAll(context.Background(), disappear)
 	e.dispatchAll(context.Background(), appear)
@@ -838,19 +1092,28 @@ func (e *Engine) SwitchProfile(profileRef string) error {
 		return nil
 	}
 
-	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
+	prevProfileID := e.cfg.ActiveProfileID
+	prevPageIdx := e.pageIdx
+	prevFolderStack := e.folderStack
 	e.cfg.ActiveProfileID = target.ID
 	e.pageIdx = 0
 	e.folderStack = nil
-	appear := e.visibleEventsLocked(plugin.EventWillAppear)
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
-	err := e.store.Save(cfgCopy)
-	e.opMu.Unlock()
-	if err != nil {
+	if err := e.store.Save(cfgCopy); err != nil {
+		e.mu.Lock()
+		e.cfg.ActiveProfileID = prevProfileID
+		e.pageIdx = prevPageIdx
+		e.folderStack = prevFolderStack
+		e.mu.Unlock()
+		e.opMu.Unlock()
 		return err
 	}
+	e.mu.Lock()
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
 
 	e.dispatchAll(context.Background(), disappear)
 	e.dispatchAll(context.Background(), appear)
@@ -864,7 +1127,6 @@ func (e *Engine) AddPage(name string) (int, error) {
 	e.mu.Lock()
 	prof := e.activeProfileLocked()
 	before := e.captureHistoryLocked("")
-	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 	pageName := strings.TrimSpace(name)
 	if pageName == "" {
 		pageName = fmt.Sprintf("Page %d", len(prof.Pages)+1)
@@ -877,16 +1139,19 @@ func (e *Engine) AddPage(name string) (int, error) {
 	})
 	e.pageIdx = len(prof.Pages) - 1
 	e.folderStack = nil
-	appear := e.visibleEventsLocked(plugin.EventWillAppear)
 	newIdx := e.pageIdx
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
 	err := e.finishMutation(before, cfgCopy, "Add page")
-	e.opMu.Unlock()
 	if err != nil {
+		e.opMu.Unlock()
 		return 0, err
 	}
+	e.mu.Lock()
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
 
 	e.dispatchAll(context.Background(), disappear)
 	e.dispatchAll(context.Background(), appear)
@@ -911,21 +1176,24 @@ func (e *Engine) DeletePage(pageIndex int) error {
 	}
 
 	before := e.captureHistoryLocked("")
-	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 	prof.Pages = slices.Delete(prof.Pages, pageIndex, pageIndex+1)
 	if e.pageIdx >= len(prof.Pages) {
 		e.pageIdx = len(prof.Pages) - 1
 	}
 	e.folderStack = nil
-	appear := e.visibleEventsLocked(plugin.EventWillAppear)
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
 	err := e.finishMutation(before, cfgCopy, "Delete page")
-	e.opMu.Unlock()
 	if err != nil {
+		e.opMu.Unlock()
 		return err
 	}
+	e.mu.Lock()
+	e.clampViewportsLocked()
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
 
 	e.dispatchAll(context.Background(), disappear)
 	e.dispatchAll(context.Background(), appear)
@@ -964,10 +1232,9 @@ func (e *Engine) stepPage(delta int, wrap bool) error {
 		e.opMu.Unlock()
 		return nil
 	}
-	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 	e.pageIdx = next
 	e.folderStack = nil
-	appear := e.visibleEventsLocked(plugin.EventWillAppear)
+	disappear, appear := e.syncAppearedLocked()
 	e.mu.Unlock()
 	e.opMu.Unlock()
 
@@ -993,10 +1260,9 @@ func (e *Engine) GoToPage(oneBasedPage int) error {
 		e.opMu.Unlock()
 		return nil
 	}
-	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 	e.pageIdx = target
 	e.folderStack = nil
-	appear := e.visibleEventsLocked(plugin.EventWillAppear)
+	disappear, appear := e.syncAppearedLocked()
 	e.mu.Unlock()
 	e.opMu.Unlock()
 
@@ -1020,8 +1286,8 @@ func (e *Engine) OpenFolder(folderID, folderName string) error {
 	e.opMu.Lock()
 	e.mu.Lock()
 	prof := e.activeProfileLocked()
-	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 	createdOrUpdated := false
+	var prevFolderName string
 	f, exists := prof.Folders[fid]
 	if !exists || f == nil {
 		f = &deck.Folder{
@@ -1033,25 +1299,36 @@ func (e *Engine) OpenFolder(folderID, folderName string) error {
 		prof.Folders[fid] = f
 		createdOrUpdated = true
 	} else if f.Name != name {
+		prevFolderName = f.Name
 		f.Name = name
 		createdOrUpdated = true
 	}
+	prevLen := len(e.folderStack)
 	e.folderStack = append(e.folderStack, fid)
-	appear := e.visibleEventsLocked(plugin.EventWillAppear)
 	var cfgCopy *deck.Config
 	if createdOrUpdated {
 		cfgCopy = e.cfg.Clone()
 	}
 	e.mu.Unlock()
 
-	var saveErr error
 	if cfgCopy != nil {
-		saveErr = e.store.Save(cfgCopy)
+		if err := e.store.Save(cfgCopy); err != nil {
+			e.mu.Lock()
+			e.folderStack = e.folderStack[:prevLen]
+			if !exists {
+				delete(prof.Folders, fid)
+			} else if f != nil && prevFolderName != "" {
+				f.Name = prevFolderName
+			}
+			e.mu.Unlock()
+			e.opMu.Unlock()
+			return err
+		}
 	}
+	e.mu.Lock()
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
 	e.opMu.Unlock()
-	if saveErr != nil {
-		return saveErr
-	}
 
 	e.dispatchAll(context.Background(), disappear)
 	e.dispatchAll(context.Background(), appear)
@@ -1068,9 +1345,8 @@ func (e *Engine) CloseFolder() error {
 		e.opMu.Unlock()
 		return nil
 	}
-	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
 	e.folderStack = e.folderStack[:len(e.folderStack)-1]
-	appear := e.visibleEventsLocked(plugin.EventWillAppear)
+	disappear, appear := e.syncAppearedLocked()
 	e.mu.Unlock()
 	e.opMu.Unlock()
 
@@ -1100,9 +1376,7 @@ func (e *Engine) AssignKeypadAction(c deck.Coordinates, actionUUID string) (*dec
 	}
 	slotsMap, _, _ := e.activeContainerLocked(prof)
 	before := e.captureHistoryLocked("")
-	var oldSlot *deck.SlotConfig
 	if existing := slotsMap[c.SlotKey()]; existing != nil {
-		oldSlot = existing.Clone()
 		delete(e.visuals, existing.Context)
 	}
 
@@ -1113,31 +1387,17 @@ func (e *Engine) AssignKeypadAction(c deck.Coordinates, actionUUID string) (*dec
 	e.mu.Unlock()
 
 	err := e.finishMutation(before, cfgCopy, "Assign "+desc.Name)
-	e.opMu.Unlock()
 	if err != nil {
+		e.opMu.Unlock()
 		return nil, err
 	}
+	e.mu.Lock()
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
 
-	if oldSlot != nil {
-		_ = e.registry.Dispatch(context.Background(), plugin.ActionEvent{
-			Type:        plugin.EventWillDisappear,
-			Context:     oldSlot.Context,
-			ActionUUID:  oldSlot.ActionUUID,
-			Controller:  deck.ControllerKeypad,
-			Coordinates: c,
-			Settings:    cloneSettings(oldSlot.Settings),
-			State:       oldSlot.State,
-		})
-	}
-	_ = e.registry.Dispatch(context.Background(), plugin.ActionEvent{
-		Type:        plugin.EventWillAppear,
-		Context:     slotCopy.Context,
-		ActionUUID:  slotCopy.ActionUUID,
-		Controller:  deck.ControllerKeypad,
-		Coordinates: c,
-		Settings:    cloneSettings(slotCopy.Settings),
-		State:       slotCopy.State,
-	})
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
 	e.notifySubscribers()
 	return slotCopy, nil
 }
@@ -1162,9 +1422,7 @@ func (e *Engine) AssignDialAction(dialIndex int, actionUUID string) (*deck.SlotC
 	}
 	_, dialsMap, _ := e.activeContainerLocked(prof)
 	before := e.captureHistoryLocked("")
-	var oldSlot *deck.SlotConfig
 	if existing := dialsMap[dialIndex]; existing != nil {
-		oldSlot = existing.Clone()
 		delete(e.visuals, existing.Context)
 	}
 
@@ -1175,31 +1433,17 @@ func (e *Engine) AssignDialAction(dialIndex int, actionUUID string) (*deck.SlotC
 	e.mu.Unlock()
 
 	err := e.finishMutation(before, cfgCopy, "Assign "+desc.Name)
-	e.opMu.Unlock()
 	if err != nil {
+		e.opMu.Unlock()
 		return nil, err
 	}
+	e.mu.Lock()
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
 
-	if oldSlot != nil {
-		_ = e.registry.Dispatch(context.Background(), plugin.ActionEvent{
-			Type:       plugin.EventWillDisappear,
-			Context:    oldSlot.Context,
-			ActionUUID: oldSlot.ActionUUID,
-			Controller: deck.ControllerEncoder,
-			DialIndex:  dialIndex,
-			Settings:   cloneSettings(oldSlot.Settings),
-			State:      oldSlot.State,
-		})
-	}
-	_ = e.registry.Dispatch(context.Background(), plugin.ActionEvent{
-		Type:       plugin.EventWillAppear,
-		Context:    slotCopy.Context,
-		ActionUUID: slotCopy.ActionUUID,
-		Controller: deck.ControllerEncoder,
-		DialIndex:  dialIndex,
-		Settings:   cloneSettings(slotCopy.Settings),
-		State:      slotCopy.State,
-	})
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
 	e.notifySubscribers()
 	return slotCopy, nil
 }
@@ -1449,27 +1693,23 @@ func (e *Engine) ClearKeypadSlot(c deck.Coordinates) error {
 		return nil
 	}
 	before := e.captureHistoryLocked("")
-	oldSlot := existing.Clone()
 	delete(slotsMap, c.SlotKey())
 	delete(e.visuals, existing.Context)
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
 	err := e.finishMutation(before, cfgCopy, "Clear slot")
-	e.opMu.Unlock()
 	if err != nil {
+		e.opMu.Unlock()
 		return err
 	}
+	e.mu.Lock()
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
 
-	_ = e.registry.Dispatch(context.Background(), plugin.ActionEvent{
-		Type:        plugin.EventWillDisappear,
-		Context:     oldSlot.Context,
-		ActionUUID:  oldSlot.ActionUUID,
-		Controller:  deck.ControllerKeypad,
-		Coordinates: c,
-		Settings:    cloneSettings(oldSlot.Settings),
-		State:       oldSlot.State,
-	})
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
 	e.notifySubscribers()
 	return nil
 }
@@ -1487,27 +1727,23 @@ func (e *Engine) ClearDialSlot(dialIndex int) error {
 		return nil
 	}
 	before := e.captureHistoryLocked("")
-	oldSlot := existing.Clone()
 	delete(dialsMap, dialIndex)
 	delete(e.visuals, existing.Context)
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
 	err := e.finishMutation(before, cfgCopy, "Clear dial")
-	e.opMu.Unlock()
 	if err != nil {
+		e.opMu.Unlock()
 		return err
 	}
+	e.mu.Lock()
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
 
-	_ = e.registry.Dispatch(context.Background(), plugin.ActionEvent{
-		Type:       plugin.EventWillDisappear,
-		Context:    oldSlot.Context,
-		ActionUUID: oldSlot.ActionUUID,
-		Controller: deck.ControllerEncoder,
-		DialIndex:  dialIndex,
-		Settings:   cloneSettings(oldSlot.Settings),
-		State:      oldSlot.State,
-	})
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
 	e.notifySubscribers()
 	return nil
 }
@@ -1640,44 +1876,6 @@ func slotLocationsEqual(a, b SlotLocation) bool {
 		return a.Dial == b.Dial
 	}
 	return a.Coords == b.Coords
-}
-
-func (e *Engine) isSlotLocationVisibleLocked(loc SlotLocation) bool {
-	active := e.activeProfileLocked()
-	if active == nil || loc.ProfileID != active.ID {
-		return false
-	}
-	if len(e.folderStack) > 0 {
-		var topFolderID string
-		for _, fid := range e.folderStack {
-			if active.Folders[fid] != nil {
-				topFolderID = fid
-			} else {
-				break
-			}
-		}
-		if topFolderID != "" {
-			return loc.FolderID == topFolderID
-		}
-	}
-	return loc.FolderID == "" && loc.PageIndex == min(max(e.pageIdx, 0), max(0, len(active.Pages)-1))
-}
-
-func makeSlotLifecycleEvent(evType plugin.EventType, slot *deck.SlotConfig, loc SlotLocation) plugin.ActionEvent {
-	ev := plugin.ActionEvent{
-		Type:       evType,
-		Context:    slot.Context,
-		ActionUUID: slot.ActionUUID,
-		Controller: loc.Controller,
-		Settings:   cloneSettings(slot.Settings),
-		State:      slot.State,
-	}
-	if loc.Controller == deck.ControllerEncoder {
-		ev.DialIndex = loc.Dial
-	} else {
-		ev.Coordinates = loc.Coords
-	}
-	return ev
 }
 
 func folderIDForOpenSlot(slot *deck.SlotConfig) string {
@@ -1822,16 +2020,6 @@ func (e *Engine) MoveSlot(src, dst SlotLocation) (bool, error) {
 	}
 
 	before := e.captureHistoryLocked("")
-	srcVis := e.isSlotLocationVisibleLocked(normSrc)
-	dstVis := e.isSlotLocationVisibleLocked(normDst)
-
-	var disappear, appear []plugin.ActionEvent
-	if srcVis {
-		disappear = append(disappear, makeSlotLifecycleEvent(plugin.EventWillDisappear, srcSlot, normSrc))
-	}
-	if dstVis && dstSlot != nil {
-		disappear = append(disappear, makeSlotLifecycleEvent(plugin.EventWillDisappear, dstSlot, normDst))
-	}
 
 	if srcProf.ID != dstProf.ID {
 		transferFolderSubtreeLocked(srcProf, dstProf, srcSlot, make(map[string]bool))
@@ -1857,20 +2045,6 @@ func (e *Engine) MoveSlot(src, dst SlotLocation) (bool, error) {
 		}
 	}
 
-	if !dstVis {
-		delete(e.visuals, srcSlot.Context)
-	}
-	if dstSlot != nil && !srcVis {
-		delete(e.visuals, dstSlot.Context)
-	}
-
-	if dstVis {
-		appear = append(appear, makeSlotLifecycleEvent(plugin.EventWillAppear, srcSlot, normDst))
-	}
-	if srcVis && dstSlot != nil {
-		appear = append(appear, makeSlotLifecycleEvent(plugin.EventWillAppear, dstSlot, normSrc))
-	}
-
 	label := "Move button"
 	if normSrc.Controller == deck.ControllerEncoder {
 		if swapped {
@@ -1886,10 +2060,23 @@ func (e *Engine) MoveSlot(src, dst SlotLocation) (bool, error) {
 	e.mu.Unlock()
 
 	err = e.finishMutation(before, cfgCopy, label)
-	e.opMu.Unlock()
 	if err != nil {
+		e.opMu.Unlock()
 		return false, err
 	}
+
+	e.mu.Lock()
+	disappear, appear := e.syncAppearedLocked()
+	if _, stillVis := e.appeared[srcSlot.Context]; !stillVis {
+		delete(e.visuals, srcSlot.Context)
+	}
+	if dstSlot != nil {
+		if _, stillVis := e.appeared[dstSlot.Context]; !stillVis {
+			delete(e.visuals, dstSlot.Context)
+		}
+	}
+	e.mu.Unlock()
+	e.opMu.Unlock()
 
 	e.dispatchAll(context.Background(), disappear)
 	e.dispatchAll(context.Background(), appear)
@@ -1976,10 +2163,6 @@ func (e *Engine) MoveSlotToNewPage(src SlotLocation) (int, deck.Coordinates, err
 	}
 
 	before := e.captureHistoryLocked("")
-	var disappear []plugin.ActionEvent
-	if e.isSlotLocationVisibleLocked(normSrc) {
-		disappear = append(disappear, makeSlotLifecycleEvent(plugin.EventWillDisappear, srcSlot, normSrc))
-	}
 
 	newPageIdx := len(srcProf.Pages)
 	newPage := &deck.Page{
@@ -1990,18 +2173,26 @@ func (e *Engine) MoveSlotToNewPage(src SlotLocation) (int, deck.Coordinates, err
 	}
 	srcProf.Pages = append(srcProf.Pages, newPage)
 	delete(srcSlots, normSrc.Coords.SlotKey())
-	delete(e.visuals, srcSlot.Context)
 
 	cfgCopy := e.cfg.Clone()
 	e.mu.Unlock()
 
 	err = e.finishMutation(before, cfgCopy, "Move button to new page")
-	e.opMu.Unlock()
 	if err != nil {
+		e.opMu.Unlock()
 		return 0, deck.Coordinates{}, err
 	}
 
+	e.mu.Lock()
+	disappear, appear := e.syncAppearedLocked()
+	if _, stillVis := e.appeared[srcSlot.Context]; !stillVis {
+		delete(e.visuals, srcSlot.Context)
+	}
+	e.mu.Unlock()
+	e.opMu.Unlock()
+
 	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
 	e.notifySubscribers()
 	return newPageIdx, deck.Coordinates{Row: 0, Col: 0}, nil
 }
@@ -2102,7 +2293,6 @@ func (e *Engine) PasteSlotConfig(cfg *deck.SlotConfig, srcProfileID string, dst 
 	}
 
 	before := e.captureHistoryLocked("")
-	dstVis := e.isSlotLocationVisibleLocked(normDst)
 	var oldDst *deck.SlotConfig
 	if normDst.Controller == deck.ControllerEncoder {
 		oldDst = dstDials[normDst.Dial]
@@ -2110,11 +2300,7 @@ func (e *Engine) PasteSlotConfig(cfg *deck.SlotConfig, srcProfileID string, dst 
 		oldDst = dstSlots[normDst.Coords.SlotKey()]
 	}
 
-	var disappear, appear []plugin.ActionEvent
 	if oldDst != nil {
-		if dstVis {
-			disappear = append(disappear, makeSlotLifecycleEvent(plugin.EventWillDisappear, oldDst, normDst))
-		}
 		delete(e.visuals, oldDst.Context)
 	}
 
@@ -2141,9 +2327,6 @@ func (e *Engine) PasteSlotConfig(cfg *deck.SlotConfig, srcProfileID string, dst 
 		dstSlots[normDst.Coords.SlotKey()] = newSlot
 	}
 	slotCopy := newSlot.Clone()
-	if dstVis {
-		appear = append(appear, makeSlotLifecycleEvent(plugin.EventWillAppear, slotCopy, normDst))
-	}
 
 	label := "Paste button"
 	if normDst.Controller == deck.ControllerEncoder {
@@ -2153,10 +2336,14 @@ func (e *Engine) PasteSlotConfig(cfg *deck.SlotConfig, srcProfileID string, dst 
 	e.mu.Unlock()
 
 	err = e.finishMutation(before, cfgCopy, label)
-	e.opMu.Unlock()
 	if err != nil {
+		e.opMu.Unlock()
 		return nil, err
 	}
+	e.mu.Lock()
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
 
 	e.dispatchAll(context.Background(), disappear)
 	e.dispatchAll(context.Background(), appear)
@@ -2216,10 +2403,11 @@ func (e *Engine) applyHistoryStep(isRedo bool) (string, error) {
 		e.redoStack = pushBoundedHistory(e.redoStack, currentSnapshot)
 	}
 
-	disappear := e.visibleEventsLocked(plugin.EventWillDisappear)
+	disappear := e.clearAppearedLocked()
 	e.restoreNormalizedStateLocked(nextCfg, target)
+	e.clampViewportsLocked()
 	e.historyRev++
-	appear := e.visibleEventsLocked(plugin.EventWillAppear)
+	_, appear := e.syncAppearedLocked()
 	e.mu.Unlock()
 	e.opMu.Unlock()
 
@@ -2229,15 +2417,475 @@ func (e *Engine) applyHistoryStep(isRedo bool) (string, error) {
 	return target.label, nil
 }
 
+// RegisterViewport registers an independent (or FollowHost) client viewport and returns its ID
+// along with an idempotent unregister cleanup function.
+func (e *Engine) RegisterViewport(initial Viewport) (string, func()) {
+	e.opMu.Lock()
+	e.mu.Lock()
+	e.vpSeq++
+	vpID := fmt.Sprintf("vp-%d", e.vpSeq)
+
+	vp := &viewportState{
+		followHost: initial.FollowHost,
+		subs:       make(map[uint64]func(Snapshot)),
+	}
+	if !vp.followHost {
+		prof := e.findProfileByIDLocked(initial.ProfileID)
+		if prof == nil {
+			prof = e.activeProfileLocked()
+			vp.profileID = prof.ID
+			vp.pageIdx = 0
+		} else {
+			vp.profileID = prof.ID
+			vp.pageIdx = min(max(initial.PageIndex, 0), max(0, len(prof.Pages)-1))
+			vp.folderStack = validFolderStackLocked(prof, initial.FolderStack)
+		}
+	}
+	e.viewports[vpID] = vp
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
+
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
+
+	var once sync.Once
+	unregister := func() {
+		once.Do(func() {
+			e.opMu.Lock()
+			e.mu.Lock()
+			delete(e.viewports, vpID)
+			dis, app := e.syncAppearedLocked()
+			e.mu.Unlock()
+			e.opMu.Unlock()
+
+			e.dispatchAll(context.Background(), dis)
+			e.dispatchAll(context.Background(), app)
+		})
+	}
+	return vpID, unregister
+}
+
+// ViewportState returns a resolved copy of viewportID's current location and FollowHost preference.
+func (e *Engine) ViewportState(viewportID string) (Viewport, bool) {
+	id := strings.TrimSpace(viewportID)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if id == "" {
+		prof := e.activeProfileLocked()
+		pIdx := min(max(e.pageIdx, 0), max(0, len(prof.Pages)-1))
+		return Viewport{
+			ProfileID:   prof.ID,
+			PageIndex:   pIdx,
+			FolderStack: slices.Clone(validFolderStackLocked(prof, e.folderStack)),
+		}, true
+	}
+	if _, ok := e.viewports[id]; !ok {
+		return Viewport{}, false
+	}
+	prof, pIdx, fStack, follow := e.resolveViewportLocked(id)
+	return Viewport{
+		ID:          id,
+		ProfileID:   prof.ID,
+		PageIndex:   pIdx,
+		FolderStack: slices.Clone(fStack),
+		FollowHost:  follow,
+	}, true
+}
+
+// SubscribeViewport registers fn to receive Snapshot updates scoped to viewportID.
+func (e *Engine) SubscribeViewport(viewportID string, fn func(Snapshot)) func() {
+	if fn == nil {
+		return func() {}
+	}
+	id := strings.TrimSpace(viewportID)
+	if id == "" {
+		return e.Subscribe(fn)
+	}
+
+	e.mu.Lock()
+	vp, ok := e.viewports[id]
+	if !ok || vp == nil {
+		e.mu.Unlock()
+		return func() {}
+	}
+	e.subSeq++
+	subID := e.subSeq
+	if vp.subs == nil {
+		vp.subs = make(map[uint64]func(Snapshot))
+	}
+	vp.subs[subID] = fn
+	e.mu.Unlock()
+
+	return func() {
+		e.mu.Lock()
+		if cur := e.viewports[id]; cur != nil {
+			delete(cur.subs, subID)
+		}
+		e.mu.Unlock()
+	}
+}
+
+// SetViewportFollowHost toggles whether viewportID mirrors Studio's active profile/page/folder.
+// Disabling FollowHost captures Studio's current position so the viewport remains stationary.
+func (e *Engine) SetViewportFollowHost(viewportID string, follow bool) error {
+	id := strings.TrimSpace(viewportID)
+	if id == "" {
+		return errors.New("viewport ID cannot be empty")
+	}
+
+	e.opMu.Lock()
+	e.mu.Lock()
+	vp, ok := e.viewports[id]
+	if !ok || vp == nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return fmt.Errorf("viewport %q not found", id)
+	}
+	if vp.followHost == follow {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return nil
+	}
+	if !follow && vp.followHost {
+		prof := e.activeProfileLocked()
+		vp.profileID = prof.ID
+		vp.pageIdx = min(max(e.pageIdx, 0), max(0, len(prof.Pages)-1))
+		vp.folderStack = slices.Clone(validFolderStackLocked(prof, e.folderStack))
+	}
+	vp.followHost = follow
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
+
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
+	e.notifyViewport(id)
+	return nil
+}
+
+// ViewportSwitchProfile switches viewportID to the profile matching ID or case-insensitive Name,
+// making that viewport independent from Studio without modifying Studio's active profile.
+func (e *Engine) ViewportSwitchProfile(viewportID, profileRef string) error {
+	id := strings.TrimSpace(viewportID)
+	if id == "" {
+		return e.SwitchProfile(profileRef)
+	}
+	ref := strings.TrimSpace(profileRef)
+	if ref == "" {
+		return errors.New("profile reference cannot be empty")
+	}
+
+	e.opMu.Lock()
+	e.mu.Lock()
+	vp, ok := e.viewports[id]
+	if !ok || vp == nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return fmt.Errorf("viewport %q not found", id)
+	}
+	var target *deck.Profile
+	for _, p := range e.cfg.Profiles {
+		if p.ID == ref || strings.EqualFold(p.Name, ref) {
+			target = p
+			break
+		}
+	}
+	if target == nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return fmt.Errorf("profile %q not found", ref)
+	}
+	if !vp.followHost && vp.profileID == target.ID && vp.pageIdx == 0 && len(vp.folderStack) == 0 {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return nil
+	}
+	vp.followHost = false
+	vp.profileID = target.ID
+	vp.pageIdx = 0
+	vp.folderStack = nil
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
+
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
+	e.notifyViewport(id)
+	return nil
+}
+
+// ViewportNextPage advances to the next page in viewportID (exiting any open folder).
+func (e *Engine) ViewportNextPage(viewportID string, wrap bool) error {
+	return e.viewportStepPage(viewportID, 1, wrap)
+}
+
+// ViewportPrevPage moves to the previous page in viewportID (exiting any open folder).
+func (e *Engine) ViewportPrevPage(viewportID string, wrap bool) error {
+	return e.viewportStepPage(viewportID, -1, wrap)
+}
+
+func (e *Engine) viewportStepPage(viewportID string, delta int, wrap bool) error {
+	id := strings.TrimSpace(viewportID)
+	if id == "" {
+		return e.stepPage(delta, wrap)
+	}
+
+	e.opMu.Lock()
+	e.mu.Lock()
+	vp, ok := e.viewports[id]
+	if !ok || vp == nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return fmt.Errorf("viewport %q not found", id)
+	}
+	if vp.followHost {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return e.stepPage(delta, wrap)
+	}
+	prof := e.findProfileByIDLocked(vp.profileID)
+	if prof == nil {
+		prof = e.activeProfileLocked()
+		vp.profileID = prof.ID
+		vp.pageIdx = 0
+		vp.folderStack = nil
+	}
+	count := len(prof.Pages)
+	if count == 0 {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return nil
+	}
+	cur := min(max(vp.pageIdx, 0), count-1)
+	next := cur + delta
+	if wrap {
+		next = ((next % count) + count) % count
+	} else {
+		next = min(max(next, 0), count-1)
+	}
+	if next == cur && len(vp.folderStack) == 0 {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return nil
+	}
+	vp.pageIdx = next
+	vp.folderStack = nil
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
+
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
+	e.notifyViewport(id)
+	return nil
+}
+
+// ViewportGoToPage navigates viewportID to a 1-based page number.
+func (e *Engine) ViewportGoToPage(viewportID string, oneBasedPage int) error {
+	id := strings.TrimSpace(viewportID)
+	if id == "" {
+		return e.GoToPage(oneBasedPage)
+	}
+
+	e.opMu.Lock()
+	e.mu.Lock()
+	vp, ok := e.viewports[id]
+	if !ok || vp == nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return fmt.Errorf("viewport %q not found", id)
+	}
+	if vp.followHost {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return e.GoToPage(oneBasedPage)
+	}
+	prof := e.findProfileByIDLocked(vp.profileID)
+	if prof == nil {
+		prof = e.activeProfileLocked()
+		vp.profileID = prof.ID
+		vp.pageIdx = 0
+		vp.folderStack = nil
+	}
+	if oneBasedPage < 1 || oneBasedPage > len(prof.Pages) {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return fmt.Errorf("page %d out of range [1, %d]", oneBasedPage, len(prof.Pages))
+	}
+	target := oneBasedPage - 1
+	if target == vp.pageIdx && len(vp.folderStack) == 0 {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return nil
+	}
+	vp.pageIdx = target
+	vp.folderStack = nil
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
+
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
+	e.notifyViewport(id)
+	return nil
+}
+
+// ViewportOpenFolder pushes folderID onto viewportID's folder stack, creating the folder container if needed.
+func (e *Engine) ViewportOpenFolder(viewportID, folderID, folderName string) error {
+	id := strings.TrimSpace(viewportID)
+	if id == "" {
+		return e.OpenFolder(folderID, folderName)
+	}
+	fid := strings.TrimSpace(folderID)
+	if fid == "" {
+		return errors.New("folder ID cannot be empty")
+	}
+	name := strings.TrimSpace(folderName)
+	if name == "" {
+		name = "Folder"
+	}
+
+	e.opMu.Lock()
+	e.mu.Lock()
+	vp, ok := e.viewports[id]
+	if !ok || vp == nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return fmt.Errorf("viewport %q not found", id)
+	}
+	if vp.followHost {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return e.OpenFolder(fid, name)
+	}
+	prof := e.findProfileByIDLocked(vp.profileID)
+	if prof == nil {
+		prof = e.activeProfileLocked()
+		vp.profileID = prof.ID
+		vp.pageIdx = 0
+		vp.folderStack = nil
+	}
+	createdOrUpdated := false
+	var prevFolderName string
+	f, exists := prof.Folders[fid]
+	if !exists || f == nil {
+		f = &deck.Folder{
+			ID:    fid,
+			Name:  name,
+			Slots: make(map[string]*deck.SlotConfig),
+			Dials: make(map[int]*deck.SlotConfig),
+		}
+		prof.Folders[fid] = f
+		createdOrUpdated = true
+	} else if f.Name != name {
+		prevFolderName = f.Name
+		f.Name = name
+		createdOrUpdated = true
+	}
+	vp.folderStack = validFolderStackLocked(prof, vp.folderStack)
+	prevLen := len(vp.folderStack)
+	vp.folderStack = append(vp.folderStack, fid)
+	var cfgCopy *deck.Config
+	if createdOrUpdated {
+		cfgCopy = e.cfg.Clone()
+	}
+	e.mu.Unlock()
+
+	if cfgCopy != nil {
+		if err := e.store.Save(cfgCopy); err != nil {
+			e.mu.Lock()
+			if cur := e.viewports[id]; cur != nil && len(cur.folderStack) > prevLen {
+				cur.folderStack = cur.folderStack[:prevLen]
+			}
+			if !exists {
+				delete(prof.Folders, fid)
+			} else if f != nil && prevFolderName != "" {
+				f.Name = prevFolderName
+			}
+			e.mu.Unlock()
+			e.opMu.Unlock()
+			return err
+		}
+	}
+	e.mu.Lock()
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
+
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
+	if createdOrUpdated {
+		e.notifySubscribers()
+	} else {
+		e.notifyViewport(id)
+	}
+	return nil
+}
+
+// ViewportCloseFolder pops the top folder from viewportID's folder stack.
+func (e *Engine) ViewportCloseFolder(viewportID string) error {
+	id := strings.TrimSpace(viewportID)
+	if id == "" {
+		return e.CloseFolder()
+	}
+
+	e.opMu.Lock()
+	e.mu.Lock()
+	vp, ok := e.viewports[id]
+	if !ok || vp == nil {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return fmt.Errorf("viewport %q not found", id)
+	}
+	if vp.followHost {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return e.CloseFolder()
+	}
+	prof := e.findProfileByIDLocked(vp.profileID)
+	if prof != nil {
+		vp.folderStack = validFolderStackLocked(prof, vp.folderStack)
+	} else {
+		vp.folderStack = nil
+	}
+	if len(vp.folderStack) == 0 {
+		e.mu.Unlock()
+		e.opMu.Unlock()
+		return nil
+	}
+	vp.folderStack = vp.folderStack[:len(vp.folderStack)-1]
+	disappear, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
+	e.opMu.Unlock()
+
+	e.dispatchAll(context.Background(), disappear)
+	e.dispatchAll(context.Background(), appear)
+	e.notifyViewport(id)
+	return nil
+}
+
 // PressKey triggers KeyDown for the slot at c, or navigates back when pressing AutoBack inside a folder.
 func (e *Engine) PressKey(ctx context.Context, c deck.Coordinates) error {
+	return e.ViewportPressKey(ctx, "", c)
+}
+
+// ViewportPressKey triggers KeyDown for slot c inside viewportID, or exits an open folder via AutoBack.
+func (e *Engine) ViewportPressKey(ctx context.Context, viewportID string, c deck.Coordinates) error {
+	id := strings.TrimSpace(viewportID)
 	e.mu.RLock()
-	prof := e.activeProfileLocked()
+	if id != "" {
+		if _, ok := e.viewports[id]; !ok {
+			e.mu.RUnlock()
+			return fmt.Errorf("viewport %q not found", id)
+		}
+	}
+	prof, pageIdx, folderStack, _ := e.resolveViewportLocked(id)
 	if !prof.Grid.Contains(c) {
 		e.mu.RUnlock()
 		return fmt.Errorf("slot %s out of bounds", c.SlotKey())
 	}
-	slotsMap, _, folderNames := e.activeContainerLocked(prof)
+	slotsMap, _, folderNames := e.containerForLocked(prof, pageIdx, folderStack)
 	slot := slotsMap[c.SlotKey()]
 	inFolder := len(folderNames) > 0
 	var ev plugin.ActionEvent
@@ -2256,23 +2904,35 @@ func (e *Engine) PressKey(ctx context.Context, c deck.Coordinates) error {
 
 	if slot == nil {
 		if inFolder && c.Row == 0 && c.Col == 0 {
-			return e.CloseFolder()
+			return e.ViewportCloseFolder(id)
 		}
 		return nil
 	}
 
-	return e.registry.Dispatch(ctx, ev)
+	return e.registry.Dispatch(plugin.WithViewport(ctx, id), ev)
 }
 
 // ReleaseKey dispatches EventKeyUp for the action at c, if any.
 func (e *Engine) ReleaseKey(ctx context.Context, c deck.Coordinates) error {
+	return e.ViewportReleaseKey(ctx, "", c)
+}
+
+// ViewportReleaseKey dispatches EventKeyUp for the action at c inside viewportID, if any.
+func (e *Engine) ViewportReleaseKey(ctx context.Context, viewportID string, c deck.Coordinates) error {
+	id := strings.TrimSpace(viewportID)
 	e.mu.RLock()
-	prof := e.activeProfileLocked()
+	if id != "" {
+		if _, ok := e.viewports[id]; !ok {
+			e.mu.RUnlock()
+			return fmt.Errorf("viewport %q not found", id)
+		}
+	}
+	prof, pageIdx, folderStack, _ := e.resolveViewportLocked(id)
 	if !prof.Grid.Contains(c) {
 		e.mu.RUnlock()
 		return fmt.Errorf("slot %s out of bounds", c.SlotKey())
 	}
-	slotsMap, _, _ := e.activeContainerLocked(prof)
+	slotsMap, _, _ := e.containerForLocked(prof, pageIdx, folderStack)
 	slot := slotsMap[c.SlotKey()]
 	if slot == nil {
 		e.mu.RUnlock()
@@ -2289,21 +2949,33 @@ func (e *Engine) ReleaseKey(ctx context.Context, c deck.Coordinates) error {
 	}
 	e.mu.RUnlock()
 
-	return e.registry.Dispatch(ctx, ev)
+	return e.registry.Dispatch(plugin.WithViewport(ctx, id), ev)
 }
 
 // RotateDial dispatches EventDialRotate with ticks delta to the action bound to dialIndex.
 func (e *Engine) RotateDial(ctx context.Context, dialIndex, ticks int) error {
+	return e.ViewportRotateDial(ctx, "", dialIndex, ticks)
+}
+
+// ViewportRotateDial dispatches EventDialRotate with ticks delta to dialIndex inside viewportID.
+func (e *Engine) ViewportRotateDial(ctx context.Context, viewportID string, dialIndex, ticks int) error {
 	if ticks == 0 {
 		return nil
 	}
+	id := strings.TrimSpace(viewportID)
 	e.mu.RLock()
-	prof := e.activeProfileLocked()
+	if id != "" {
+		if _, ok := e.viewports[id]; !ok {
+			e.mu.RUnlock()
+			return fmt.Errorf("viewport %q not found", id)
+		}
+	}
+	prof, pageIdx, folderStack, _ := e.resolveViewportLocked(id)
 	if dialIndex < 0 || dialIndex >= prof.Dials {
 		e.mu.RUnlock()
 		return fmt.Errorf("dial index %d out of range", dialIndex)
 	}
-	_, dialsMap, _ := e.activeContainerLocked(prof)
+	_, dialsMap, _ := e.containerForLocked(prof, pageIdx, folderStack)
 	slot := dialsMap[dialIndex]
 	if slot == nil {
 		e.mu.RUnlock()
@@ -2321,18 +2993,30 @@ func (e *Engine) RotateDial(ctx context.Context, dialIndex, ticks int) error {
 	}
 	e.mu.RUnlock()
 
-	return e.registry.Dispatch(ctx, ev)
+	return e.registry.Dispatch(plugin.WithViewport(ctx, id), ev)
 }
 
 // PressDial dispatches EventDialPress to the action bound to dialIndex.
 func (e *Engine) PressDial(ctx context.Context, dialIndex int) error {
+	return e.ViewportPressDial(ctx, "", dialIndex)
+}
+
+// ViewportPressDial dispatches EventDialPress to dialIndex inside viewportID.
+func (e *Engine) ViewportPressDial(ctx context.Context, viewportID string, dialIndex int) error {
+	id := strings.TrimSpace(viewportID)
 	e.mu.RLock()
-	prof := e.activeProfileLocked()
+	if id != "" {
+		if _, ok := e.viewports[id]; !ok {
+			e.mu.RUnlock()
+			return fmt.Errorf("viewport %q not found", id)
+		}
+	}
+	prof, pageIdx, folderStack, _ := e.resolveViewportLocked(id)
 	if dialIndex < 0 || dialIndex >= prof.Dials {
 		e.mu.RUnlock()
 		return fmt.Errorf("dial index %d out of range", dialIndex)
 	}
-	_, dialsMap, _ := e.activeContainerLocked(prof)
+	_, dialsMap, _ := e.containerForLocked(prof, pageIdx, folderStack)
 	slot := dialsMap[dialIndex]
 	if slot == nil {
 		e.mu.RUnlock()
@@ -2349,7 +3033,7 @@ func (e *Engine) PressDial(ctx context.Context, dialIndex int) error {
 	}
 	e.mu.RUnlock()
 
-	return e.registry.Dispatch(ctx, ev)
+	return e.registry.Dispatch(plugin.WithViewport(ctx, id), ev)
 }
 
 // TriggerAction executes an arbitrary action with settings (used by Multi-Action steps and Inspector tests).
@@ -2373,9 +3057,15 @@ func (e *Engine) DynamicOptions(ctx context.Context, optionsKey string, currentS
 
 // ReloadVisibleActions re-dispatches EventWillAppear for all visible slots and dials and notifies UI surfaces.
 func (e *Engine) ReloadVisibleActions() {
-	e.mu.RLock()
-	appear := e.visibleEventsLocked(plugin.EventWillAppear)
-	e.mu.RUnlock()
+	e.mu.Lock()
+	desired := e.collectAllVisibleEventsLocked(plugin.EventWillAppear, "")
+	e.appeared = desired
+	appear := make([]plugin.ActionEvent, 0, len(desired))
+	for _, ev := range desired {
+		appear = append(appear, ev)
+	}
+	sortActionEvents(appear)
+	e.mu.Unlock()
 
 	e.dispatchAll(context.Background(), appear)
 	e.notifySubscribers()
@@ -2424,7 +3114,11 @@ func (e *Engine) SetPluginEnabled(pluginUUID string, enabled bool) error {
 		e.mu.RLock()
 		curEnabled := e.cfg == nil || !slices.Contains(e.cfg.DisabledPlugins, pid)
 		if curEnabled {
-			disappear = e.visibleEventsForPluginLocked(plugin.EventWillDisappear, pid)
+			disMap := e.collectAllVisibleEventsLocked(plugin.EventWillDisappear, pid)
+			for _, ev := range disMap {
+				disappear = append(disappear, ev)
+			}
+			sortActionEvents(disappear)
 		}
 		e.mu.RUnlock()
 		if len(disappear) > 0 {
@@ -2469,16 +3163,13 @@ func (e *Engine) SetPluginEnabled(pluginUUID string, enabled bool) error {
 	}
 
 	_ = e.registry.SetPluginEnabled(pid, enabled)
-	var appear []plugin.ActionEvent
-	if enabled {
-		e.mu.RLock()
-		appear = e.visibleEventsForPluginLocked(plugin.EventWillAppear, pid)
-		e.mu.RUnlock()
-	}
+	e.mu.Lock()
+	_, appear := e.syncAppearedLocked()
+	e.mu.Unlock()
 	e.opMu.Unlock()
 
 	_ = e.registry.NotifyPluginEnabled(context.Background(), pid, enabled)
-	if len(appear) > 0 {
+	if enabled && len(appear) > 0 {
 		e.dispatchAll(context.Background(), appear)
 	}
 	e.notifySubscribers()
@@ -2905,4 +3596,44 @@ func (h *engineHost) Log(pluginUUID, message string) {
 
 func (h *engineHost) Deck() plugin.DeckControl {
 	return h.eng
+}
+
+func (h *engineHost) ScopedDeck(ctx context.Context) plugin.DeckControl {
+	if vpID := plugin.ViewportFromContext(ctx); vpID != "" {
+		return &viewportDeckControl{eng: h.eng, viewportID: vpID}
+	}
+	return h.eng
+}
+
+type viewportDeckControl struct {
+	eng        *Engine
+	viewportID string
+}
+
+func (v *viewportDeckControl) SwitchProfile(profileRef string) error {
+	return v.eng.ViewportSwitchProfile(v.viewportID, profileRef)
+}
+
+func (v *viewportDeckControl) NextPage(wrap bool) error {
+	return v.eng.ViewportNextPage(v.viewportID, wrap)
+}
+
+func (v *viewportDeckControl) PrevPage(wrap bool) error {
+	return v.eng.ViewportPrevPage(v.viewportID, wrap)
+}
+
+func (v *viewportDeckControl) GoToPage(oneBasedPage int) error {
+	return v.eng.ViewportGoToPage(v.viewportID, oneBasedPage)
+}
+
+func (v *viewportDeckControl) OpenFolder(folderID, folderName string) error {
+	return v.eng.ViewportOpenFolder(v.viewportID, folderID, folderName)
+}
+
+func (v *viewportDeckControl) CloseFolder() error {
+	return v.eng.ViewportCloseFolder(v.viewportID)
+}
+
+func (v *viewportDeckControl) TriggerAction(ctx context.Context, actionUUID string, settings map[string]any) error {
+	return v.eng.TriggerAction(plugin.WithViewport(ctx, v.viewportID), actionUUID, settings)
 }

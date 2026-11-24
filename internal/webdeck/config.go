@@ -44,6 +44,8 @@ type PairedDevice struct {
 	Fingerprint string `json:"fingerprint"`
 	PairedAt    string `json:"pairedAt"`
 	LastSeen    string `json:"lastSeen,omitempty"`
+	ProfileID   string `json:"profileId,omitempty"`
+	FollowHost  bool   `json:"followHost,omitempty"`
 }
 
 // Config holds persisted LAN touch deck server settings, host identity, and paired device public keys.
@@ -95,6 +97,7 @@ func (c Config) normalized() Config {
 			dev.PublicKey = strings.TrimSpace(dev.PublicKey)
 			dev.PairedAt = strings.TrimSpace(dev.PairedAt)
 			dev.LastSeen = strings.TrimSpace(dev.LastSeen)
+			dev.ProfileID = strings.TrimSpace(dev.ProfileID)
 			if dev.ID == "" || dev.PublicKey == "" {
 				continue
 			}

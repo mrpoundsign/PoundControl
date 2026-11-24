@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"strings"
 
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 )
@@ -56,6 +57,49 @@ type DeckControl interface {
 	OpenFolder(folderID, folderName string) error
 	CloseFolder() error
 	TriggerAction(ctx context.Context, actionUUID string, settings map[string]any) error
+}
+
+// ScopedDeckHost is optionally implemented by HostAPI providers that support
+// per-viewport navigation scoping via the incoming action context.
+type ScopedDeckHost interface {
+	ScopedDeck(ctx context.Context) DeckControl
+}
+
+type viewportCtxKey struct{}
+
+// WithViewport returns a context tagged with viewportID when non-empty.
+func WithViewport(ctx context.Context, viewportID string) context.Context {
+	trimmed := strings.TrimSpace(viewportID)
+	if trimmed == "" {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, viewportCtxKey{}, trimmed)
+}
+
+// ViewportFromContext extracts the originating viewport ID from ctx, if present.
+func ViewportFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	vpID, _ := ctx.Value(viewportCtxKey{}).(string)
+	return vpID
+}
+
+// DeckForContext resolves the viewport-scoped DeckControl for ctx if supported by host,
+// falling back to host.Deck() otherwise.
+func DeckForContext(host HostAPI, ctx context.Context) DeckControl {
+	if host == nil {
+		return nil
+	}
+	if scoped, ok := host.(ScopedDeckHost); ok {
+		if ctrl := scoped.ScopedDeck(ctx); ctrl != nil {
+			return ctrl
+		}
+	}
+	return host.Deck()
 }
 
 // HostAPI is injected into every Provider so plugins can update tiles, persist settings, log, and control navigation.
