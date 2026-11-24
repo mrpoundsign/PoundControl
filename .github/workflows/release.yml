@@ -7,11 +7,42 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  meta:
+    name: Determine Release Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      is_tag: ${{ steps.meta.outputs.is_tag }}
+    steps:
+      - name: Compute Release Metadata
+        id: meta
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG_NAME="${{ github.ref_name }}"
+            RAW_VER="${TAG_NAME#v}"
+            IS_TAG="true"
+          else
+            RAW_VER="0.1.0-snapshot"
+            TAG_NAME="v${RAW_VER}"
+            IS_TAG="false"
+          fi
+          IS_PRERELEASE="false"
+          if [[ "${RAW_VER}" == *-* ]]; then
+            IS_PRERELEASE="true"
+          fi
+          echo "version=${RAW_VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "is_tag=${IS_TAG}" >> "$GITHUB_OUTPUT"
+
   test:
     name: Run Test Suite & Validation
+    needs: meta
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -31,9 +62,6 @@ jobs:
             libxinerama-dev libxi-dev libxxf86vm-dev libwayland-dev \
             libxkbcommon-dev libasound2-dev fonts-dejavu-core
 
-      - name: Run Full Test Suite
-        run: go test -count=1 -v ./...
-
       - name: Check Go Modernization
         run: |
           diff=$(go fix -diff ./...)
@@ -42,6 +70,9 @@ jobs:
             echo "$diff"
             exit 1
           fi
+
+      - name: Run go vet
+        run: go vet ./...
 
       - name: Run golangci-lint (v2)
         uses: golangci/golangci-lint-action@v9
@@ -55,8 +86,12 @@ jobs:
           version: '~> v2'
           args: check
 
+      - name: Run Full Test Suite
+        run: go test -count=1 -v ./...
+
   build-gui-linux-windows:
     name: Build Desktop GUI & Installer (Linux & Windows)
+    needs: meta
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -78,12 +113,9 @@ jobs:
 
       - name: Compile Linux and Windows Studio & Installer
         run: |
-          mkdir -p gui-dist
-          TAG="${{ github.ref_name }}"
-          if [ -z "$TAG" ] || [[ ! "$TAG" =~ ^v ]]; then
-            TAG="snapshot"
-          fi
-          VER="${TAG#v}"
+          mkdir -p release-assets
+          TAG="${{ needs.meta.outputs.tag }}"
+          VER="${{ needs.meta.outputs.version }}"
           chmod +x ./build.sh
 
           echo "Building Linux amd64 Studio archive..."
@@ -95,24 +127,25 @@ jobs:
           [ -f LICENSE ] && cp -f LICENSE "$STAGE/LICENSE"
           [ -f README.md ] && cp -f README.md "$STAGE/README.md"
           [ -f assets/icon.png ] && cp -f assets/icon.png "$STAGE/icon.png"
-          tar -czf "gui-dist/PoundControl_${TAG}_linux_amd64.tar.gz" -C "$STAGE" .
+          tar -czf "release-assets/PoundControl_${TAG}_linux_amd64.tar.gz" -C "$STAGE" .
 
           echo "Cross-compiling Windows amd64 Studio portable binary..."
           VERSION="$VER" ./build.sh gui-win
-          cp -f build/bin/poundcontrol.exe "gui-dist/PoundControl_${TAG}_windows_amd64.exe"
+          cp -f build/bin/poundcontrol.exe "release-assets/PoundControl_${TAG}_windows_amd64.exe"
 
           echo "Building Windows amd64 Guided Setup Installer..."
           VERSION="$VER" ./build.sh installer
-          cp -f build/bin/PoundControl-Setup.exe "gui-dist/PoundControl_${TAG}_windows_amd64_setup.exe"
+          cp -f build/bin/PoundControl-Setup.exe "release-assets/PoundControl_${TAG}_windows_amd64_setup.exe"
 
       - name: Upload Linux & Windows Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gui-dist-linux-windows
-          path: gui-dist/
+          name: dist-linux-windows
+          path: release-assets/
 
   build-gui-macos:
     name: Build Desktop GUI (macOS)
+    needs: meta
     runs-on: macos-latest
     steps:
       - name: Checkout Code
@@ -130,14 +163,11 @@ jobs:
       - name: Build macOS GUI
         run: |
           export PATH="$(go env GOPATH)/bin:$PATH"
-          mkdir -p gui-dist
-          TAG="${{ github.ref_name }}"
-          if [ -z "$TAG" ] || [[ ! "$TAG" =~ ^v ]]; then
-            TAG="snapshot"
-          fi
-          VER="${TAG#v}"
-          APP_VER="$VER"
-          if [ "$VER" = "snapshot" ]; then
+          mkdir -p release-assets
+          TAG="${{ needs.meta.outputs.tag }}"
+          VER="${{ needs.meta.outputs.version }}"
+          APP_VER="${VER%%-*}"
+          if [ -z "$APP_VER" ]; then
             APP_VER="0.1.0"
           fi
 
@@ -145,16 +175,17 @@ jobs:
           MAIN_BIN=$(find PoundControl.app/Contents/MacOS -maxdepth 1 -type f | head -n 1)
           test -n "$MAIN_BIN" || (echo "macOS bundle executable not found" && exit 1)
           CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X github.com/mrpoundsign/PoundControl/internal/version.Version=$VER" -o "$MAIN_BIN" ./cmd/poundcontrol
-          zip -r "gui-dist/PoundControl_${TAG}_darwin_all.zip" PoundControl.app
+          zip -r "release-assets/PoundControl_${TAG}_darwin_all.zip" PoundControl.app
 
       - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gui-dist-macos
-          path: gui-dist/
+          name: dist-macos
+          path: release-assets/
 
   build-android:
-    name: Build Android Companion APK
+    name: Build Android & Wear OS Companion APKs
+    needs: meta
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -172,60 +203,60 @@ jobs:
           yes | "$SDK_MGR" --licenses >/dev/null || true
           "$SDK_MGR" "platforms;android-37" "build-tools;36.0.0"
 
-      - name: Test & Assemble Android APK
+      - name: Test & Assemble Android & Wear OS APKs
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          mkdir -p gui-dist
-          TAG="${{ github.ref_name }}"
-          if [ -z "$TAG" ] || [[ ! "$TAG" =~ ^v ]]; then
-            TAG="snapshot"
-            VER_NAME="0.1.0-snapshot"
+          mkdir -p release-assets
+          TAG="${{ needs.meta.outputs.tag }}"
+          VER_NAME="${{ needs.meta.outputs.version }}"
+          BASE_VER="${VER_NAME%%-*}"
+          IFS='.' read -r MAJ MIN PAT <<< "$BASE_VER"
+          MAJ="${MAJ//[^0-9]/}"
+          MIN="${MIN//[^0-9]/}"
+          PAT="${PAT//[^0-9]/}"
+          VER_CODE=$(( ${MAJ:-0} * 10000 + ${MIN:-0} * 100 + ${PAT:-0} ))
+          if [ "$VER_CODE" -lt 1 ]; then
             VER_CODE=1
-          else
-            VER_NAME="${TAG#v}"
-            BASE_VER="${VER_NAME%%-*}"
-            IFS='.' read -r MAJ MIN PAT <<< "$BASE_VER"
-            MAJ="${MAJ//[^0-9]/}"
-            MIN="${MIN//[^0-9]/}"
-            PAT="${PAT//[^0-9]/}"
-            VER_CODE=$(( ${MAJ:-0} * 10000 + ${MIN:-0} * 100 + ${PAT:-0} ))
-            if [ "$VER_CODE" -lt 1 ]; then
-              VER_CODE=1
-            fi
           fi
 
           cd mobile/android
           chmod +x ./gradlew
 
           if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ] && [ -n "${ANDROID_KEYSTORE_PASSWORD:-}" ] && [ -n "${ANDROID_KEY_ALIAS:-}" ] && [ -n "${ANDROID_KEY_PASSWORD:-}" ]; then
-            echo "Building release-signed APK..."
+            echo "Building release-signed Android & Wear OS APKs..."
             KS_FILE="$(mktemp)"
             trap 'rm -f "$KS_FILE"' EXIT
             printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KS_FILE"
-            ANDROID_KEYSTORE_PATH="$KS_FILE" ./gradlew testDebugUnitTest assembleRelease \
+            ANDROID_KEYSTORE_PATH="$KS_FILE" ./gradlew :protocol:testDebugUnitTest :app:testDebugUnitTest :wear:testDebugUnitTest :app:assembleRelease :wear:assembleRelease \
               -PappVersionName="$VER_NAME" -PappVersionCode="$VER_CODE" --no-daemon
-            cp -f app/build/outputs/apk/release/app-release.apk "../../gui-dist/PoundControl_${TAG}_android.apk"
+            cp -f app/build/outputs/apk/release/app-release.apk "../../release-assets/PoundControl_${TAG}_android.apk"
+            cp -f wear/build/outputs/apk/release/wear-release.apk "../../release-assets/PoundControl_${TAG}_wear.apk"
           else
-            echo "No release keystore secrets configured; building installable debug-signed APK..."
-            ./gradlew testDebugUnitTest assembleDebug \
+            echo "No release keystore secrets configured; building installable debug-signed Android & Wear OS APKs..."
+            ./gradlew :protocol:testDebugUnitTest :app:testDebugUnitTest :wear:testDebugUnitTest :app:assembleDebug :wear:assembleDebug \
               -PappVersionName="$VER_NAME" -PappVersionCode="$VER_CODE" --no-daemon
-            cp -f app/build/outputs/apk/debug/app-debug.apk "../../gui-dist/PoundControl_${TAG}_android.apk"
+            cp -f app/build/outputs/apk/debug/app-debug.apk "../../release-assets/PoundControl_${TAG}_android.apk"
+            cp -f wear/build/outputs/apk/debug/wear-debug.apk "../../release-assets/PoundControl_${TAG}_wear.apk"
           fi
 
-      - name: Upload Android APK Artifact
+      - name: Upload Android & Wear OS APK Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gui-dist-android
-          path: gui-dist/
+          name: dist-android
+          path: release-assets/
 
   release:
     name: Release PoundControl Artifacts
-    needs: [test, build-gui-linux-windows, build-gui-macos, build-android]
+    needs: [meta, test, build-gui-linux-windows, build-gui-macos, build-android]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -248,35 +279,55 @@ jobs:
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: ${{ startsWith(github.ref, 'refs/tags/v') && 'release --clean' || 'release --clean --snapshot' }}
+          args: ${{ needs.meta.outputs.is_tag == 'true' && 'release --clean' || 'release --clean --snapshot' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download All Build Artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: gui-dist-*
-          path: gui-dist
+          pattern: dist-*
+          path: release-assets
           merge-multiple: true
 
       - name: Consolidate Checksums
         run: |
           mkdir -p dist
-          touch dist/checksums.txt
-          cd gui-dist
-          sha256sum * >> ../dist/checksums.txt
+          cd release-assets
+          TMP_SUMS="$(mktemp)"
+          for f in *; do
+            [ -f "$f" ] || continue
+            sha256sum "$f" >> "$TMP_SUMS"
+          done
+          sort -u -k2 -o ../dist/checksums.txt "$TMP_SUMS"
+          rm -f "$TMP_SUMS"
           cd ..
-          sort -u -k2 -o dist/checksums.txt dist/checksums.txt
           cp -f dist/checksums.txt dist/SHA256SUMS.txt
           echo "=== Final Consolidated dist/checksums.txt ==="
           cat dist/checksums.txt
 
-      - name: Attach Artifacts to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Attest Build Provenance (SLSA OIDC)
+        if: needs.meta.outputs.is_tag == 'true'
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/checksums.txt
+
+      - name: Publish GitHub Release
+        if: needs.meta.outputs.is_tag == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if ! gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
-            gh release create "${{ github.ref_name }}" --verify-tag --generate-notes
+          TAG="${{ needs.meta.outputs.tag }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            FLAGS=(--verify-tag --generate-notes)
+            if [ "${{ needs.meta.outputs.prerelease }}" = "true" ]; then
+              FLAGS+=(--prerelease)
+            fi
+            gh release create "$TAG" "${FLAGS[@]}"
           fi
-          gh release upload "${{ github.ref_name }}" gui-dist/* dist/checksums.txt dist/SHA256SUMS.txt --clobber
+          ASSETS=()
+          for f in release-assets/*; do
+            [ -f "$f" ] && ASSETS+=("$f")
+          done
+          ASSETS+=(dist/checksums.txt dist/SHA256SUMS.txt)
+          gh release upload "$TAG" "${ASSETS[@]}" --clobber

@@ -2,13 +2,13 @@
 
 **Cross-Platform Macro Deck, OBS Studio Controller & Extensible Plugin Studio (Go & Fyne)**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg?style=for-the-badge)](LICENSE)
 
-**PoundControl** is an open-source, cross-platform desktop and LAN touch macro deck written in **Go** and **Fyne v2**. It pairs a clickable **Virtual Desktop Deck** (with pop-out pad and global hotkeys) and a **LAN Web / Mobile / Tablet Touch Deck** with a three-pillar plugin architecture:
+**PoundControl** is an open-source, cross-platform desktop, mobile, and watch macro deck written in **Go**, **Fyne v2**, and **Kotlin**. It pairs a clickable **Virtual Desktop Deck** (with pop-out pad and global hotkeys), a **LAN Web / Mobile / Tablet Touch Deck**, and native **Android & Wear OS** companion apps with a three-pillar plugin architecture:
 
-- **Built-in Native Go Plugins**: Core navigation (pages, folders, profiles, multi-actions), **OBS Studio (WebSocket v5)** control, and **App & System Control** (app/script launcher, open URL, HTTP/WS webhooks, hotkeys/macros, media keys).
-- **Elgato Stream Deck (`.sdPlugin`) Compatibility**: Load standard SDK v2/v3 `.sdPlugin` bundles (Node.js or native binaries, including TownCrier's plugin) with a WebView2 / browser Property Inspector bridge.
-- **Dynamic WebAssembly (`wazero`) Plugins**: Run single-file, sandboxed, hot-reloadable `.wasm` plugins compiled from Go, TinyGo, Rust, Zig, or C/C++ across Windows, Linux, and macOS (see [docs/WASM_PLUGIN_ABI.md](docs/WASM_PLUGIN_ABI.md)).
+- **Built-in Native Go Plugins**: Core navigation (pages, folders, profiles, multi-actions), **OBS Studio (WebSocket v5)** control, **Multi-Format Audio Soundboard** (WAV, MP3, OGG Vorbis, FLAC), and **App & System Control** (app/script launcher, open URL, HTTP/WS webhooks, hotkeys/macros, media keys).
+- **Elgato Stream Deck (`.sdPlugin`) Compatibility**: Load standard SDK v2/v3 `.sdPlugin` bundles (Node.js or native binaries, including TownCrier's plugin) with a WebView2 / browser Property Inspector bridge and OpenAction Marketplace integration.
+- **Dynamic WebAssembly (`wazero`) Plugins**: Run single-file, sandboxed, hot-reloadable `.wasm` plugins compiled from Go, TinyGo, Rust, Zig, or C/C++ across Windows, Linux, and macOS (see [docs/WASM_PLUGIN_ABI.md](docs/WASM_PLUGIN_ABI.md)) with Curated Catalog browsing and SHA-256 verified updates.
 
 ---
 
@@ -47,4 +47,4 @@
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GNU Affero General Public License v3.0 (AGPL-3.0) — see [LICENSE](LICENSE).

@@ -27,7 +27,7 @@
 **PoundControl** is a cross-platform (Windows, Linux, macOS), open-source programmable macro & stream deck application written in **Go** using **Fyne v2**. It pairs a **Fyne Virtual Desktop Deck** (with global hotkeys and a pop-out pad) and a **LAN Web / Mobile / Tablet Touch Deck** with a unified three-pillar plugin architecture:
 
 - **Primary Repository**: `github.com/mrpoundsign/PoundControl`
-- **License**: MIT License
+- **License**: GNU Affero General Public License v3.0 (AGPL-3.0)
 - **Visual Identity**: Obsidian Slate (`#0A0A0C`), Chrome White (`#FFFFFF`), and Electric Sky Blue (`#38BDF8`).
 - **Core Stack**:
   - **Go**: 1.27+
