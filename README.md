@@ -3,6 +3,7 @@
 **Cross-Platform Macro Deck, OBS Studio Controller & Extensible Plugin Studio**
 
 [![Latest Release](https://img.shields.io/github/v/release/mrpoundsign/PoundControl?style=for-the-badge&color=38BDF8)](https://github.com/mrpoundsign/PoundControl/releases/latest)
+[![Documentation](https://img.shields.io/badge/Docs-mrpoundsign.com-0284C7?style=for-the-badge)](https://mrpoundsign.com/PoundControl/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg?style=for-the-badge)](LICENSE)
 
 **PoundControl** is an open-source, local-first macro and stream deck for **Windows**, **macOS**, **Linux**, **LAN phones/tablets**, **Android**, and **Wear OS** watches. It pairs a clickable **Virtual Desktop Deck** (with pop-out pad and global hotkeys) and encrypted **LAN / Mobile / Watch Touch Decks** with built-in plugins (**Core**, **OBS Studio**, **Multi-Format Soundboard**, **Apps/Hotkeys/Webhooks**), **Elgato Stream Deck (`.sdPlugin`)** compatibility, and sandboxed **WebAssembly (`wazero`)** plugins.
@@ -119,7 +120,9 @@ cd mobile/android
 
 ## Documentation
 
-- [WebAssembly Plugin ABI Specification](docs/WASM_PLUGIN_ABI.md) — Guest exports, `poundcontrol` host imports, sandbox limits, and declarative `info` / `link` / `button` / `password` settings schema.
+- **[Documentation Site](https://mrpoundsign.com/PoundControl/)** — Features overview, architecture, and security summary
+- **[Download & Install Guide](https://mrpoundsign.com/PoundControl/install.html)** — Windows, macOS, Linux, LAN Web Deck, Android, Wear OS, checksums, and building from source
+- **[WebAssembly Plugin ABI Reference](https://mrpoundsign.com/PoundControl/wasm-abi.html)** ([Markdown source](docs/WASM_PLUGIN_ABI.md)) — Guest exports, `poundcontrol` host imports, sandbox limits, and declarative `info` / `link` / `button` / `password` settings schema
 
 ---
 

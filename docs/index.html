@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="google-site-verification" content="RJ-0Jr9dzDzeXes7Bo1_Vgc5GKHw8R2ADLe-tBge_tU">
+  <title>PoundControl — Cross-Platform Macro Deck, OBS Studio Controller &amp; Plugin Studio</title>
+  <meta name="description" content="Open-source, local-first macro and stream deck for Windows, macOS, Linux, LAN browsers, Android, and Wear OS with OBS Studio, Soundboard, .sdPlugin, and sandboxed WebAssembly plugins.">
+  <link rel="icon" type="image/png" href="icon.png">
+  <link rel="stylesheet" href="site.css">
+  <script src="site.js" defer></script>
+</head>
+<body>
+  <a href="#main-content" class="skip-link visually-hidden">Skip to main content</a>
+
+  <div class="app-shell">
+    <header class="site-header">
+      <div class="header-inner">
+        <a href="index.html" class="brand-link">
+          <img src="icon.png" alt="" class="brand-icon" width="32" height="32">
+          <span>PoundControl</span>
+          <span class="brand-badge">Docs</span>
+        </a>
+        <nav class="header-actions" aria-label="Primary actions">
+          <a href="install.html" class="header-btn">Download &amp; Install</a>
+          <a href="wasm-abi.html" class="header-btn">Wasm ABI</a>
+          <a href="https://github.com/mrpoundsign/PoundControl/releases/latest" class="header-btn header-btn-primary">Latest Release</a>
+          <a href="https://github.com/mrpoundsign/PoundControl" class="header-btn">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <div class="docs-layout">
+      <aside class="sidebar" aria-label="Documentation navigation">
+        <div class="sidebar-group">
+          <p class="sidebar-heading">Documentation</p>
+          <ul class="sidebar-nav">
+            <li>
+              <a href="index.html" aria-current="page">Overview &amp; Features</a>
+              <ul class="sidebar-subnav" aria-label="On this page">
+                <li><a href="#studio">Desktop Studio &amp; Virtual Deck</a></li>
+                <li><a href="#multi-action">Multi-Action Sequences</a></li>
+                <li><a href="#touch-decks">LAN, Android &amp; Wear OS Decks</a></li>
+                <li><a href="#built-in">Built-In Plugins</a></li>
+                <li><a href="#plugins">.sdPlugin &amp; Wasm Extensions</a></li>
+                <li><a href="#security">Security &amp; Local-First Design</a></li>
+              </ul>
+            </li>
+            <li><a href="install.html">Download &amp; Install</a></li>
+            <li><a href="wasm-abi.html">Wasm Plugin ABI</a></li>
+          </ul>
+        </div>
+
+        <div class="sidebar-group">
+          <p class="sidebar-heading">Ecosystem &amp; Source</p>
+          <ul class="sidebar-nav">
+            <li><a href="https://github.com/mrpoundsign/PoundControl/releases/latest">GitHub Releases</a></li>
+            <li><a href="https://github.com/mrpoundsign/PoundControl">Source Code (AGPL-3.0)</a></li>
+            <li><a href="https://github.com/mrpoundsign/PoundControl/blob/main/docs/WASM_PLUGIN_ABI.md">ABI Spec (Markdown)</a></li>
+            <li><a href="https://mrpoundsign.com/">mrpoundsign.com</a></li>
+            <li><a href="https://mrpoundsign.com/TownCrier/">TownCrier</a></li>
+            <li><a href="https://mrpoundsign.com/Hearsay/">Hearsay</a></li>
+            <li><a href="https://mrpoundsign.com/SVGTuber/">SVGTuber</a></li>
+            <li><a href="https://mrpoundsign.com/InkAnim/">InkAnim</a></li>
+          </ul>
+        </div>
+      </aside>
+
+      <main id="main-content" class="doc-content">
+        <section class="hero">
+          <span class="hero-eyebrow">Cross-Platform Macro &amp; Stream Deck Studio</span>
+          <h1>PoundControl</h1>
+          <p class="hero-lead">
+            Open-source, local-first macro and stream deck for <strong>Windows</strong>, <strong>macOS</strong>, <strong>Linux</strong>, <strong>LAN phones/tablets</strong>, <strong>Android</strong>, and <strong>Wear OS</strong> watches. Pair a clickable Virtual Desktop Deck and encrypted touch decks with built-in OBS Studio, Soundboard, Elgato <code>.sdPlugin</code>, and sandboxed WebAssembly plugins.
+          </p>
+          <div class="hero-actions">
+            <a href="install.html" class="header-btn header-btn-primary">Download &amp; Install</a>
+            <a href="wasm-abi.html" class="header-btn">Read Wasm Plugin ABI</a>
+            <a href="https://github.com/mrpoundsign/PoundControl" class="header-btn">View on GitHub</a>
+          </div>
+        </section>
+
+        <section id="studio" class="doc-section" tabindex="-1">
+          <h2>Desktop Studio &amp; Virtual Deck</h2>
+          <p>
+            PoundControl Studio is built with Go and Fyne v2 so your full deck editor runs natively on desktop with zero cloud account requirements.
+          </p>
+          <div class="card-grid">
+            <article class="card">
+              <h3>Flexible Profiles, Pages &amp; Folders</h3>
+              <p>Organize buttons and rotary encoder dials across profiles, pages, and nested folders with drag/move, auto-swap, and cross-profile copy/paste.</p>
+              <div class="card-badges">
+                <span class="pill">Keypads &amp; Dials</span>
+                <span class="pill">Custom Palettes</span>
+              </div>
+            </article>
+            <article class="card">
+              <h3>Pop-Out Pad &amp; Global Hotkeys</h3>
+              <p>Keep a lightweight Virtual Desktop Deck floating over your workspace alongside global keyboard hotkeys for instant triggers anywhere.</p>
+              <div class="card-badges">
+                <span class="pill">Word-Wrapped Titles</span>
+                <span class="pill">Active Shimmer/Glow</span>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="multi-action" class="doc-section" tabindex="-1">
+          <h2>Visual Multi-Action Sequences</h2>
+          <p>
+            Combine actions across built-in, <code>.sdPlugin</code>, and WebAssembly plugins into deterministic multi-step automations right inside the Action Inspector.
+          </p>
+          <ul>
+            <li><strong>Step Delays &amp; Reordering:</strong> Insert timed waits between actions, reorder steps, or duplicate existing steps with one click.</li>
+            <li><strong>Inline Editing &amp; Muting:</strong> Adjust individual step settings inline or mute steps temporarily while iterating without deleting them.</li>
+            <li><strong>Live Test Runs:</strong> Trigger sequences directly from the editor to verify scene switches, audio cues, webhooks, and hotkeys before going live.</li>
+          </ul>
+        </section>
+
+        <section id="touch-decks" class="doc-section" tabindex="-1">
+          <h2>Encrypted LAN, Android &amp; Wear OS Touch Decks</h2>
+          <p>
+            Turn any phone, tablet, or Wear OS smartwatch on your Wi-Fi network into a low-latency wireless deck without exposing unauthenticated ports.
+          </p>
+          <div class="card-grid">
+            <article class="card">
+              <h3>Zero-Install LAN Web Deck</h3>
+              <p>Scan a temporary QR code or enter a 6-digit pairing PIN to connect any browser. Configure independent per-device viewports or Follow-Studio mode.</p>
+            </article>
+            <article class="card">
+              <h3>Android Companion App</h3>
+              <p>Dedicated Android 8.0+ app with QR pairing, fullscreen deck grid, tactile feedback, and Wear OS Wearable Data Layer bridging.</p>
+            </article>
+            <article class="card">
+              <h3>Wear OS Smartwatch Deck</h3>
+              <p>Tap deck keys, navigate pages and folders, adjust rotary dials, or launch directly from a Wear OS watch face complication.</p>
+            </article>
+          </div>
+          <div class="callout">
+            <strong>Cryptographic Pairing:</strong> Device pairing uses mutual Ed25519 + SPAKE2 + HMAC authentication and requires explicit approval inside Desktop Studio.
+          </div>
+        </section>
+
+        <section id="built-in" class="doc-section" tabindex="-1">
+          <h2>Built-In Plugins</h2>
+          <p>PoundControl ships with four native plugins ready out of the box:</p>
+          <ul>
+            <li><strong>Core:</strong> Page navigation, folder entry/exit, profile switching, and Visual Multi-Action sequences.</li>
+            <li><strong>OBS Studio (WebSocket v5):</strong> Switch scenes, toggle sources and filters, control audio mute/volume, and start/stop streaming or recording.</li>
+            <li><strong>Soundboard:</strong> Polyphonic playback for WAV, MP3, OGG Vorbis, and FLAC clips with per-slot trigger modes, master volume, and output device selection.</li>
+            <li><strong>Apps &amp; System Control:</strong> Launch applications or scripts, open URLs, send HTTP or WebSocket webhooks, fire keyboard macros/hotkeys, and send media keys.</li>
+          </ul>
+        </section>
+
+        <section id="plugins" class="doc-section" tabindex="-1">
+          <h2>Elgato <code>.sdPlugin</code> &amp; Sandboxed WebAssembly Extensions</h2>
+          <p>
+            Extend PoundControl using existing creator hardware plugins or write your own cross-platform plugins without platform-specific native toolchains.
+          </p>
+          <ul>
+            <li><strong>Elgato Stream Deck (<code>.sdPlugin</code>) Host:</strong> Loads standard SDK v2/v3 bundles with an optional 1-click Node.js setup, WebView2/browser Property Inspector bridge, and <strong>OpenAction Marketplace</strong> browsing.</li>
+            <li><strong>Sandboxed WebAssembly (<code>wazero</code>) Runtime:</strong> Executes single-file <code>.wasm</code> WASI Preview 1 reactor plugins compiled from Go, TinyGo, Rust, Zig, or C/C++, complete with a <strong>Curated Catalog</strong> and SHA-256 verified updates. See the full <a href="wasm-abi.html">Wasm Plugin ABI Reference</a>.</li>
+          </ul>
+        </section>
+
+        <section id="security" class="doc-section" tabindex="-1">
+          <h2>Security, Keyring &amp; Local-First Design</h2>
+          <ul>
+            <li><strong>Local Configuration:</strong> Profiles, layouts, and plugin configurations live on your machine rather than third-party servers.</li>
+            <li><strong>OS Keyring Secret Storage:</strong> Sensitive fields declared with <code>"type": "password"</code> in plugin global settings are stored in your operating system keyring rather than plaintext JSON.</li>
+            <li><strong>Strict Wasm Sandboxing:</strong> WebAssembly plugins run with a 32 MiB memory cap, strict call/HTTP timeouts, zero host filesystem preopens, and manifest <code>allowedHosts</code> HTTP allowlisting.</li>
+            <li><strong>SLSA Provenance Releases:</strong> Official binaries, APKs, and installers include SHA-256 checksums and keyless GitHub Actions SLSA Build Provenance attestations.</li>
+          </ul>
+        </section>
+      </main>
+    </div>
+
+    <footer class="site-footer">
+      PoundControl is open source under the <a href="https://github.com/mrpoundsign/PoundControl/blob/main/LICENSE">GNU AGPL-3.0 License</a> &middot;
+      <a href="https://mrpoundsign.com/">mrpoundsign.com</a> &middot;
+      <a href="install.html">Install</a> &middot;
+      <a href="wasm-abi.html">Wasm ABI</a> &middot;
+      <a href="https://github.com/mrpoundsign/PoundControl">GitHub</a>
+    </footer>
+  </div>
+</body>
+</html>

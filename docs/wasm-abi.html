@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="google-site-verification" content="RJ-0Jr9dzDzeXes7Bo1_Vgc5GKHw8R2ADLe-tBge_tU">
+  <title>WebAssembly Plugin ABI — PoundControl Documentation</title>
+  <meta name="description" content="Complete PoundControl WebAssembly (.wasm) Plugin ABI specification: WASI reactor requirements, sandbox limits, memory calling convention, guest exports, poundcontrol host imports, and declarative settings schema.">
+  <link rel="icon" type="image/png" href="icon.png">
+  <link rel="stylesheet" href="site.css">
+  <script src="site.js" defer></script>
+</head>
+<body>
+  <a href="#main-content" class="skip-link visually-hidden">Skip to main content</a>
+
+  <div class="app-shell">
+    <header class="site-header">
+      <div class="header-inner">
+        <a href="index.html" class="brand-link">
+          <img src="icon.png" alt="" class="brand-icon" width="32" height="32">
+          <span>PoundControl</span>
+          <span class="brand-badge">Docs</span>
+        </a>
+        <nav class="header-actions" aria-label="Primary actions">
+          <a href="install.html" class="header-btn">Download &amp; Install</a>
+          <a href="wasm-abi.html" class="header-btn">Wasm ABI</a>
+          <a href="https://github.com/mrpoundsign/PoundControl/releases/latest" class="header-btn header-btn-primary">Latest Release</a>
+          <a href="https://github.com/mrpoundsign/PoundControl" class="header-btn">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <div class="docs-layout">
+      <aside class="sidebar" aria-label="Documentation navigation">
+        <div class="sidebar-group">
+          <p class="sidebar-heading">Documentation</p>
+          <ul class="sidebar-nav">
+            <li><a href="index.html">Overview &amp; Features</a></li>
+            <li><a href="install.html">Download &amp; Install</a></li>
+            <li>
+              <a href="wasm-abi.html" aria-current="page">Wasm Plugin ABI</a>
+              <ul class="sidebar-subnav" aria-label="On this page">
+                <li><a href="#runtime">1. Runtime &amp; Limits</a></li>
+                <li><a href="#memory">2. Memory &amp; Calling Convention</a></li>
+                <li><a href="#exports">3. Guest Exports</a></li>
+                <li><a href="#imports">4. Host Imports (poundcontrol)</a></li>
+                <li><a href="#manifest">5. Manifest &amp; Settings Schema</a></li>
+                <li><a href="#lifecycle">6. Lifecycle &amp; Best Practices</a></li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+
+        <div class="sidebar-group">
+          <p class="sidebar-heading">Ecosystem &amp; Source</p>
+          <ul class="sidebar-nav">
+            <li><a href="https://github.com/mrpoundsign/PoundControl/blob/main/examples/wasm-pomodoro/main.go">Example: wasm-pomodoro</a></li>
+            <li><a href="https://github.com/mrpoundsign/PoundControl/blob/main/docs/WASM_PLUGIN_ABI.md">ABI Spec (Markdown)</a></li>
+            <li><a href="https://github.com/mrpoundsign/PoundControl">Source Code (AGPL-3.0)</a></li>
+            <li><a href="https://mrpoundsign.com/">mrpoundsign.com</a></li>
+            <li><a href="https://mrpoundsign.com/TownCrier/">TownCrier</a></li>
+            <li><a href="https://mrpoundsign.com/Hearsay/">Hearsay</a></li>
+            <li><a href="https://mrpoundsign.com/SVGTuber/">SVGTuber</a></li>
+            <li><a href="https://mrpoundsign.com/InkAnim/">InkAnim</a></li>
+          </ul>
+        </div>
+      </aside>
+
+      <main id="main-content" class="doc-content">
+        <section class="hero">
+          <span class="hero-eyebrow">Plugin Developer Reference</span>
+          <h1>WebAssembly (<code>.wasm</code>) Plugin ABI</h1>
+          <p class="hero-lead">
+            PoundControl hosts single-file, sandboxed, hot-reloadable WebAssembly plugins using pure-Go <a href="https://wazero.io/">wazero</a> across Windows, Linux, and macOS. Any language targeting <strong>WASI Preview 1</strong> (<code>wasi_snapshot_preview1</code>) as a <strong>reactor module</strong> (Go, TinyGo, Rust, Zig, C/C++) can implement this ABI.
+          </p>
+          <div class="hero-actions">
+            <a href="https://github.com/mrpoundsign/PoundControl/blob/main/examples/wasm-pomodoro/main.go" class="header-btn header-btn-primary">View Go Example (wasm-pomodoro)</a>
+            <a href="https://github.com/mrpoundsign/PoundControl/blob/main/docs/WASM_PLUGIN_ABI.md" class="header-btn">View Raw Markdown Spec</a>
+          </div>
+        </section>
+
+        <section id="runtime" class="doc-section" tabindex="-1">
+          <h2>1. Runtime Model, Discovery &amp; Sandbox Limits</h2>
+
+          <h3>1.1 Module Requirements (WASI Reactor vs. Command)</h3>
+          <ul>
+            <li>Modules <strong>must</strong> be built as <strong>WASI reactors</strong> exporting <code>_initialize</code> (and must <strong>not</strong> export <code>_start</code> without <code>_initialize</code>). Command modules exporting <code>_start</code> exit on return and are rejected at load time with an error card in <strong>Settings &rarr; Plugins</strong>.</li>
+            <li><strong>Enabled WASI host capabilities:</strong> Wall clock (<code>walltime</code>), monotonic clock (<code>nanotime</code>), <code>nanosleep</code>, and cryptographically secure randomness (<code>rand.Reader</code>).</li>
+            <li><strong>Disabled capabilities (by design):</strong> No host filesystem preopens, no raw TCP/UDP sockets, no environment variables, and no subprocess execution. All outbound network requests go through the sandboxed <a href="#import-http"><code>pc_http_request</code></a> import and require explicit <code>permissions.allowedHosts</code> entries in <code>pc_manifest</code>.</li>
+          </ul>
+
+          <figure class="code-figure">
+            <figcaption>Build a WASI reactor module with standard Go (wasip1/wasm)</figcaption>
+            <div class="copyable">
+              <pre><code id="code-wasm-build">GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o myplugin.wasm .</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-wasm-build" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+
+          <h3>1.2 Discovery &amp; Hot Reload</h3>
+          <p>PoundControl scans:</p>
+          <ol>
+            <li>The per-user default <code>wasm/</code> folder next to <code>config.json</code> (displayed in <strong>Settings &rarr; Plugins</strong>).</li>
+            <li>Any user-configured files or directories in <strong>Extra Wasm Plugin Paths</strong> (<code>extraPaths</code>).</li>
+          </ol>
+          <p>
+            Within each configured directory, PoundControl discovers <code>.wasm</code> files at the root level and one subdirectory deep (so organizing <code>wasm/&lt;plugin-name&gt;/&lt;plugin&gt;.wasm</code> works cleanly). Files are loaded in sorted order and duplicate plugin <code>uuid</code>s are skipped. Click <strong>Reload Plugins</strong> in <strong>Settings &rarr; Plugins</strong> to cleanly stop active timers, tear down old runtimes, and load updated <code>.wasm</code> builds.
+          </p>
+
+          <h3>1.3 Resource &amp; Timeout Limits</h3>
+          <div tabindex="0" role="region" aria-labelledby="tbl-limits-caption" class="table-wrapper">
+            <table class="api-table table-limits">
+              <caption id="tbl-limits-caption">Wasm runtime resource, payload, timer, and timeout limits</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Limit / Constant</th>
+                  <th scope="col">Value</th>
+                  <th scope="col">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">Linear memory cap</th>
+                  <td><strong>32 MiB</strong> (<code>512</code> pages)</td>
+                  <td>Enforced per Wasm runtime instance</td>
+                </tr>
+                <tr>
+                  <th scope="row">Maximum payload size</th>
+                  <td><strong>4 MiB</strong></td>
+                  <td>Applies to <code>pc_manifest</code> and host/guest memory copies</td>
+                </tr>
+                <tr>
+                  <th scope="row">Default guest call timeout</th>
+                  <td><strong>5 seconds</strong></td>
+                  <td>Applies to <code>_initialize</code>, <code>pc_manifest</code>, <code>pc_handle_event</code>, <code>pc_on_timer</code>, <code>pc_on_global_settings</code></td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_on_config_action</code> call timeout</th>
+                  <td><strong>20 seconds</strong></td>
+                  <td><code>max(callTimeout, maxHTTPTimeout + 5s)</code> so full 15s HTTP timeouts finish before cancelling the call</td>
+                </tr>
+                <tr>
+                  <th scope="row">Default HTTP request timeout</th>
+                  <td><strong>10 seconds</strong></td>
+                  <td>When <code>timeoutMs &lt;= 0</code> in <code>pc_http_request</code></td>
+                </tr>
+                <tr>
+                  <th scope="row">Maximum HTTP request timeout</th>
+                  <td><strong>15 seconds</strong></td>
+                  <td>Larger <code>timeoutMs</code> values are clamped to <code>15000</code></td>
+                </tr>
+                <tr>
+                  <th scope="row">Maximum HTTP response body</th>
+                  <td><strong>256 KiB</strong></td>
+                  <td>Response body is truncated via <code>io.LimitReader</code></td>
+                </tr>
+                <tr>
+                  <th scope="row">Minimum host timer interval</th>
+                  <td><strong>250 ms</strong></td>
+                  <td>Smaller non-zero intervals are clamped to <code>250</code></td>
+                </tr>
+                <tr>
+                  <th scope="row">Maximum active timers per plugin</th>
+                  <td><strong>16</strong></td>
+                  <td>Across all <code>timerId</code> keys</td>
+                </tr>
+                <tr>
+                  <th scope="row">Log ring buffer</th>
+                  <td><strong>200 entries</strong></td>
+                  <td>Viewed in Studio Logs</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>1.4 Concurrency &amp; Serialization</h3>
+          <ul>
+            <li>All calls into a single plugin instance (<code>pc_manifest</code>, <code>pc_handle_event</code>, <code>pc_on_timer</code>, <code>pc_on_global_settings</code>, <code>pc_on_config_action</code>) are serialized by a per-instance host mutex.</li>
+            <li>Host callbacks triggered <em>from inside</em> a guest call (such as <code>pc_update_visual</code> or <code>pc_save_global_settings</code>) execute synchronously within that guest call.</li>
+          </ul>
+        </section>
+
+        <section id="memory" class="doc-section" tabindex="-1">
+          <h2>2. Memory &amp; Calling Convention</h2>
+          <p>All complex payloads cross the host/guest boundary as UTF-8 <strong>JSON</strong> buffers in the guest's linear memory (<code>memory</code> export).</p>
+
+          <h3>2.1 Guest Allocator (<code>pc_alloc</code> &amp; <code>pc_free</code>)</h3>
+          <p>
+            Before invoking guest functions that accept a payload (<code>pc_handle_event</code>, <code>pc_on_timer</code>, <code>pc_on_global_settings</code>, <code>pc_on_config_action</code>), the host allocates linear memory via <code>pc_alloc</code>, copies the JSON bytes in, invokes the export, and frees the buffer via <code>pc_free</code> (if exported):
+          </p>
+          <ul>
+            <li><strong>Required:</strong> <code>pc_alloc(size: uint32) -&gt; ptr: uint32</code> — Must return a non-zero offset into guest linear memory with at least <code>size</code> writable bytes. Returning <code>0</code> fails the call and transitions the plugin instance to <code>error</code> state.</li>
+            <li><strong>Recommended:</strong> <code>pc_free(ptr: uint32)</code> — Releases the allocation made by <code>pc_alloc</code>.</li>
+          </ul>
+          <div class="callout">
+            <strong>Go tip:</strong> Keep a mutex-guarded map <code>map[uint32][]byte</code> pinning <code>pc_alloc</code> slices so Go's garbage collector cannot collect or relocate buffers between <code>pc_alloc</code> and <code>pc_free</code>.
+          </div>
+
+          <h3>2.2 Packed Pointer+Length Return (<code>pc_manifest</code>)</h3>
+          <p>
+            <code>pc_manifest</code> returns a single <code>uint64</code> packing <code>(ptr, len)</code>:
+          </p>
+          <figure class="code-figure">
+            <figcaption>Packing pointer and byte length into uint64</figcaption>
+            <div class="copyable">
+              <pre><code id="code-packed-ptr">result = (uint64(ptr) &lt;&lt; 32) | uint64(len)</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-packed-ptr" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+          <p>
+            The host validates <code>ptr != 0 &amp;&amp; len &gt; 0 &amp;&amp; len &lt;= 4 MiB</code>, copies <code>len</code> bytes out of guest memory, and immediately calls <code>pc_free(ptr)</code> (if exported).
+          </p>
+
+          <h3 id="caller-buffer">2.3 Caller-Buffer + Negative-Length Retry (<code>pc_get_global_settings</code>, <code>pc_http_request</code>)</h3>
+          <p>When a host import returns JSON to the guest, the guest supplies an output buffer <code>(outPtr, outCap)</code>:</p>
+          <ul>
+            <li>If <code>len(jsonBytes) &lt;= outCap</code>, the host writes the JSON bytes to <code>outPtr</code> and returns <code>int32(len(jsonBytes))</code> (<code>&gt;= 0</code>).</li>
+            <li>If <code>len(jsonBytes) &gt; outCap</code>, the host writes <strong>nothing</strong> and returns <code>-int32(len(jsonBytes))</code>. Allocate a buffer of size <code>uint32(-rc)</code> and retry once.</li>
+            <li>Returning <code>-1</code> indicates a serialization error or invalid guest pointer/bounds. (Because valid JSON objects such as <code>{}</code> are at least 2 bytes, a needed-size return is always <code>&lt;= -2</code>.)</li>
+          </ul>
+        </section>
+
+        <section id="exports" class="doc-section" tabindex="-1">
+          <h2>3. Guest Exports (Host &rarr; Plugin)</h2>
+          <p>All string/JSON payloads passed to guest exports are UTF-8 encoded without NUL terminators.</p>
+
+          <div tabindex="0" role="region" aria-labelledby="tbl-exports-caption" class="table-wrapper">
+            <table class="api-table table-exports">
+              <caption id="tbl-exports-caption">WebAssembly module exported functions invoked by PoundControl</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Export Name</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Signature (Wasm types)</th>
+                  <th scope="col">Return Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row"><code>pc_alloc</code></th>
+                  <td><span class="status-badge status-required">Required</span></td>
+                  <td><code>(size: uint32) -&gt; (ptr: uint32)</code></td>
+                  <td>Linear memory pointer (<code>0</code> = OOM/error)</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_free</code></th>
+                  <td><span class="status-badge status-optional">Recommended</span></td>
+                  <td><code>(ptr: uint32) -&gt; ()</code></td>
+                  <td>None</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_manifest</code></th>
+                  <td><span class="status-badge status-required">Required</span></td>
+                  <td><code>() -&gt; (packedPtrLen: uint64)</code></td>
+                  <td><code>(uint64(ptr) &lt;&lt; 32) | uint64(len)</code></td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_handle_event</code></th>
+                  <td><span class="status-badge status-required">Required</span></td>
+                  <td><code>(ptr: uint32, len: uint32) -&gt; (rc: int32)</code></td>
+                  <td><code>0</code> OK, <code>&lt; 0</code> error</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_on_timer</code></th>
+                  <td><span class="status-badge status-optional">Optional</span></td>
+                  <td><code>(ptr: uint32, len: uint32) -&gt; (rc: int32)</code></td>
+                  <td><code>0</code> OK, <code>&lt; 0</code> error</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_on_global_settings</code></th>
+                  <td><span class="status-badge status-optional">Optional</span></td>
+                  <td><code>(ptr: uint32, len: uint32) -&gt; (rc: int32)</code></td>
+                  <td><code>0</code> OK, <code>&lt; 0</code> error</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_on_config_action</code></th>
+                  <td><span class="status-badge status-optional">Optional</span></td>
+                  <td><code>(ptr: uint32, len: uint32) -&gt; (rc: int32)</code></td>
+                  <td><code>0</code> OK, <code>!= 0</code> surfaces error to UI without crashing module</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>3.1 <code>pc_manifest() -&gt; uint64</code></h3>
+          <p>Called once during plugin initialization. Returns a packed JSON <a href="#manifest"><code>GuestManifest</code></a>. Failures mark the plugin <code>error</code> in <strong>Settings &rarr; Plugins</strong>.</p>
+
+          <h3>3.2 <code>pc_handle_event(ptr, len uint32) -&gt; int32</code></h3>
+          <p>Dispatches deck lifecycle and user-input events as a JSON <code>ActionEvent</code>:</p>
+
+          <figure class="code-figure">
+            <figcaption>ActionEvent JSON payload</figcaption>
+            <div class="copyable">
+              <pre><code id="code-action-event">{
+  "event": "keyDown",
+  "context": "550e8400-e29b-41d4-a716-446655440000",
+  "action": "com.example.plugin.toggle",
+  "controller": "Keypad",
+  "coordinates": { "row": 0, "col": 2 },
+  "dialIndex": 0,
+  "settings": { "channel": "main" },
+  "state": 0,
+  "ticks": 0
+}</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-action-event" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+
+          <p>Supported <code>"event"</code> values:</p>
+          <ul>
+            <li><code>"willAppear"</code> — Slot or dial became visible on the active page/folder or profile (or plugin was re-enabled).</li>
+            <li><code>"willDisappear"</code> — Slot or dial left the visible view, was cleared, or its plugin was disabled.</li>
+            <li><code>"didReceiveSettings"</code> — User saved updated per-slot settings in the Action Inspector.</li>
+            <li><code>"keyDown"</code> — Keypad button pressed (desktop click, global hotkey, or LAN Web Deck tap).</li>
+            <li><code>"keyUp"</code> — Keypad button released.</li>
+            <li><code>"dialRotate"</code> — Encoder dial rotated; <code>"ticks"</code> contains the signed delta (positive clockwise, negative counter-clockwise).</li>
+            <li><code>"dialPress"</code> — Encoder dial pushed.</li>
+          </ul>
+          <div class="callout">
+            <strong>Fault isolation:</strong> Returning a non-zero status code reports an error to callers without crashing the plugin. <strong>Wasm traps or call timeouts</strong> mark the instance <code>error</code> and cancel all of its timers until reloaded.
+          </div>
+
+          <h3>3.3 <code>pc_on_timer(ptr, len uint32) -&gt; int32</code></h3>
+          <p>Called on each interval tick armed via <a href="#import-timer"><code>pc_set_timer</code></a>:</p>
+          <figure class="code-figure">
+            <figcaption>Timer event JSON payload</figcaption>
+            <div class="copyable">
+              <pre><code id="code-timer-event">{
+  "timerId": "poll-live",
+  "context": "optional-slot-context"
+}</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-timer-event" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+          <p>If an invocation returns a Go/Wasm error (trap or 5s call timeout), that timer goroutine stops and the module transitions to <code>error</code>.</p>
+
+          <h3>3.4 <code>pc_on_global_settings(ptr, len uint32) -&gt; int32</code></h3>
+          <p>
+            Called when the user clicks <strong>Save</strong> or <strong>Reset Defaults</strong> on the plugin's Settings tab (or any host-initiated <code>Engine.SaveGlobalSettings</code>). Payload is a JSON object matching the plugin's global settings <strong>merged transparently with any <code>password</code> fields from the OS keyring</strong>.
+          </p>
+          <div class="callout">
+            <strong>No feedback loop:</strong> Calling <a href="#import-save-global"><code>pc_save_global_settings</code></a> from <em>inside</em> the plugin persists the data and live-refreshes the Studio UI, <strong>without</strong> re-entering <code>pc_on_global_settings</code>.
+          </div>
+
+          <h3>3.5 <code>pc_on_config_action(ptr, len uint32) -&gt; int32</code></h3>
+          <p>Called when the user clicks an interactive <code>"button"</code> field in <strong>Settings &rarr; &lt;Plugin&gt;</strong>. Payload JSON (<code>GuestConfigActionEvent</code>):</p>
+          <figure class="code-figure">
+            <figcaption>GuestConfigActionEvent JSON payload</figcaption>
+            <div class="copyable">
+              <pre><code id="code-config-action">{
+  "action": "authConnect",
+  "settings": {
+    "clientId": "abc123",
+    "accessToken": "..."
+  }
+}</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-config-action" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+          <ul>
+            <li><code>settings</code> merges persisted global settings, OS keyring <code>password</code> values, and any <strong>unsaved edits</strong> currently typed into the Settings form.</li>
+            <li>Uses an extended <strong>20-second</strong> call timeout (<code>max(callTimeout, maxHTTPTimeout + 5s)</code>) so outbound OAuth/HTTP calls up to <code>15s</code> can finish cleanly.</li>
+            <li>Returning any non-zero code (<code>!= 0</code>) reports an error in the Studio status bar <strong>without</strong> marking the module as <code>error</code> (so logical errors like <code>"Verify Connection failed"</code> or <code>"Missing Client ID"</code> keep the plugin running).</li>
+          </ul>
+        </section>
+
+        <section id="imports" class="doc-section" tabindex="-1">
+          <h2>4. Host Imports (<code>poundcontrol</code> Module)</h2>
+          <p>All imports reside in the WebAssembly import module <strong><code>"poundcontrol"</code></strong>.</p>
+
+          <div tabindex="0" role="region" aria-labelledby="tbl-imports-caption" class="table-wrapper">
+            <table class="api-table table-imports">
+              <caption id="tbl-imports-caption">Host functions imported from the "poundcontrol" module</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Import Name</th>
+                  <th scope="col">Signature</th>
+                  <th scope="col">Return</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row"><code>pc_update_visual</code></th>
+                  <td><code>(ctxPtr, ctxLen, patchPtr, patchLen: uint32) -&gt; int32</code></td>
+                  <td><code>0</code> OK, <code>&lt; 0</code> error</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_save_settings</code></th>
+                  <td><code>(ctxPtr, ctxLen, jsonPtr, jsonLen: uint32) -&gt; int32</code></td>
+                  <td><code>0</code> OK, <code>&lt; 0</code> error</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_get_global_settings</code></th>
+                  <td><code>(outPtr, outCap: uint32) -&gt; int32</code></td>
+                  <td><code>&gt;= 0</code> bytes written, <code>-neededLen</code> retry</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_save_global_settings</code></th>
+                  <td><code>(jsonPtr, jsonLen: uint32) -&gt; int32</code></td>
+                  <td><code>0</code> OK, <code>&lt; 0</code> error</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_log</code></th>
+                  <td><code>(msgPtr, msgLen: uint32) -&gt; ()</code></td>
+                  <td>None</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_http_request</code></th>
+                  <td><code>(reqPtr, reqLen, respPtr, respCap: uint32) -&gt; int32</code></td>
+                  <td><code>&gt;= 0</code> bytes written, <code>-neededLen</code> retry</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_set_timer</code></th>
+                  <td><code>(idPtr, idLen, ctxPtr, ctxLen, intervalMs: uint32) -&gt; int32</code></td>
+                  <td><code>0</code> OK, <code>&lt; 0</code> error</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>pc_deck_nav</code></th>
+                  <td><code>(cmdPtr, cmdLen: uint32) -&gt; int32</code></td>
+                  <td><code>0</code> OK, <code>&lt; 0</code> error</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>4.1 <code>pc_update_visual</code></h3>
+          <p>Updates live title, subtitle, colors, icon, active state, encoder feedback, or flash animation on the action instance identified by <code>ctxPtr/ctxLen</code>. Payload is a partial JSON <code>VisualPatch</code> — omitted/<code>null</code> fields leave the current property unchanged:</p>
+          <figure class="code-figure">
+            <figcaption>VisualPatch JSON payload</figcaption>
+            <div class="copyable">
+              <pre><code id="code-visual-patch">{
+  "title": "Optional Override",
+  "subtitle": "LIVE 1.2K",
+  "color": "#9146FF",
+  "backgroundColor": "#5C1922",
+  "image": "data:image/svg+xml;base64,...",
+  "state": 1,
+  "feedback": {
+    "value": "75%",
+    "indicator": { "value": 75 }
+  },
+  "flash": "ok"
+}</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-visual-patch" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+          <ul>
+            <li><code>backgroundColor</code>: A non-empty hex value overrides the slot's user-configured background color and temporarily suppresses any custom background image; passing <code>""</code> clears the override and restores both.</li>
+            <li><code>image</code>: Accepts an inline <code>data:image/*</code> data URI, a safe relative file path inside the <code>.wasm</code> plugin's directory (no <code>..</code> escapes, symlink escapes outside the plugin folder, absolute paths, <code>file://</code>, <code>http(s)://</code>, or non-image <code>data:</code> URIs), or <code>""</code> to clear an overridden image. Unsafe non-empty URIs are ignored without clearing existing slot artwork.</li>
+            <li><code>flash</code>: Supported values are <code>""</code>, <code>"ok"</code>, and <code>"alert"</code>.</li>
+            <li>Returns <code>0</code> on success, <code>-1</code> on invalid memory bounds, <code>-2</code> on invalid JSON.</li>
+          </ul>
+
+          <h3>4.2 <code>pc_save_settings</code></h3>
+          <p>Persists updated per-instance settings JSON for the slot identified by <code>ctxPtr/ctxLen</code> back to <code>config.json</code>. Returns <code>0</code> on success, <code>-1</code> invalid memory read, <code>-2</code> invalid JSON, <code>-3</code> unbound host, <code>-4</code> save error (such as unknown slot context).</p>
+
+          <h3>4.3 <code>pc_get_global_settings</code></h3>
+          <p>Reads this plugin's persisted plugin-wide global settings JSON object (namespace keyed by the plugin's <code>manifest.uuid</code>), <strong>transparently merging any <code>"password"</code> schema fields stored in the OS keyring</strong>. Uses the <a href="#caller-buffer">negative-length retry convention</a> and returns <code>{}</code> when no global settings exist yet.</p>
+
+          <h3 id="import-save-global">4.4 <code>pc_save_global_settings</code></h3>
+          <p>Atomically persists the plugin's plugin-wide global settings JSON object:</p>
+          <ul>
+            <li>Fields whose <code>key</code> has <code>"type": "password"</code> in <code>globalSettingsSchema</code> are routed automatically to the OS keyring (<code>secrets.Store</code>) and stripped from <code>config.json</code>. Writing <code>""</code> for a password key deletes it from the keyring; omitting a password key preserves its existing keyring entry.</li>
+            <li>Triggers live UI refresh on an open <strong>Settings &rarr; &lt;Plugin&gt;</strong> tab (<code>info</code>, <code>link</code>, <code>button</code>, and keyring password status indicators).</li>
+            <li>Does <strong>not</strong> re-invoke <code>pc_on_global_settings</code>.</li>
+            <li>Returns <code>0</code> on success, <code>-1</code> invalid memory read, <code>-2</code> invalid JSON, <code>-3</code> unbound host / missing UUID, <code>-4</code> save failure.</li>
+          </ul>
+
+          <h3>4.5 <code>pc_log</code></h3>
+          <p>Appends a diagnostic message <code>[pluginUUID] &lt;message&gt;</code> to PoundControl's in-app log buffer.</p>
+
+          <h3 id="import-http">4.6 <code>pc_http_request</code></h3>
+          <p>Executes a sandboxed outbound HTTP/HTTPS request on the plugin's behalf.</p>
+          <figure class="code-figure">
+            <figcaption>GuestHTTPRequest JSON payload</figcaption>
+            <div class="copyable">
+              <pre><code id="code-http-req">{
+  "method": "POST",
+  "url": "https://id.twitch.tv/oauth2/device",
+  "headers": {
+    "Content-Type": "application/x-www-form-urlencoded"
+  },
+  "body": "client_id=abc&amp;scopes=chat:read",
+  "timeoutMs": 8000
+}</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-http-req" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+          <figure class="code-figure">
+            <figcaption>GuestHTTPResponse JSON payload</figcaption>
+            <div class="copyable">
+              <pre><code id="code-http-resp">{
+  "status": 200,
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": "{...}",
+  "error": ""
+}</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-http-resp" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+          <ul>
+            <li>Uses the <a href="#caller-buffer">negative-length retry convention</a> when the encoded <code>GuestHTTPResponse</code> exceeds <code>respCap</code>.</li>
+            <li><strong><code>permissions.allowedHosts</code> enforcement:</strong> Requests to URLs outside the manifest's allowlist are rejected with <code>status: 403</code> and an <code>error</code> message. Only <code>http://</code> and <code>https://</code> URLs with non-empty hosts and no embedded userinfo (<code>user:pass@host</code>) are allowed. Supported patterns: exact hostname (<code>"api.twitch.tv"</code>), host and port (<code>"127.0.0.1:8080"</code>), or wildcard subdomain matching subdomains only (<code>"*.example.com"</code>).</li>
+            <li><code>headers</code> in the response preserves the first value per header key.</li>
+          </ul>
+
+          <h3 id="import-timer">4.7 <code>pc_set_timer</code></h3>
+          <p>Creates, updates, or cancels a named host interval timer (<code>timerId</code> must be non-empty):</p>
+          <ul>
+            <li><code>intervalMs == 0</code>: Cancels the timer identified by <code>timerId</code>.</li>
+            <li><code>intervalMs &gt; 0</code>: Schedules ticks invoking <code>pc_on_timer</code> every <code>max(intervalMs, 250)</code> ms, forwarding <code>timerId</code> and <code>context</code>.</li>
+            <li>Returns <code>0</code> on success, <code>-1</code> invalid memory read, <code>-2</code> empty <code>timerId</code>, <code>-3</code> timer limit (<code>16</code>) exceeded.</li>
+          </ul>
+
+          <h3>4.8 <code>pc_deck_nav</code></h3>
+          <p>Requests deck navigation or folder/profile switching (<code>GuestNavCommand</code>):</p>
+          <figure class="code-figure">
+            <figcaption>GuestNavCommand JSON payload</figcaption>
+            <div class="copyable">
+              <pre><code id="code-deck-nav">{
+  "action": "goToPage",
+  "page": 2
+}</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-deck-nav" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+          <p>Supported <code>"action"</code> values and parameters:</p>
+          <ul>
+            <li><code>"nextPage"</code> — Advance one page (wraps at end)</li>
+            <li><code>"prevPage"</code> — Go back one page (wraps at start)</li>
+            <li><code>"goToPage"</code> — Jump to 1-based <code>"page"</code></li>
+            <li><code>"openFolder"</code> — Push folder <code>"folderId"</code> (<code>"folderName"</code> optional display fallback)</li>
+            <li><code>"closeFolder"</code> — Pop the current folder</li>
+            <li><code>"switchProfile"</code> — Switch active profile by <code>"profileRef"</code> (ID or name)</li>
+          </ul>
+          <p>Returns <code>0</code> OK, <code>-1</code> memory read error, <code>-2</code> invalid JSON, <code>-3</code> deck control unavailable, <code>-4</code> unknown action, <code>-5</code> navigation error.</p>
+        </section>
+
+        <section id="manifest" class="doc-section" tabindex="-1">
+          <h2>5. Manifest &amp; Declarative Settings Schema</h2>
+
+          <h3>5.1 Manifest JSON Schema</h3>
+          <p>Returned as JSON from <code>pc_manifest</code>:</p>
+          <figure class="code-figure">
+            <figcaption>GuestManifest JSON example</figcaption>
+            <div class="copyable">
+              <pre><code id="code-manifest">{
+  "uuid": "com.example.twitch",
+  "name": "Twitch",
+  "version": "1.0.0",
+  "author": "Example Author",
+  "description": "Twitch controls and Device Code sign-in",
+  "icon": "data:image/svg+xml;base64,...",
+  "categoryIcon": "data:image/svg+xml;base64,...",
+  "permissions": {
+    "allowedHosts": ["id.twitch.tv", "api.twitch.tv"]
+  },
+  "globalSettingsSchema": [
+    {
+      "key": "authStatus",
+      "label": "Connection Status",
+      "type": "info",
+      "section": "General",
+      "default": "Not signed in"
+    },
+    {
+      "key": "authConnect",
+      "label": "Sign In with Twitch",
+      "type": "button",
+      "section": "General",
+      "default": { "label": "Sign In with Twitch", "disabled": false }
+    },
+    {
+      "key": "clientId",
+      "label": "Twitch Client ID",
+      "type": "password",
+      "section": "Advanced",
+      "placeholder": "Using built-in Client ID — enter to override"
+    },
+    {
+      "key": "accessToken",
+      "label": "OAuth Access Token",
+      "type": "password",
+      "section": "Advanced"
+    }
+  ],
+  "actions": [
+    {
+      "uuid": "com.example.twitch.marker",
+      "name": "Create Stream Marker",
+      "category": "Twitch",
+      "tooltip": "Drop a VOD marker at the current timestamp",
+      "icon": "data:image/svg+xml;base64,...",
+      "defaultTitle": "Marker",
+      "defaultColor": "#9146FF",
+      "defaultImage": "data:image/svg+xml;base64,...",
+      "hideTitle": false,
+      "controllers": ["Keypad"],
+      "settingsSchema": [
+        {
+          "key": "description",
+          "label": "Marker Description",
+          "type": "text",
+          "section": "General",
+          "placeholder": "Optional note (max 140 chars)"
+        }
+      ]
+    }
+  ]
+}</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-manifest" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+          <ul>
+            <li><strong><code>controllers</code>:</strong> Array of <code>"Keypad"</code> and/or <code>"Encoder"</code>. Defaults to <code>["Keypad"]</code> when omitted.</li>
+            <li><strong>Icon fallback &amp; URI sanitization (<code>icon</code>, <code>categoryIcon</code>, <code>defaultImage</code>):</strong> If an action omits <code>icon</code>, Studio falls back to that action's <code>defaultImage</code> in the Action Catalog. Category icons resolve in order: <code>categoryIcon</code> &rarr; <code>icon</code> &rarr; the first action's <code>icon</code> / <code>defaultImage</code>. All Wasm image/icon fields accept inline <code>data:image/*</code> URIs or safe relative paths strictly inside the <code>.wasm</code> plugin's directory; paths using <code>..</code> escapes, symlink escapes outside the plugin folder, absolute paths, <code>file://</code>, <code>http(s)://</code>, or non-image <code>data:</code> schemes are rejected and stripped to <code>""</code>.</li>
+          </ul>
+
+          <h3>5.2 Sections</h3>
+          <p>Both slot <code>settingsSchema</code> and plugin-level <code>globalSettingsSchema</code> group fields by <code>"section"</code> (matched case-insensitively):</p>
+          <ul>
+            <li>Canonical names: <code>"General"</code> (also default when omitted), <code>"Appearance"</code>, <code>"Trigger"</code>, <code>"Advanced"</code> (<strong>collapsed by default</strong> in Settings tabs).</li>
+            <li>Any other non-empty <code>"section"</code> creates a custom accordion group with that title.</li>
+          </ul>
+
+          <h3>5.3 Declarative <code>SettingField</code> Types</h3>
+          <p>Each field object supports: <code>key</code>, <code>label</code>, <code>type</code>, <code>section</code>, <code>default</code>, <code>placeholder</code>, <code>help</code>, <code>options</code> (<code>[{"label","value"}]</code>), <code>optionsKey</code>, <code>fileExtensions</code>, and <code>required</code>.</p>
+
+          <div tabindex="0" role="region" aria-labelledby="tbl-fields-caption" class="table-wrapper">
+            <table class="api-table table-field-types">
+              <caption id="tbl-fields-caption">Supported SettingField types for inspector and plugin settings forms</caption>
+              <thead>
+                <tr>
+                  <th scope="col"><code>type</code></th>
+                  <th scope="col">UI Control</th>
+                  <th scope="col">JSON Value / Shape</th>
+                  <th scope="col">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row"><code>"text"</code></th>
+                  <td>Single-line text entry</td>
+                  <td><code>string</code></td>
+                  <td>Default fallback if unknown type</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>"multiline"</code></th>
+                  <td>Multi-line text area (4+ rows)</td>
+                  <td><code>string</code></td>
+                  <td>Good for message templates, JSON, scripts</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>"password"</code></th>
+                  <td>Masked secret input + Clear checkbox</td>
+                  <td><code>string</code></td>
+                  <td>Stored in <strong>OS keyring</strong> (not <code>config.json</code>) in <code>globalSettingsSchema</code>. Omitting keeps existing secret; <code>""</code> clears it</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>"number"</code></th>
+                  <td>Numeric entry</td>
+                  <td><code>int</code> or <code>float64</code></td>
+                  <td>Parsed cleanly back to numeric JSON</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>"bool"</code></th>
+                  <td>Checkbox</td>
+                  <td><code>bool</code></td>
+                  <td>Toggle flag</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>"select"</code></th>
+                  <td>Dropdown (<code>options</code>) or editable combo (<code>optionsKey</code>)</td>
+                  <td><code>string</code></td>
+                  <td>Static choices via <code>"options": [{"label","value"}]</code></td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>"color"</code></th>
+                  <td>Color swatch picker + <code>#RRGGBB</code> input</td>
+                  <td><code>string</code> (<code>"#RRGGBB"</code>)</td>
+                  <td>Validated as <code>#RRGGBB</code> hex</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>"image"</code></th>
+                  <td>Image file chooser + preview/import</td>
+                  <td><code>string</code></td>
+                  <td>Imports assets cleanly</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>"file"</code></th>
+                  <td>File picker + path entry</td>
+                  <td><code>string</code></td>
+                  <td>Optional <code>"fileExtensions": [".wav", ".mp3"]</code> filter</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>"hotkey"</code></th>
+                  <td>Shortcut display + Capture button</td>
+                  <td><code>string</code></td>
+                  <td>Canonical hotkey chord (e.g. <code>"Ctrl+Shift+M"</code>)</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>"info"</code></th>
+                  <td>Read-only wrapped label (+ optional <strong>Copy</strong> button)</td>
+                  <td><code>string</code> or <code>{"text": "...", "copyable": true}</code></td>
+                  <td><strong>Display-only.</strong> Hidden completely (label, value, help) when text is empty. <code>{"text": "...", "copyable": true}</code> works both as a static schema <code>"default"</code> (inherited automatically by later plain-string updates) and as a dynamic runtime value; <code>copyable: true</code> renders bold monospace text with a <strong>Copy</strong> clipboard button</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>"link"</code></th>
+                  <td>Clickable browser hyperlink</td>
+                  <td><code>"https://..."</code> or <code>{"url": "...", "label": "..."}</code></td>
+                  <td><strong>Display-only.</strong> Only <code>"http"</code>/<code>"https"</code> URLs with non-empty host are rendered; empty/invalid hides the row. Uses <code>placeholder</code> as fallback label</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>"button"</code></th>
+                  <td>Interactive Fyne button</td>
+                  <td><code>{"label": "...", "disabled": bool}</code> or <code>string</code></td>
+                  <td><strong>Display-only / action trigger.</strong> Clicks invoke <code>pc_on_config_action</code> asynchronously with a 20s timeout</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>5.4 Interactive Config Tab Semantics (<code>globalSettingsSchema</code>)</h3>
+          <ol>
+            <li><strong>Display-only fields stay intact on Save:</strong> Clicking <strong>Save</strong> excludes <code>"info"</code>, <code>"link"</code>, and <code>"button"</code> keys from form collection while preserving existing plugin-managed metadata keys (e.g., <code>userId</code>, token expiry, status text, button state objects) stored in <code>PluginSettings</code>.</li>
+            <li><strong>OS Keyring protection:</strong> Untouched <code>"password"</code> inputs are omitted on <strong>Save</strong> so existing keyring credentials are preserved automatically. Unsaved text typed into a <code>"password"</code> box is preserved across background UI refreshes.</li>
+            <li><strong>Optional-override <code>"password"</code> fields:</strong> For credentials or IDs that ship with a built-in default (such as a public OAuth <code>clientId</code>), declare <code>"type": "password"</code> <strong>without</strong> <code>"default"</code> and provide an explanatory <code>"placeholder"</code>. Inside the plugin, persist <code>""</code> via <code>pc_save_global_settings</code> when falling back to the built-in value so the default is not saved into the OS keyring as a user override.</li>
+            <li><strong>Live updates:</strong> Calling <code>pc_save_global_settings</code> (for example after an interactive <code>pc_on_config_action</code> button click or during a background <code>pc_on_timer</code> auth poll) immediately updates <code>"info"</code>, <code>"link"</code>, <code>"button"</code>, and keyring status indicators on <strong>Settings &rarr; &lt;Plugin&gt;</strong> without losing form focus.</li>
+            <li><strong>Reset Defaults:</strong> Resets editable fields to their schema <code>default</code> values, clears keyring secrets (<code>""</code>), omits display-only keys so the plugin can recompute its status inside <code>pc_on_global_settings</code>, and rebuilds the form.</li>
+          </ol>
+        </section>
+
+        <section id="lifecycle" class="doc-section" tabindex="-1">
+          <h2>6. Lifecycle &amp; Best Practices</h2>
+          <ol>
+            <li><strong>Expect <code>willDisappear</code> on Plugin Disable:</strong> Users can toggle optional plugins (including <code>.wasm</code> plugins) off in <strong>Settings &rarr; Plugins</strong>. PoundControl dispatches <code>willDisappear</code> for every visible slot/dial using that plugin, blocks further <code>Dispatch</code> and <code>pc_on_config_action</code> calls, and preserves user slot configs until re-enabled. Stop background polling timers cleanly when no active slots or auth flows require them.</li>
+            <li><strong>Respect the 5s Timer Budget:</strong> <code>pc_on_timer</code> runs under a 5-second timeout (<code>defaultCallTimeout</code>). Avoid chaining multiple sequential outbound HTTP requests inside a single <code>pc_on_timer</code> callback — defer heavy status polling to the next timer tick or pass tight per-request <code>timeoutMs</code> values in <code>GuestHTTPRequest</code>.</li>
+            <li><strong>Keep Guest State Defensive Against Restarts:</strong> Because <strong>Reload Plugins</strong> tears down and re-instantiates the Wasm runtime, lazily hydrate persisted auth/state via <code>pc_get_global_settings</code> on first call rather than relying solely on in-memory globals.</li>
+          </ol>
+        </section>
+      </main>
+    </div>
+
+    <footer class="site-footer">
+      PoundControl is open source under the <a href="https://github.com/mrpoundsign/PoundControl/blob/main/LICENSE">GNU AGPL-3.0 License</a> &middot;
+      <a href="https://mrpoundsign.com/">mrpoundsign.com</a> &middot;
+      <a href="index.html">Overview</a> &middot;
+      <a href="install.html">Install</a> &middot;
+      <a href="https://github.com/mrpoundsign/PoundControl">GitHub</a>
+    </footer>
+  </div>
+</body>
+</html>

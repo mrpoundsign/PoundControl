@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="google-site-verification" content="RJ-0Jr9dzDzeXes7Bo1_Vgc5GKHw8R2ADLe-tBge_tU">
+  <title>Download &amp; Install — PoundControl Documentation</title>
+  <meta name="description" content="Download and install PoundControl on Windows, macOS, Linux, LAN browsers, Android, and Wear OS, plus checksum verification and building from source.">
+  <link rel="icon" type="image/png" href="icon.png">
+  <link rel="stylesheet" href="site.css">
+  <script src="site.js" defer></script>
+</head>
+<body>
+  <a href="#main-content" class="skip-link visually-hidden">Skip to main content</a>
+
+  <div class="app-shell">
+    <header class="site-header">
+      <div class="header-inner">
+        <a href="index.html" class="brand-link">
+          <img src="icon.png" alt="" class="brand-icon" width="32" height="32">
+          <span>PoundControl</span>
+          <span class="brand-badge">Docs</span>
+        </a>
+        <nav class="header-actions" aria-label="Primary actions">
+          <a href="install.html" class="header-btn">Download &amp; Install</a>
+          <a href="wasm-abi.html" class="header-btn">Wasm ABI</a>
+          <a href="https://github.com/mrpoundsign/PoundControl/releases/latest" class="header-btn header-btn-primary">Latest Release</a>
+          <a href="https://github.com/mrpoundsign/PoundControl" class="header-btn">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <div class="docs-layout">
+      <aside class="sidebar" aria-label="Documentation navigation">
+        <div class="sidebar-group">
+          <p class="sidebar-heading">Documentation</p>
+          <ul class="sidebar-nav">
+            <li><a href="index.html">Overview &amp; Features</a></li>
+            <li>
+              <a href="install.html" aria-current="page">Download &amp; Install</a>
+              <ul class="sidebar-subnav" aria-label="On this page">
+                <li><a href="#downloads">Release Downloads</a></li>
+                <li><a href="#windows">Windows</a></li>
+                <li><a href="#macos">macOS</a></li>
+                <li><a href="#linux">Linux</a></li>
+                <li><a href="#web-deck">Phone &amp; Tablet Web Deck</a></li>
+                <li><a href="#android">Android Companion App</a></li>
+                <li><a href="#wear-os">Wear OS Smartwatch Deck</a></li>
+                <li><a href="#verify">Verifying Downloads</a></li>
+                <li><a href="#source">Building from Source</a></li>
+              </ul>
+            </li>
+            <li><a href="wasm-abi.html">Wasm Plugin ABI</a></li>
+          </ul>
+        </div>
+
+        <div class="sidebar-group">
+          <p class="sidebar-heading">Ecosystem &amp; Source</p>
+          <ul class="sidebar-nav">
+            <li><a href="https://github.com/mrpoundsign/PoundControl/releases/latest">GitHub Releases</a></li>
+            <li><a href="https://github.com/mrpoundsign/PoundControl">Source Code (AGPL-3.0)</a></li>
+            <li><a href="https://github.com/mrpoundsign/PoundControl/blob/main/docs/WASM_PLUGIN_ABI.md">ABI Spec (Markdown)</a></li>
+            <li><a href="https://mrpoundsign.com/">mrpoundsign.com</a></li>
+            <li><a href="https://mrpoundsign.com/TownCrier/">TownCrier</a></li>
+            <li><a href="https://mrpoundsign.com/Hearsay/">Hearsay</a></li>
+            <li><a href="https://mrpoundsign.com/SVGTuber/">SVGTuber</a></li>
+            <li><a href="https://mrpoundsign.com/InkAnim/">InkAnim</a></li>
+          </ul>
+        </div>
+      </aside>
+
+      <main id="main-content" class="doc-content">
+        <section class="hero">
+          <span class="hero-eyebrow">Getting Started</span>
+          <h1>Download &amp; Install PoundControl</h1>
+          <p class="hero-lead">
+            Pick the release package for your desktop operating system, phone, or smartwatch from the <a href="https://github.com/mrpoundsign/PoundControl/releases/latest">Latest GitHub Release</a>.
+          </p>
+          <div class="hero-actions">
+            <a href="https://github.com/mrpoundsign/PoundControl/releases/latest" class="header-btn header-btn-primary">Open Latest Release on GitHub</a>
+          </div>
+        </section>
+
+        <section id="downloads" class="doc-section" tabindex="-1">
+          <h2>Release Downloads Overview</h2>
+          <p>
+            Every tagged release publishes prebuilt artifacts for desktop and mobile platforms along with checksums and GitHub Actions SLSA provenance attestations.
+          </p>
+
+          <div tabindex="0" role="region" aria-labelledby="tbl-downloads-caption" class="table-wrapper">
+            <table class="api-table table-downloads">
+              <caption id="tbl-downloads-caption">Official release artifacts by platform</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Platform</th>
+                  <th scope="col">Recommended Download</th>
+                  <th scope="col">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">Windows (64-bit)</th>
+                  <td><code>PoundControl_v*_windows_amd64_setup.exe</code></td>
+                  <td>Guided installer with shortcuts, clean uninstall, and SHA-256 self-updates (portable <code>.exe</code> also available).</td>
+                </tr>
+                <tr>
+                  <th scope="row">macOS (Universal)</th>
+                  <td><code>PoundControl_v*_darwin_all.zip</code></td>
+                  <td>Extracts <code>PoundControl.app</code> for Apple Silicon and Intel Macs.</td>
+                </tr>
+                <tr>
+                  <th scope="row">Linux (x86_64)</th>
+                  <td><code>PoundControl_v*_linux_amd64.tar.gz</code></td>
+                  <td>Standalone <code>poundcontrol</code> binary archive for desktop Linux.</td>
+                </tr>
+                <tr>
+                  <th scope="row">Android (8.0+)</th>
+                  <td><code>PoundControl_v*_android.apk</code></td>
+                  <td>Phone &amp; tablet companion app; also acts as bridge for Wear OS watches.</td>
+                </tr>
+                <tr>
+                  <th scope="row">Wear OS</th>
+                  <td><code>PoundControl_v*_wear.apk</code></td>
+                  <td>Smartwatch deck &amp; watch face complication; pair via the Android companion app.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="windows" class="doc-section" tabindex="-1">
+          <h2>Windows (64-bit)</h2>
+          <ul>
+            <li><strong>Guided Installer (Recommended):</strong> Download <code>PoundControl_v*_windows_amd64_setup.exe</code> and double-click to install with Start Menu / Desktop shortcuts, clean uninstall support, and automatic SHA-256 self-updates.</li>
+            <li><strong>Portable Binary:</strong> Download <code>PoundControl_v*_windows_amd64.exe</code> and run it directly from any folder — no installation needed.</li>
+          </ul>
+          <div class="callout">
+            <strong>SmartScreen first-launch note:</strong> Because release binaries are not signed with a commercial EV certificate, Windows SmartScreen may show <em>"Windows protected your PC"</em>. Click <strong>More info &rarr; Run anyway</strong>, or verify the binary using <a href="#verify">checksums / SLSA provenance</a> below.
+          </div>
+        </section>
+
+        <section id="macos" class="doc-section" tabindex="-1">
+          <h2>macOS</h2>
+          <ol>
+            <li>Download <code>PoundControl_v*_darwin_all.zip</code> from the <a href="https://github.com/mrpoundsign/PoundControl/releases/latest">Latest Release</a> and unzip it.</li>
+            <li>Drag <code>PoundControl.app</code> into your <strong>Applications</strong> folder.</li>
+            <li>On first launch, if macOS Gatekeeper warns about an unidentified developer, <strong>Control-click (right-click) <code>PoundControl.app</code> &rarr; Open &rarr; Open</strong>, or open <strong>System Settings &rarr; Privacy &amp; Security &rarr; Open Anyway</strong>.</li>
+          </ol>
+        </section>
+
+        <section id="linux" class="doc-section" tabindex="-1">
+          <h2>Linux (<code>x86_64</code>)</h2>
+          <ol>
+            <li>Download <code>PoundControl_v*_linux_amd64.tar.gz</code> from the <a href="https://github.com/mrpoundsign/PoundControl/releases/latest">Latest Release</a>.</li>
+            <li>Extract and run (optionally move <code>poundcontrol</code> onto your <code>PATH</code> such as <code>~/.local/bin/poundcontrol</code>):</li>
+          </ol>
+
+          <figure class="code-figure">
+            <figcaption>Extract and launch PoundControl on Linux</figcaption>
+            <div class="copyable">
+              <pre><code id="code-linux-install">mkdir -p poundcontrol &amp;&amp; tar -xzf PoundControl_v*_linux_amd64.tar.gz -C poundcontrol
+cd poundcontrol
+./poundcontrol</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-linux-install" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+        </section>
+
+        <section id="web-deck" class="doc-section" tabindex="-1">
+          <h2>Phone &amp; Tablet Touch Deck (Zero-Install Browser Mode)</h2>
+          <p>Use any phone, iPad, or secondary device on the same Wi-Fi network without installing an app:</p>
+          <ol>
+            <li>In <strong>PoundControl Desktop</strong>, open <strong>Settings &rarr; Web Deck</strong> and make sure <strong>Enable LAN Web Touch Deck</strong> is checked.</li>
+            <li>Click <strong>Pair New Device</strong> to display a temporary <strong>6-digit PIN</strong> and <strong>QR code</strong>.</li>
+            <li>Scan the QR code with your phone/tablet camera (or open the shown URL and enter the PIN), then approve the pairing prompt in Desktop Studio.</li>
+          </ol>
+        </section>
+
+        <section id="android" class="doc-section" tabindex="-1">
+          <h2>Android Companion App</h2>
+          <ol>
+            <li>On your Android phone or tablet (Android 8.0+), download <code>PoundControl_v*_android.apk</code> from the <a href="https://github.com/mrpoundsign/PoundControl/releases/latest">Latest Release</a>.</li>
+            <li>Tap the downloaded APK and allow <strong>Install unknown apps</strong> when prompted by Android.</li>
+            <li>Launch <strong>PoundControl</strong>, open <strong>Settings &rarr; Web Deck &rarr; Pair New Device</strong> on your desktop, and scan the QR code to connect.</li>
+          </ol>
+        </section>
+
+        <section id="wear-os" class="doc-section" tabindex="-1">
+          <h2>Wear OS Smartwatch Deck</h2>
+          <p>The Wear OS watch app communicates with your desktop through the <strong>PoundControl Android companion app</strong> over Bluetooth/Wearable Data Layer:</p>
+          <ol>
+            <li>Install and pair the <strong>Android companion app</strong> (<code>PoundControl_v*_android.apk</code>) on the phone paired to your watch first.</li>
+            <li>Enable <strong>Developer options &rarr; ADB debugging</strong> (or <strong>Wireless debugging</strong>) on your Wear OS watch and install <code>PoundControl_v*_wear.apk</code> (or sideload with a Wear OS installer app):</li>
+          </ol>
+
+          <figure class="code-figure">
+            <figcaption>Install the Wear OS APK via ADB</figcaption>
+            <div class="copyable">
+              <pre><code id="code-wear-adb">adb install PoundControl_v*_wear.apk</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-wear-adb" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+
+          <p>Launch <strong>PoundControl</strong> on your watch to tap deck buttons, navigate pages/folders, adjust rotary dials, or add the <strong>PoundControl</strong> watch face complication.</p>
+        </section>
+
+        <section id="verify" class="doc-section" tabindex="-1">
+          <h2>Verifying Downloads</h2>
+          <p>Every release includes <code>checksums.txt</code>, <code>SHA256SUMS.txt</code>, and keyless <strong>SLSA Build Provenance</strong> attestations generated directly by GitHub Actions:</p>
+
+          <figure class="code-figure">
+            <figcaption>Verify SHA-256 checksums or GitHub SLSA Build Provenance</figcaption>
+            <div class="copyable">
+              <pre><code id="code-verify-release"># Check SHA-256 checksum
+sha256sum -c checksums.txt --ignore-missing
+
+# Or verify GitHub SLSA Build Provenance with GitHub CLI
+gh attestation verify &lt;downloaded-file&gt; --repo mrpoundsign/PoundControl</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-verify-release" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+        </section>
+
+        <section id="source" class="doc-section" tabindex="-1">
+          <h2>Building from Source</h2>
+          <p>Build scripts handle linting (<code>go fix -diff</code> and <code>golangci-lint-v2</code>), unit/headless UI tests, desktop binaries, Windows setup installer, and Android/Wear APKs.</p>
+
+          <figure class="code-figure">
+            <figcaption>Windows (PowerShell with Zig CGo)</figcaption>
+            <div class="copyable">
+              <pre><code id="code-build-ps1">.\build.ps1                   # Run lint, unit/UI tests, and build GUI -&gt; build\bin\poundcontrol.exe
+.\build.ps1 -Target gui       # Build GUI only -&gt; build\bin\poundcontrol.exe
+.\build.ps1 -Target installer # Build Windows installer -&gt; build\bin\PoundControl-Setup.exe
+.\build.ps1 -Target android   # Test &amp; build both Android and Wear OS APKs -&gt; build\bin\
+.\build.ps1 -Target test      # Run all unit &amp; headless UI tests
+.\build.ps1 -Target lint      # Run go fix -diff and golangci-lint-v2
+.\build.ps1 -Target check     # Validate GoReleaser configuration</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-build-ps1" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+
+          <figure class="code-figure">
+            <figcaption>Linux / macOS / WSL (Bash)</figcaption>
+            <div class="copyable">
+              <pre><code id="code-build-sh">./build.sh            # Run lint, tests, and native GUI build -&gt; build/bin/poundcontrol
+./build.sh gui-win    # Cross-compile Windows GUI -&gt; build/bin/poundcontrol.exe
+./build.sh android    # Build Android and Wear OS APKs -&gt; build/bin/
+./build.sh test       # Run all unit &amp; headless UI tests
+./build.sh lint       # Run go fix -diff and golangci-lint-v2</code></pre>
+              <button type="button" class="copy-button" command="--copy" commandfor="code-build-sh" aria-label="Copy code snippet">
+                <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </button>
+              <span class="tip" role="status"></span>
+            </div>
+          </figure>
+        </section>
+      </main>
+    </div>
+
+    <footer class="site-footer">
+      PoundControl is open source under the <a href="https://github.com/mrpoundsign/PoundControl/blob/main/LICENSE">GNU AGPL-3.0 License</a> &middot;
+      <a href="https://mrpoundsign.com/">mrpoundsign.com</a> &middot;
+      <a href="index.html">Overview</a> &middot;
+      <a href="wasm-abi.html">Wasm ABI</a> &middot;
+      <a href="https://github.com/mrpoundsign/PoundControl">GitHub</a>
+    </footer>
+  </div>
+</body>
+</html>
