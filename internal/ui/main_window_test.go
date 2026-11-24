@@ -2452,3 +2452,60 @@ func TestMainWindowEnableDisablePluginsAndPreserveButtonSettings(t *testing.T) {
 		t.Fatalf("expected Soundboard slot cleanly restored with preserved settings, got %+v", restored)
 	}
 }
+
+func TestActionCatalogWasmIconsAndUniqueResourceCache(t *testing.T) {
+	eng, _, mw := newTestStudio(t)
+
+	const (
+		wasmPluginUUID = "com.test.wasm.icons"
+		catSVG         = `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" fill="%239146FF"/></svg>`
+		act1SVG        = `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="%2338BDF8"/></svg>`
+		act2SVG        = `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><polygon points="12,2 22,22 2,22" fill="%2310B981"/></svg>`
+	)
+	prov := &fakeConfigurablePluginProvider{
+		manifest: plugin.Manifest{
+			UUID:         wasmPluginUUID,
+			Name:         "Wasm Icons",
+			Version:      "1.0.0",
+			CategoryIcon: catSVG,
+			Provider:     plugin.ProviderWasm,
+			Actions: []plugin.ActionDescriptor{
+				{
+					UUID:       wasmPluginUUID + ".one",
+					PluginUUID: wasmPluginUUID,
+					Name:       "Action One",
+					Category:   "Wasm Icons",
+					Icon:       act1SVG,
+					Provider:   plugin.ProviderWasm,
+				},
+				{
+					UUID:         wasmPluginUUID + ".two",
+					PluginUUID:   wasmPluginUUID,
+					Name:         "Action Two",
+					Category:     "Wasm Icons",
+					Icon:         act2SVG,
+					DefaultImage: act2SVG,
+					Provider:     plugin.ProviderWasm,
+				},
+			},
+		},
+	}
+	if err := eng.Registry().RegisterProvider(prov); err != nil {
+		t.Fatalf("RegisterProvider() error = %v", err)
+	}
+	mw.RefreshActionCatalog()
+
+	hdr := mw.catalogGroupHeaders["Wasm Icons"]
+	btn1 := mw.catalogButtons[wasmPluginUUID+".one"]
+	btn2 := mw.catalogButtons[wasmPluginUUID+".two"]
+	if hdr == nil || hdr.Icon == nil || btn1 == nil || btn1.Icon == nil || btn2 == nil || btn2.Icon == nil {
+		t.Fatalf("expected non-nil icons for Wasm header and actions: hdr=%v btn1=%v btn2=%v", hdr, btn1, btn2)
+	}
+	if hdr.Icon.Name() == btn1.Icon.Name() || hdr.Icon.Name() == btn2.Icon.Name() || btn1.Icon.Name() == btn2.Icon.Name() {
+		t.Fatalf("expected distinct Fyne resource names for distinct data URI icons, got hdr=%q act1=%q act2=%q",
+			hdr.Icon.Name(), btn1.Icon.Name(), btn2.Icon.Name())
+	}
+	if bytes.Equal(btn1.Icon.Content(), btn2.Icon.Content()) {
+		t.Fatal("expected distinct decoded icon bytes for distinct Wasm action icons")
+	}
+}

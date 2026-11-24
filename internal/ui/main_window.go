@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"image/color"
@@ -1686,7 +1687,8 @@ func (mw *MainWindow) loadCatalogIconResource(uri string) fyne.Resource {
 		mw.catalogIconCache[key] = nil
 		return nil
 	}
-	res := fyne.NewStaticResource("catalog-"+filepath.Base(key)+".png", buf.Bytes())
+	sum := sha256.Sum256([]byte(key))
+	res := fyne.NewStaticResource(fmt.Sprintf("catalog-%x.png", sum), buf.Bytes())
 	mw.catalogIconCache[key] = res
 	return res
 }
