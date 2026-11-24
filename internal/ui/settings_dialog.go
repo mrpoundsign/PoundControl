@@ -1,13 +1,10 @@
 package ui
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"fmt"
 	"image"
-	_ "image/jpeg"
-	_ "image/png"
 	"slices"
 	"strings"
 	"sync"
@@ -20,12 +17,14 @@ import (
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"github.com/mrpoundsign/appinstaller/pkg/updater"
 
 	"github.com/mrpoundsign/PoundControl/internal/app"
 	"github.com/mrpoundsign/PoundControl/internal/version"
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/obs"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 	"github.com/mrpoundsign/PoundControl/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/pluginmgr"
 	"github.com/mrpoundsign/PoundControl/pkg/sdplugin"
 	"github.com/mrpoundsign/PoundControl/pkg/wasmplugin"
 )
@@ -100,6 +99,18 @@ func buildSettingsTabsView(
 		}
 	}
 
+	autoPluginUpdateCheck := widget.NewCheck("Check for plugin updates on startup", nil)
+	if a := fyne.CurrentApp(); a != nil {
+		autoPluginUpdateCheck.Checked = a.Preferences().BoolWithFallback(prefCheckPluginUpdatesOnStartup, true)
+	} else {
+		autoPluginUpdateCheck.Checked = true
+	}
+	autoPluginUpdateCheck.OnChanged = func(checked bool) {
+		if a := fyne.CurrentApp(); a != nil {
+			a.Preferences().SetBool(prefCheckPluginUpdatesOnStartup, checked)
+		}
+	}
+
 	paletteSection, generalCleanup := buildPaletteSettingsSection(win, engine, onStatus)
 	generalTab := container.NewVBox(
 		widget.NewForm(
@@ -112,6 +123,7 @@ func buildSettingsTabsView(
 		widget.NewSeparator(),
 		container.NewHBox(popOutBtn, checkUpdatesBtn),
 		autoUpdateCheck,
+		autoPluginUpdateCheck,
 		updateStatusLbl,
 		widget.NewSeparator(),
 		paletteSection,
@@ -335,8 +347,10 @@ func buildPluginsSettingsTab(
 	sdCtrl SDPluginController,
 	wasmCtrl WasmPluginController,
 	catalogueClient *sdplugin.CatalogueClient,
+	pluginMgr *pluginmgr.Manager,
 	piViewer PIViewer,
 	onReloadPlugins func() error,
+	onSyncPlugins func() error,
 	onConfigurePlugin func(string),
 	onSetPluginEnabled func(string, bool) error,
 	onStatus func(string),
@@ -424,12 +438,14 @@ func buildPluginsSettingsTab(
 		cleanups  []func()
 	)
 
-	reloadAll := func(reason string) {
+	applySyncOrReload := func(reason string, rescan bool) {
 		var err error
 		switch {
-		case onReloadPlugins != nil:
+		case !rescan && onSyncPlugins != nil:
+			err = onSyncPlugins()
+		case rescan && onReloadPlugins != nil:
 			err = onReloadPlugins()
-		default:
+		case rescan:
 			if sdCtrl != nil {
 				err = sdCtrl.Reload()
 			}
@@ -449,21 +465,48 @@ func buildPluginsSettingsTab(
 			fn()
 		}
 	}
+	reloadAll := func(reason string) { applySyncOrReload(reason, true) }
+	syncAll := func(reason string) { applySyncOrReload(reason, false) }
 
-	items := []fyne.CanvasObject{
-		widget.NewLabelWithStyle("Features & Plugins", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		providersBox,
-	}
-
-	if sdCtrl == nil && wasmCtrl == nil {
+	if pluginMgr == nil && sdCtrl == nil && wasmCtrl == nil {
 		msg := widget.NewLabel("External plugin host controllers are not attached in this mode.")
 		msg.Wrapping = fyne.TextWrapWord
-		items = append(items, widget.NewSeparator(), msg)
+		items := []fyne.CanvasObject{
+			widget.NewLabelWithStyle("Features & Plugins", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			providersBox,
+			widget.NewSeparator(),
+			msg,
+		}
 		return container.NewScroll(container.NewPadded(container.NewVBox(items...))), nil
 	}
 
+	effectiveCatalogueClient := catalogueClient
+	if effectiveCatalogueClient == nil && pluginMgr != nil && pluginMgr.OpenActionClient != nil {
+		effectiveCatalogueClient = pluginMgr.OpenActionClient
+	}
+	if pluginMgr == nil {
+		pluginMgr = pluginmgr.NewManager(nil, effectiveCatalogueClient, wasmCtrl, sdCtrl)
+	}
+
+	var items []fyne.CanvasObject
+	catObj, catRefresh, catCleanup := buildPluginCatalogsAndUpdatesSection(
+		win, pluginMgr, sdCtrl, wasmCtrl, effectiveCatalogueClient, piViewer, syncAll, onConfigurePlugin, onStatus,
+	)
+	items = append(items,
+		catObj,
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Features & Plugins", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		providersBox,
+	)
+	if catRefresh != nil {
+		refreshes = append(refreshes, catRefresh)
+	}
+	if catCleanup != nil {
+		cleanups = append(cleanups, catCleanup)
+	}
+
 	if sdCtrl != nil {
-		sdObj, sdRefresh, sdCleanup := buildSDPluginSection(win, sdCtrl, catalogueClient, piViewer, reloadAll, onStatus)
+		sdObj, sdRefresh, sdCleanup := buildSDPluginSection(win, sdCtrl, pluginMgr, reloadAll, syncAll, onStatus)
 		items = append(items, widget.NewSeparator(), sdObj)
 		if sdRefresh != nil {
 			refreshes = append(refreshes, sdRefresh)
@@ -474,10 +517,13 @@ func buildPluginsSettingsTab(
 	}
 
 	if wasmCtrl != nil {
-		wasmObj, wasmRefresh := buildWasmPluginSection(win, wasmCtrl, reloadAll, onConfigurePlugin, onStatus)
+		wasmObj, wasmRefresh, wasmCleanup := buildWasmPluginSection(win, wasmCtrl, pluginMgr, reloadAll, syncAll, onConfigurePlugin, onStatus)
 		items = append(items, widget.NewSeparator(), wasmObj)
 		if wasmRefresh != nil {
 			refreshes = append(refreshes, wasmRefresh)
+		}
+		if wasmCleanup != nil {
+			cleanups = append(cleanups, wasmCleanup)
 		}
 	}
 
@@ -489,16 +535,271 @@ func buildPluginsSettingsTab(
 	return container.NewScroll(container.NewPadded(container.NewVBox(items...))), cleanup
 }
 
-func buildSDPluginSection(
+func buildPluginCatalogsAndUpdatesSection(
 	win fyne.Window,
+	pluginMgr *pluginmgr.Manager,
 	sdCtrl SDPluginController,
+	wasmCtrl WasmPluginController,
 	catalogueClient *sdplugin.CatalogueClient,
 	piViewer PIViewer,
 	reloadAll func(string),
+	onConfigurePlugin func(string),
+	onStatus func(string),
+) (fyne.CanvasObject, func(), func()) {
+	var (
+		closed atomic.Bool
+		busy   atomic.Bool
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	updatesStatusLbl := widget.NewLabel("Browse verified curated plugins or check installed plugins for updates.")
+	updatesStatusLbl.Wrapping = fyne.TextWrapWord
+
+	updatesBox := container.NewVBox()
+	var updateAllBtn *widget.Button
+	var checkUpdatesBtn *widget.Button
+
+	curatedBtn := widget.NewButtonWithIcon("Browse Curated Plugins...", theme.SearchIcon(), func() {
+		showCuratedPluginsDialog(win, pluginMgr, sdCtrl, wasmCtrl, piViewer, reloadAll, onConfigurePlugin, onStatus)
+	})
+	curatedBtn.Importance = widget.HighImportance
+
+	btnRow := []fyne.CanvasObject{curatedBtn}
+	if sdCtrl != nil {
+		btnRow = append(btnRow, widget.NewButtonWithIcon("Browse OpenAction Marketplace...", theme.SearchIcon(), func() {
+			showOpenActionMarketplaceDialog(win, sdCtrl, catalogueClient, pluginMgr, piViewer, reloadAll, onStatus)
+		}))
+	}
+
+	runSingleUpdate := func(upd pluginmgr.PluginUpdate) {
+		applyPluginUpdateAsync(ctx, &closed, &busy, pluginMgr, upd, func(msg string) {
+			updatesStatusLbl.SetText(msg)
+		}, reloadAll, onStatus)
+	}
+
+	refreshUpdates := func() {
+		sum := pluginMgr.LatestSummary()
+		updatesBox.Objects = nil
+
+		if !sum.CheckedAt.IsZero() {
+			switch {
+			case len(sum.Updates) == 0 && len(sum.Errors) == 0:
+				updatesStatusLbl.SetText(fmt.Sprintf("All %d managed plugin(s) are up to date.", sum.CheckedCount))
+			case len(sum.Updates) == 0:
+				updatesStatusLbl.SetText(fmt.Sprintf("Checked %d managed plugin(s) with %d warning(s): %s",
+					sum.CheckedCount, len(sum.Errors), sum.Errors[0]))
+			case len(sum.Updates) == 1:
+				updatesStatusLbl.SetText("1 plugin update available.")
+			default:
+				updatesStatusLbl.SetText(fmt.Sprintf("%d plugin updates available.", len(sum.Updates)))
+			}
+		}
+
+		if len(sum.Updates) == 0 {
+			updateAllBtn.Hide()
+			updatesBox.Refresh()
+			return
+		}
+
+		updateAllBtn.SetText(fmt.Sprintf("Update All (%d)", len(sum.Updates)))
+		updateAllBtn.Show()
+
+		for _, item := range sum.Updates {
+			upd := item
+			title := fmt.Sprintf("%s [%s] • v%s -> v%s", upd.Name, upd.Kind, upd.CurrentVersion, upd.LatestVersion)
+			titleLbl := widget.NewLabel(title)
+			titleLbl.TextStyle = fyne.TextStyle{Bold: true}
+			titleLbl.Wrapping = fyne.TextWrapWord
+
+			updBtn := widget.NewButtonWithIcon("Update", theme.DownloadIcon(), func() {
+				runSingleUpdate(upd)
+			})
+			updBtn.Importance = widget.HighImportance
+
+			row := container.NewBorder(nil, nil, nil, updBtn, titleLbl)
+			subText := "Source: " + upd.Source
+			if upd.ReleaseNotes != "" {
+				firstLine, _, _ := strings.Cut(upd.ReleaseNotes, "\n")
+				if firstLine = strings.TrimSpace(firstLine); firstLine != "" {
+					subText += " — " + firstLine
+				}
+			}
+			subLbl := widget.NewLabel(subText)
+			subLbl.Wrapping = fyne.TextWrapWord
+			updatesBox.Add(container.NewVBox(row, subLbl, widget.NewSeparator()))
+		}
+		updatesBox.Refresh()
+	}
+
+	checkUpdatesBtn = widget.NewButtonWithIcon("Check for Plugin Updates", theme.ViewRefreshIcon(), func() {
+		if !busy.CompareAndSwap(false, true) {
+			return
+		}
+		checkUpdatesBtn.Disable()
+		updatesStatusLbl.SetText("Checking installed plugins for updates...")
+		go func() {
+			pluginMgr.CheckUpdates(ctx, true)
+			busy.Store(false)
+			dispatchUI(func() {
+				if closed.Load() {
+					return
+				}
+				checkUpdatesBtn.Enable()
+				refreshUpdates()
+			})
+		}()
+	})
+	btnRow = append(btnRow, checkUpdatesBtn)
+
+	updateAllBtn = widget.NewButtonWithIcon("Update All", theme.DownloadIcon(), func() {
+		pending := pluginMgr.LatestSummary().Updates
+		if len(pending) == 0 || !busy.CompareAndSwap(false, true) {
+			return
+		}
+		updateAllBtn.Disable()
+		checkUpdatesBtn.Disable()
+		go func(list []pluginmgr.PluginUpdate) {
+			updatedCount := 0
+			var failures []string
+			for _, item := range list {
+				upd := item
+				dispatchUI(func() {
+					if !closed.Load() {
+						updatesStatusLbl.SetText(fmt.Sprintf("Updating %s to v%s...", upd.Name, upd.LatestVersion))
+					}
+				})
+				if err := pluginMgr.ApplyUpdate(ctx, upd, nil); err != nil {
+					failures = append(failures, fmt.Sprintf("%s: %v", upd.Name, err))
+				} else {
+					updatedCount++
+				}
+			}
+			busy.Store(false)
+			dispatchUI(func() {
+				if closed.Load() {
+					return
+				}
+				updateAllBtn.Enable()
+				checkUpdatesBtn.Enable()
+				var msg string
+				if len(failures) > 0 {
+					msg = fmt.Sprintf("Updated %d plugin(s); %d failed (%s)", updatedCount, len(failures), failures[0])
+				} else {
+					msg = fmt.Sprintf("Updated %d plugin(s)", updatedCount)
+				}
+				updatesStatusLbl.SetText(msg)
+				reloadAll(msg)
+			})
+		}(pending)
+	})
+	updateAllBtn.Importance = widget.HighImportance
+	updateAllBtn.Hide()
+	btnRow = append(btnRow, updateAllBtn)
+
+	unsub := pluginMgr.SubscribeUpdates(func(_ pluginmgr.UpdateSummary) {
+		dispatchUI(func() {
+			if !closed.Load() {
+				refreshUpdates()
+			}
+		})
+	})
+
+	refreshUpdates()
+
+	section := container.NewVBox(
+		widget.NewLabelWithStyle("Plugin Catalogs & Updates", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		container.NewHBox(btnRow...),
+		updatesStatusLbl,
+		updatesBox,
+	)
+	cleanup := func() {
+		closed.Store(true)
+		unsub()
+		cancel()
+	}
+	return section, refreshUpdates, cleanup
+}
+
+func pendingUpdatesByID(mgr *pluginmgr.Manager) map[string]pluginmgr.PluginUpdate {
+	out := make(map[string]pluginmgr.PluginUpdate)
+	if mgr == nil {
+		return out
+	}
+	for _, upd := range mgr.LatestSummary().Updates {
+		out[strings.ToLower(upd.UUID)] = upd
+	}
+	return out
+}
+
+func applyPluginUpdateAsync(
+	ctx context.Context,
+	closed *atomic.Bool,
+	busy *atomic.Bool,
+	pluginMgr *pluginmgr.Manager,
+	upd pluginmgr.PluginUpdate,
+	setProgress func(string),
+	reloadAll func(string),
+	onStatus func(string),
+) {
+	if pluginMgr == nil || !busy.CompareAndSwap(false, true) {
+		return
+	}
+	startMsg := fmt.Sprintf("Updating %s to v%s...", upd.Name, upd.LatestVersion)
+	if setProgress != nil {
+		setProgress(startMsg)
+	}
+	if onStatus != nil {
+		onStatus(startMsg)
+	}
+	go func() {
+		err := pluginMgr.ApplyUpdate(ctx, upd, func(_, _ int64, stage string) {
+			dispatchUI(func() {
+				if closed.Load() {
+					return
+				}
+				msg := fmt.Sprintf("%s: %s", upd.Name, stage)
+				if setProgress != nil {
+					setProgress(msg)
+				}
+			})
+		})
+		busy.Store(false)
+		dispatchUI(func() {
+			if closed.Load() {
+				return
+			}
+			if err != nil {
+				msg := fmt.Sprintf("Update %s failed: %v", upd.Name, err)
+				if setProgress != nil {
+					setProgress(msg)
+				}
+				if onStatus != nil {
+					onStatus(msg)
+				}
+				return
+			}
+			msg := fmt.Sprintf("Updated %s to v%s", upd.Name, upd.LatestVersion)
+			if setProgress != nil {
+				setProgress(msg)
+			}
+			if reloadAll != nil {
+				reloadAll(msg)
+			}
+		})
+	}()
+}
+
+func buildSDPluginSection(
+	win fyne.Window,
+	sdCtrl SDPluginController,
+	pluginMgr *pluginmgr.Manager,
+	reloadAll func(string),
+	syncAll func(string),
 	onStatus func(string),
 ) (fyne.CanvasObject, func(), func()) {
 	var (
 		closed         atomic.Bool
+		updBusy        atomic.Bool
 		dlMu           sync.Mutex
 		dlCancel       context.CancelFunc
 		nodeStatus     *widget.Label
@@ -510,6 +811,7 @@ func buildSDPluginSection(
 		scanOpenDeckCh *widget.Check
 		nodePathEnt    *widget.Entry
 	)
+	updCtx, updCancel := context.WithCancel(context.Background())
 	extraContainer := container.NewVBox()
 	pluginsContainer := container.NewVBox()
 
@@ -654,11 +956,6 @@ func buildSDPluginSection(
 		scanOpenDeckBox = container.NewVBox(scanOpenDeckCh, dirLbl)
 	}
 
-	marketplaceBtn := widget.NewButtonWithIcon("Browse OpenAction Marketplace...", theme.SearchIcon(), func() {
-		showOpenActionMarketplaceDialog(win, sdCtrl, catalogueClient, piViewer, reloadAll, onStatus)
-	})
-	marketplaceBtn.Importance = widget.HighImportance
-
 	installArchiveBtn := widget.NewButtonWithIcon("Install Archive (.streamDeckPlugin / .zip)...", theme.FileApplicationIcon(), func() {
 		fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
 			if err != nil || r == nil {
@@ -674,7 +971,10 @@ func buildSDPluginSection(
 				dialog.ShowError(instErr, win)
 				return
 			}
-			reloadAll(fmt.Sprintf("Installed plugin %s (%s)", bundle.Manifest.Name, bundle.UUID))
+			if pluginMgr != nil {
+				pluginMgr.NotifyPluginInstalled(bundle.UUID, bundle.Manifest.Version)
+			}
+			syncAll(fmt.Sprintf("Installed plugin %s (%s)", bundle.Manifest.Name, bundle.UUID))
 		}, win)
 		fd.SetFilter(storage.NewExtensionFileFilter([]string{".streamDeckPlugin", ".streamdeckplugin", ".zip"}))
 		fd.Show()
@@ -753,6 +1053,7 @@ func buildSDPluginSection(
 
 		pluginsContainer.Objects = nil
 		statuses := sdCtrl.Plugins()
+		updatesByID := pendingUpdatesByID(pluginMgr)
 		if len(statuses) == 0 {
 			noneLbl := widget.NewLabel("No .sdPlugin bundles discovered yet. Place bundles in the default folder or add a custom path above.")
 			noneLbl.Wrapping = fyne.TextWrapWord
@@ -802,6 +1103,15 @@ func buildSDPluginSection(
 				if sdCtrl.IsUserManagedPlugin(st.Dir) {
 					pluginUUID := st.UUID
 					pluginName := st.Name
+					var btns []fyne.CanvasObject
+					if upd, hasUpdate := updatesByID[strings.ToLower(st.UUID)]; hasUpdate {
+						updCopy := upd
+						updBtn := widget.NewButtonWithIcon("Update to v"+updCopy.LatestVersion, theme.DownloadIcon(), func() {
+							applyPluginUpdateAsync(updCtx, &closed, &updBusy, pluginMgr, updCopy, nil, syncAll, onStatus)
+						})
+						updBtn.Importance = widget.HighImportance
+						btns = append(btns, updBtn)
+					}
 					uninstBtn := widget.NewButtonWithIcon("Uninstall", theme.DeleteIcon(), func() {
 						if err := sdCtrl.UninstallPlugin(pluginUUID); err != nil {
 							if onStatus != nil {
@@ -810,9 +1120,13 @@ func buildSDPluginSection(
 							dialog.ShowError(err, win)
 							return
 						}
-						reloadAll("Uninstalled plugin " + pluginName)
+						if pluginMgr != nil {
+							pluginMgr.NotifyPluginRemoved(pluginUUID)
+						}
+						syncAll("Uninstalled plugin " + pluginName)
 					})
-					headerRow = container.NewBorder(nil, nil, nil, uninstBtn, titleLbl)
+					btns = append(btns, uninstBtn)
+					headerRow = container.NewBorder(nil, nil, nil, container.NewHBox(btns...), titleLbl)
 				}
 
 				pluginsContainer.Add(container.NewVBox(headerRow, metaLbl, widget.NewSeparator()))
@@ -824,8 +1138,8 @@ func buildSDPluginSection(
 	refreshState()
 
 	content := container.NewVBox(
-		widget.NewLabelWithStyle("OpenAction Marketplace & Plugin Archives", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		container.NewHBox(marketplaceBtn, installArchiveBtn),
+		widget.NewLabelWithStyle("Local .sdPlugin Archives & Node.js Runtime", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		container.NewHBox(installArchiveBtn),
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Node.js Runtime (for .sdPlugin bundles)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		nodeStatus,
@@ -850,6 +1164,7 @@ func buildSDPluginSection(
 
 	cleanup := func() {
 		closed.Store(true)
+		updCancel()
 		dlMu.Lock()
 		if dlCancel != nil {
 			dlCancel()
@@ -864,6 +1179,7 @@ func showOpenActionMarketplaceDialog(
 	win fyne.Window,
 	sdCtrl SDPluginController,
 	client *sdplugin.CatalogueClient,
+	pluginMgr *pluginmgr.Manager,
 	piViewer PIViewer,
 	reloadAll func(string),
 	onStatus func(string),
@@ -895,42 +1211,14 @@ func showOpenActionMarketplaceDialog(
 		statusLbl.SetText("Loading full info & README for " + item.Name + "...")
 		go func() {
 			details := client.FetchPluginDetails(ctx, item)
-			htmlPage := sdplugin.RenderPluginDetailsHTML(details)
-			detailURL, hasURL := sdCtrl.RegisterMarketplaceDetailPage(htmlPage)
 			dispatchUI(func() {
 				if closed.Load() {
 					return
 				}
-				if hasURL && piViewer != nil {
-					if err := piViewer.Open(item.Name+" — Plugin Info", detailURL); err != nil {
-						statusLbl.SetText(fmt.Sprintf("Failed to open info for %s: %v", item.Name, err))
-						return
-					}
-					statusLbl.SetText("Opened plugin details for " + item.Name)
+				if err := showPluginDetailsViewer(win, sdCtrl, piViewer, details, "Plugin Info"); err != nil {
+					statusLbl.SetText(fmt.Sprintf("Failed to open info for %s: %v", item.Name, err))
 					return
 				}
-				// Fallback Fyne modal when WebView2/browser viewer is not attached.
-				infoText := item.Name
-				if details.LatestVersion != "" {
-					infoText += " v" + details.LatestVersion
-				}
-				if item.Author != "" {
-					infoText += "\nAuthor: " + item.Author
-				}
-				if item.Repository != "" {
-					infoText += "\nRepository: " + item.Repository
-				}
-				if item.Description != "" {
-					infoText += "\n\n" + item.Description
-				}
-				if details.ReleaseNotes != "" {
-					infoText += "\n\nLatest Release Notes:\n" + details.ReleaseNotes
-				}
-				lbl := widget.NewLabel(infoText)
-				lbl.Wrapping = fyne.TextWrapWord
-				infoDlg := dialog.NewCustom(item.Name+" — Plugin Info", "Close", container.NewVScroll(container.NewPadded(lbl)), win)
-				infoDlg.Resize(fyne.NewSize(540, 420))
-				infoDlg.Show()
 				statusLbl.SetText("Opened plugin details for " + item.Name)
 			})
 		}()
@@ -958,6 +1246,7 @@ func showOpenActionMarketplaceDialog(
 			item := entry
 			inst, isInstalled := installedByID[strings.ToLower(item.ID)]
 			userManaged := isInstalled && sdCtrl.IsUserManagedPlugin(inst.Dir)
+			hasNewer := isInstalled && item.Version != "" && updater.CompareVersions(item.Version, inst.Version) > 0
 
 			title := item.Name
 			if item.Version != "" {
@@ -967,7 +1256,7 @@ func showOpenActionMarketplaceDialog(
 			switch {
 			case isInstalled && !userManaged:
 				badges = append(badges, "[Installed Externally]")
-			case isInstalled && item.Version != "" && inst.Version != "" && inst.Version != item.Version:
+			case hasNewer:
 				badges = append(badges, fmt.Sprintf("[Update: %s -> %s]", inst.Version, item.Version))
 			case isInstalled:
 				badges = append(badges, "[Installed]")
@@ -998,55 +1287,19 @@ func showOpenActionMarketplaceDialog(
 			metaLbl := widget.NewLabel(metaText)
 			metaLbl.Wrapping = fyne.TextWrapWord
 
-			// Plugin icon slot (44x44) with lazy async load + cache.
-			iconBg := canvas.NewRectangle(ColorElevatedSlate)
-			iconBg.CornerRadius = 8
-			iconBg.SetMinSize(fyne.NewSize(44, 44))
-			iconImg := canvas.NewImageFromResource(theme.FileApplicationIcon())
-			iconImg.FillMode = canvas.ImageFillContain
-			iconImg.SetMinSize(fyne.NewSize(40, 40))
-
-			if item.IconURL != "" {
-				iconMu.RLock()
-				cachedImg, hasIcon := icons[item.IconURL]
-				iconMu.RUnlock()
-				if hasIcon && cachedImg != nil {
-					iconImg.Resource = nil
-					iconImg.Image = cachedImg
-				} else if !hasIcon {
-					go func(ent sdplugin.CatalogueEntry, target *canvas.Image, renderGen uint64) {
-						select {
-						case iconSem <- struct{}{}:
-							defer func() { <-iconSem }()
-						case <-ctx.Done():
-							return
-						}
-						if closed.Load() || gen.Load() != renderGen {
-							return
-						}
-						raw, err := client.FetchIcon(ctx, ent)
-						if err != nil || len(raw) == 0 {
-							return
-						}
-						decoded, _, decErr := image.Decode(bytes.NewReader(raw))
-						if decErr != nil || decoded == nil {
-							return
-						}
-						iconMu.Lock()
-						icons[ent.IconURL] = decoded
-						iconMu.Unlock()
-						dispatchUI(func() {
-							if closed.Load() || gen.Load() != renderGen {
-								return
-							}
-							target.Resource = nil
-							target.Image = decoded
-							target.Refresh()
-						})
-					}(item, iconImg, curGen)
-				}
-			}
-			iconBox := container.NewCenter(container.NewStack(iconBg, container.NewPadded(iconImg)))
+			iconBox := buildAsyncCatalogIconSlot(
+				ctx,
+				item.IconURL,
+				func() ([]byte, error) {
+					return client.FetchIcon(ctx, item)
+				},
+				&iconMu,
+				icons,
+				iconSem,
+				&closed,
+				&gen,
+				curGen,
+			)
 
 			var actionBtns []fyne.CanvasObject
 			infoBtn := widget.NewButtonWithIcon("More Info", theme.InfoIcon(), func() {
@@ -1056,7 +1309,7 @@ func showOpenActionMarketplaceDialog(
 
 			installLabel := "Install"
 			if isInstalled && userManaged {
-				if item.Version != "" && inst.Version != "" && inst.Version != item.Version {
+				if hasNewer {
 					installLabel = "Update"
 				} else {
 					installLabel = "Reinstall"
@@ -1087,6 +1340,9 @@ func showOpenActionMarketplaceDialog(
 							}
 							return
 						}
+						if pluginMgr != nil {
+							pluginMgr.NotifyPluginInstalled(bundle.UUID, bundle.Manifest.Version)
+						}
 						msg := fmt.Sprintf("Installed %s (%s)", bundle.Manifest.Name, bundle.UUID)
 						statusLbl.SetText(msg)
 						if reloadAll != nil {
@@ -1096,7 +1352,7 @@ func showOpenActionMarketplaceDialog(
 					})
 				}()
 			})
-			if !isInstalled {
+			if !isInstalled || (userManaged && hasNewer) {
 				installBtn.Importance = widget.HighImportance
 			}
 			actionBtns = append(actionBtns, installBtn)
@@ -1111,6 +1367,9 @@ func showOpenActionMarketplaceDialog(
 					if err != nil {
 						statusLbl.SetText(fmt.Sprintf("Uninstall %s failed: %v", item.Name, err))
 						return
+					}
+					if pluginMgr != nil {
+						pluginMgr.NotifyPluginRemoved(inst.UUID)
 					}
 					msg := "Uninstalled " + item.Name
 					statusLbl.SetText(msg)
@@ -1164,17 +1423,7 @@ func showOpenActionMarketplaceDialog(
 	body := container.NewBorder(topBar, nil, nil, nil, container.NewScroll(container.NewPadded(listBox)))
 
 	dlg := dialog.NewCustom("OpenAction Marketplace", "Close", body, win)
-	dlgW, dlgH := float32(780), float32(600)
-	if win != nil && win.Canvas() != nil {
-		cs := win.Canvas().Size()
-		if cs.Width > 120 {
-			dlgW = min(dlgW, cs.Width-48)
-		}
-		if cs.Height > 120 {
-			dlgH = min(dlgH, cs.Height-48)
-		}
-	}
-	dlg.Resize(fyne.NewSize(dlgW, dlgH))
+	resizePluginCatalogDialog(dlg, win)
 	dlg.SetOnClosed(func() {
 		closed.Store(true)
 		cancel()
@@ -1187,10 +1436,18 @@ func showOpenActionMarketplaceDialog(
 func buildWasmPluginSection(
 	win fyne.Window,
 	wasmCtrl WasmPluginController,
+	pluginMgr *pluginmgr.Manager,
 	reloadAll func(string),
+	syncAll func(string),
 	onConfigurePlugin func(string),
 	onStatus func(string),
-) (fyne.CanvasObject, func()) {
+) (fyne.CanvasObject, func(), func()) {
+	var (
+		closed  atomic.Bool
+		updBusy atomic.Bool
+	)
+	updCtx, updCancel := context.WithCancel(context.Background())
+
 	extraContainer := container.NewVBox()
 	pluginsContainer := container.NewVBox()
 
@@ -1206,6 +1463,30 @@ func buildWasmPluginSection(
 
 	defaultDirLbl := widget.NewLabel(wasmCtrl.DefaultPluginsDir())
 	defaultDirLbl.Wrapping = fyne.TextWrapBreak
+
+	installWasmBtn := widget.NewButtonWithIcon("Install Local .wasm...", theme.FileApplicationIcon(), func() {
+		fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
+			if err != nil || r == nil {
+				return
+			}
+			wasmPath := r.URI().Path()
+			_ = r.Close()
+			st, instErr := wasmCtrl.InstallFile(wasmPath, &wasmplugin.InstallRecord{Source: "local"})
+			if instErr != nil {
+				if onStatus != nil {
+					onStatus(fmt.Sprintf("Wasm plugin install failed: %v", instErr))
+				}
+				dialog.ShowError(instErr, win)
+				return
+			}
+			if pluginMgr != nil {
+				pluginMgr.NotifyPluginInstalled(st.UUID, st.Version)
+			}
+			syncAll(fmt.Sprintf("Installed WebAssembly plugin %s (%s)", st.Name, st.UUID))
+		}, win)
+		fd.SetFilter(storage.NewExtensionFileFilter([]string{".wasm"}))
+		fd.Show()
+	})
 
 	addPathEnt := widget.NewEntry()
 	addPathEnt.SetPlaceHolder("Path to a .wasm plugin file or directory")
@@ -1263,8 +1544,9 @@ func buildWasmPluginSection(
 
 		pluginsContainer.Objects = nil
 		statuses := wasmCtrl.Plugins()
+		updatesByID := pendingUpdatesByID(pluginMgr)
 		if len(statuses) == 0 {
-			noneLbl := widget.NewLabel("No WebAssembly (.wasm) plugins discovered yet. Drop .wasm files in the default folder or add a path above.")
+			noneLbl := widget.NewLabel("No WebAssembly (.wasm) plugins discovered yet. Install from Curated Plugins, drop .wasm files in the default folder, or add a path above.")
 			noneLbl.Wrapping = fyne.TextWrapWord
 			pluginsContainer.Add(noneLbl)
 		} else {
@@ -1301,13 +1583,45 @@ func buildWasmPluginSection(
 				metaLbl := widget.NewLabel(metaText)
 				metaLbl.Wrapping = fyne.TextWrapBreak
 
-				var headerRow fyne.CanvasObject = titleLbl
+				managed := wasmCtrl.IsUserManagedPlugin(st.Path)
+				var btns []fyne.CanvasObject
+				if managed {
+					if upd, hasUpdate := updatesByID[strings.ToLower(st.UUID)]; hasUpdate {
+						updCopy := upd
+						updBtn := widget.NewButtonWithIcon("Update to v"+updCopy.LatestVersion, theme.DownloadIcon(), func() {
+							applyPluginUpdateAsync(updCtx, &closed, &updBusy, pluginMgr, updCopy, nil, syncAll, onStatus)
+						})
+						updBtn.Importance = widget.HighImportance
+						btns = append(btns, updBtn)
+					}
+				}
 				if st.HasGlobalSettings && onConfigurePlugin != nil {
 					pluginUUID := st.UUID
-					cfgBtn := widget.NewButtonWithIcon("Configure", theme.SettingsIcon(), func() {
+					btns = append(btns, widget.NewButtonWithIcon("Configure", theme.SettingsIcon(), func() {
 						onConfigurePlugin(pluginUUID)
-					})
-					headerRow = container.NewBorder(nil, nil, nil, cfgBtn, titleLbl)
+					}))
+				}
+				if managed && st.UUID != "" {
+					pluginUUID := st.UUID
+					pluginName := st.Name
+					btns = append(btns, widget.NewButtonWithIcon("Uninstall", theme.DeleteIcon(), func() {
+						if err := wasmCtrl.UninstallPlugin(pluginUUID); err != nil {
+							if onStatus != nil {
+								onStatus(fmt.Sprintf("Uninstall %s failed: %v", pluginName, err))
+							}
+							dialog.ShowError(err, win)
+							return
+						}
+						if pluginMgr != nil {
+							pluginMgr.NotifyPluginRemoved(pluginUUID)
+						}
+						syncAll("Uninstalled WebAssembly plugin " + pluginName)
+					}))
+				}
+
+				var headerRow fyne.CanvasObject = titleLbl
+				if len(btns) > 0 {
+					headerRow = container.NewBorder(nil, nil, nil, container.NewHBox(btns...), titleLbl)
 				}
 
 				pluginsContainer.Add(container.NewVBox(headerRow, metaLbl, widget.NewSeparator()))
@@ -1320,6 +1634,7 @@ func buildWasmPluginSection(
 
 	content := container.NewVBox(
 		widget.NewLabelWithStyle("WebAssembly (.wasm) Plugins (wazero)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		container.NewHBox(installWasmBtn),
 		widget.NewForm(widget.NewFormItem("Default Folder", defaultDirLbl)),
 		widget.NewLabel("Extra WebAssembly Paths"),
 		extraContainer,
@@ -1329,5 +1644,9 @@ func buildWasmPluginSection(
 		widget.NewLabelWithStyle("Discovered .wasm Modules", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		pluginsContainer,
 	)
-	return content, refreshState
+	cleanup := func() {
+		closed.Store(true)
+		updCancel()
+	}
+	return content, refreshState, cleanup
 }

@@ -108,6 +108,7 @@ func (inst *wasmInstance) setState(st PluginRunState, msg string) {
 // Provider hosts pure-Go wazero WebAssembly plugins implementing plugin.Provider.
 type Provider struct {
 	reloadMu sync.Mutex
+	metaMu   sync.Mutex
 	mu       sync.RWMutex
 
 	opts        Options
@@ -278,7 +279,10 @@ func (p *Provider) Start() error {
 func (p *Provider) Reload() error {
 	p.reloadMu.Lock()
 	defer p.reloadMu.Unlock()
+	return p.reloadLocked()
+}
 
+func (p *Provider) reloadLocked() error {
 	p.mu.RLock()
 	closed := p.closed
 	p.mu.RUnlock()

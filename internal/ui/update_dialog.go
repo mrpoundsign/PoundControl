@@ -18,8 +18,9 @@ const (
 	updateRepoOwner = "mrpoundsign"
 	updateRepoName  = "PoundControl"
 
-	prefCheckUpdatesOnStartup = "CheckUpdatesOnStartup"
-	prefSkippedUpdateVersion  = "SkippedUpdateVersion"
+	prefCheckUpdatesOnStartup       = "CheckUpdatesOnStartup"
+	prefCheckPluginUpdatesOnStartup = "CheckPluginUpdatesOnStartup"
+	prefSkippedUpdateVersion        = "SkippedUpdateVersion"
 )
 
 var newUpdateChecker = func() *updater.Checker {

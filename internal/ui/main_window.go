@@ -29,6 +29,7 @@ import (
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/obs"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 	"github.com/mrpoundsign/PoundControl/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/pluginmgr"
 	"github.com/mrpoundsign/PoundControl/pkg/sdplugin"
 	"github.com/mrpoundsign/PoundControl/pkg/tile"
 )
@@ -78,10 +79,13 @@ type MainWindow struct {
 	obsUnsub        func()
 	sdCtrl          SDPluginController
 	wasmCtrl        WasmPluginController
-	webCtrl         WebDeckController
-	webUnsub        func()
-	catalogueClient *sdplugin.CatalogueClient
-	piViewer        PIViewer
+	webCtrl               WebDeckController
+	webUnsub              func()
+	catalogueClient       *sdplugin.CatalogueClient
+	pluginMgr             *pluginmgr.Manager
+	pluginMgrUnsub        func()
+	lastPluginUpdateCount int
+	piViewer              PIViewer
 	popOut      *PopOutPad
 	cfgPath         string
 	hotkeyCount     func() int
@@ -353,6 +357,10 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 			mw.webUnsub()
 			mw.webUnsub = nil
 		}
+		if mw.pluginMgrUnsub != nil {
+			mw.pluginMgrUnsub()
+			mw.pluginMgrUnsub = nil
+		}
 		if mw.unsub != nil {
 			mw.unsub()
 			mw.unsub = nil
@@ -593,8 +601,10 @@ func (mw *MainWindow) rebuildPluginsTab() {
 		mw.sdCtrl,
 		mw.wasmCtrl,
 		mw.catalogueClient,
+		mw.pluginMgr,
 		mw.piViewer,
 		mw.ReloadExternalPlugins,
+		mw.SyncExternalPlugins,
 		mw.ShowPluginConfigTab,
 		mw.SetPluginEnabled,
 		mw.setStatus,
@@ -654,6 +664,74 @@ func (mw *MainWindow) rebuildSettingsTab(subTab int) {
 // SetCatalogueClient sets an OpenAction Marketplace CatalogueClient (primarily for testing or custom endpoints).
 func (mw *MainWindow) SetCatalogueClient(client *sdplugin.CatalogueClient) {
 	mw.catalogueClient = client
+	if mw.pluginMgr != nil && client != nil {
+		mw.pluginMgr.OpenActionClient = client
+	}
+}
+
+// SetPluginManager attaches the curated catalog and unified plugin update manager.
+func (mw *MainWindow) SetPluginManager(mgr *pluginmgr.Manager) {
+	if mw.pluginMgrUnsub != nil {
+		mw.pluginMgrUnsub()
+		mw.pluginMgrUnsub = nil
+	}
+	mw.pluginMgr = mgr
+	if mgr == nil {
+		mw.applyPluginUpdateBadge(pluginmgr.UpdateSummary{})
+		return
+	}
+	if mw.catalogueClient == nil && mgr.OpenActionClient != nil {
+		mw.catalogueClient = mgr.OpenActionClient
+	} else if mw.catalogueClient != nil && mgr.OpenActionClient == nil {
+		mgr.OpenActionClient = mw.catalogueClient
+	}
+	mw.applyPluginUpdateBadge(mgr.LatestSummary())
+	mw.pluginMgrUnsub = mgr.SubscribeUpdates(func(sum pluginmgr.UpdateSummary) {
+		dispatchUI(func() {
+			mw.applyPluginUpdateBadge(sum)
+		})
+	})
+}
+
+func (mw *MainWindow) applyPluginUpdateBadge(sum pluginmgr.UpdateSummary) {
+	n := len(sum.Updates)
+	if mw.pluginsTabItem != nil {
+		switch n {
+		case 0:
+			mw.pluginsTabItem.Text = "Plugins"
+		case 1:
+			mw.pluginsTabItem.Text = "Plugins (1 update)"
+		default:
+			mw.pluginsTabItem.Text = fmt.Sprintf("Plugins (%d updates)", n)
+		}
+		if mw.mainTabs != nil {
+			mw.mainTabs.Refresh()
+		}
+	}
+	if n > 0 && n != mw.lastPluginUpdateCount {
+		mw.setStatus(fmt.Sprintf("%d plugin update(s) available — open Plugins tab to review", n))
+	}
+	mw.lastPluginUpdateCount = n
+}
+
+// CheckStartupPluginUpdates runs a background plugin update check on startup when enabled in preferences.
+func (mw *MainWindow) CheckStartupPluginUpdates() {
+	if mw.pluginMgr == nil {
+		return
+	}
+	a := mw.app
+	if a == nil {
+		a = fyne.CurrentApp()
+	}
+	if a != nil && !a.Preferences().BoolWithFallback(prefCheckPluginUpdatesOnStartup, true) {
+		return
+	}
+	mgr := mw.pluginMgr
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		mgr.CheckUpdates(ctx, false)
+	}()
 }
 
 // SetSDPluginController attaches an external .sdPlugin host controller and refreshes inspector hints.
@@ -679,12 +757,10 @@ func (mw *MainWindow) SetPIViewer(v PIViewer) {
 	}
 }
 
-// ReloadExternalPlugins rescans .sdPlugin and .wasm plugins, refreshes the catalog, and updates visible tiles.
-func (mw *MainWindow) ReloadExternalPlugins() error {
+// SyncExternalPlugins updates the Engine registry and Studio UI after a single provider already reloaded itself
+// (such as installing, updating, or uninstalling a plugin) without restarting other external plugins.
+func (mw *MainWindow) SyncExternalPlugins() error {
 	if mw.sdCtrl != nil {
-		if err := mw.sdCtrl.Reload(); err != nil {
-			return err
-		}
 		if prov, ok := mw.sdCtrl.(plugin.Provider); ok {
 			if err := mw.engine.Registry().RefreshProvider(prov); err != nil {
 				return err
@@ -692,9 +768,6 @@ func (mw *MainWindow) ReloadExternalPlugins() error {
 		}
 	}
 	if mw.wasmCtrl != nil {
-		if err := mw.wasmCtrl.Reload(); err != nil {
-			return err
-		}
 		if prov, ok := mw.wasmCtrl.(plugin.Provider); ok {
 			if err := mw.engine.Registry().RefreshProvider(prov); err != nil {
 				return err
@@ -708,6 +781,21 @@ func (mw *MainWindow) ReloadExternalPlugins() error {
 	}
 	mw.applySnapshot(mw.engine.Snapshot())
 	return nil
+}
+
+// ReloadExternalPlugins rescans .sdPlugin and .wasm plugins, refreshes the catalog, and updates visible tiles.
+func (mw *MainWindow) ReloadExternalPlugins() error {
+	if mw.sdCtrl != nil {
+		if err := mw.sdCtrl.Reload(); err != nil {
+			return err
+		}
+	}
+	if mw.wasmCtrl != nil {
+		if err := mw.wasmCtrl.Reload(); err != nil {
+			return err
+		}
+	}
+	return mw.SyncExternalPlugins()
 }
 
 // SetOBSController attaches an OBSController so the Studio header badge displays live OBS status

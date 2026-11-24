@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/mrpoundsign/PoundControl/pkg/sdplugin"
 	"github.com/mrpoundsign/PoundControl/pkg/wasmplugin"
@@ -32,13 +33,23 @@ type SDPluginController interface {
 	NeedsNodeForAction(actionUUID string) (minMajor int, ok bool)
 }
 
-// WasmPluginController exposes external WebAssembly (.wasm) discovery, lifecycle, and status to UI surfaces.
+// WasmPluginController exposes external WebAssembly (.wasm) discovery, lifecycle, installation, and status to UI surfaces.
 type WasmPluginController interface {
 	HostConfig() wasmplugin.HostConfig
 	SaveHostConfig(cfg wasmplugin.HostConfig) error
 	Reload() error
 	Plugins() []wasmplugin.PluginStatus
 	DefaultPluginsDir() string
+	IsUserManagedPlugin(pluginPath string) bool
+	InstalledMetadata() map[string]wasmplugin.InstallRecord
+	InstallFile(srcPath string, meta *wasmplugin.InstallRecord) (wasmplugin.PluginStatus, error)
+	InstallFromGitHubRelease(
+		ctx context.Context,
+		owner, repo, assetName, apiBaseURL string,
+		httpClient *http.Client,
+		onProgress func(downloaded, total int64, stage string),
+	) (wasmplugin.PluginStatus, error)
+	UninstallPlugin(pluginUUID string) error
 }
 
 var (

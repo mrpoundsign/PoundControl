@@ -19,6 +19,7 @@ import (
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/soundboard"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 	"github.com/mrpoundsign/PoundControl/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/pluginmgr"
 	"github.com/mrpoundsign/PoundControl/pkg/sdplugin"
 	"github.com/mrpoundsign/PoundControl/pkg/secrets"
 	"github.com/mrpoundsign/PoundControl/pkg/wasmplugin"
@@ -126,6 +127,12 @@ func main() {
 	win.SetWasmPluginController(wasmHost)
 	win.SetPIViewer(ui.NewDefaultPIViewer())
 
+	oaClient := sdplugin.NewCatalogueClient()
+	curatedClient := pluginmgr.NewCuratedClient()
+	pluginMgr := pluginmgr.NewManager(curatedClient, oaClient, wasmHost, sdHost)
+	win.SetCatalogueClient(oaClient)
+	win.SetPluginManager(pluginMgr)
+
 	webSrv := webdeck.NewServer(eng, secretStore)
 	defer func() {
 		if closeErr := webSrv.Close(); closeErr != nil {
@@ -145,6 +152,7 @@ func main() {
 	}
 
 	ui.CheckStartupUpdate(win.Window(), version.Version)
+	win.CheckStartupPluginUpdates()
 
 	win.ShowAndRun()
 }
