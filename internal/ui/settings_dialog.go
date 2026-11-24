@@ -14,7 +14,6 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/mrpoundsign/appinstaller/pkg/updater"
@@ -956,39 +955,70 @@ func buildSDPluginSection(
 		scanOpenDeckBox = container.NewVBox(scanOpenDeckCh, dirLbl)
 	}
 
-	installArchiveBtn := widget.NewButtonWithIcon("Install Archive (.streamDeckPlugin / .zip)...", theme.FileApplicationIcon(), func() {
-		fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
-			if err != nil || r == nil {
+	var installArchiveBtn *widget.Button
+	installArchiveBtn = widget.NewButtonWithIcon("Install Archive (.streamDeckPlugin / .zip)...", theme.FileApplicationIcon(), func() {
+		openNativeFileDialog(win, fileDialogRequest{
+			Title: "Install Stream Deck Plugin Archive",
+			Filters: []fileDialogFilter{
+				{
+					Name:       "Stream Deck Plugin Archives",
+					Extensions: []string{".streamDeckPlugin", ".streamdeckplugin", ".zip"},
+				},
+			},
+		}, func(archivePath string, err error) {
+			if closed.Load() {
 				return
 			}
-			archivePath := r.URI().Path()
-			_ = r.Close()
-			bundle, instErr := sdCtrl.InstallArchive(archivePath)
-			if instErr != nil {
+			if err != nil {
 				if onStatus != nil {
-					onStatus(fmt.Sprintf("Plugin archive install failed: %v", instErr))
+					onStatus(fmt.Sprintf("Plugin archive select failed: %v", err))
 				}
-				dialog.ShowError(instErr, win)
+				dialog.ShowError(err, win)
 				return
 			}
-			if pluginMgr != nil {
-				pluginMgr.NotifyPluginInstalled(bundle.UUID, bundle.Manifest.Version)
+			if archivePath == "" {
+				return
 			}
-			syncAll(fmt.Sprintf("Installed plugin %s (%s)", bundle.Manifest.Name, bundle.UUID))
-		}, win)
-		fd.SetFilter(storage.NewExtensionFileFilter([]string{".streamDeckPlugin", ".streamdeckplugin", ".zip"}))
-		fd.Show()
+			installArchiveBtn.Disable()
+			if onStatus != nil {
+				onStatus("Installing plugin archive...")
+			}
+			go func() {
+				bundle, instErr := sdCtrl.InstallArchive(archivePath)
+				dispatchUI(func() {
+					if closed.Load() {
+						return
+					}
+					installArchiveBtn.Enable()
+					if instErr != nil {
+						if onStatus != nil {
+							onStatus(fmt.Sprintf("Plugin archive install failed: %v", instErr))
+						}
+						dialog.ShowError(instErr, win)
+						return
+					}
+					if pluginMgr != nil {
+						pluginMgr.NotifyPluginInstalled(bundle.UUID, bundle.Manifest.Version)
+					}
+					syncAll(fmt.Sprintf("Installed plugin %s (%s)", bundle.Manifest.Name, bundle.UUID))
+				})
+			}()
+		})
 	})
 
 	addPathEnt := widget.NewEntry()
 	addPathEnt.SetPlaceHolder("Path to a .sdPlugin bundle or parent plugins directory")
 	browseBtn := widget.NewButtonWithIcon("Browse...", theme.FolderOpenIcon(), func() {
-		dlg := dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
-			if err == nil && uri != nil {
-				addPathEnt.SetText(uri.Path())
+		openNativeFileDialog(win, fileDialogRequest{
+			Title:       "Select Stream Deck Plugins Folder",
+			InitialPath: strings.TrimSpace(addPathEnt.Text),
+			Directory:   true,
+		}, func(dir string, err error) {
+			if closed.Load() || err != nil || dir == "" {
+				return
 			}
-		}, win)
-		dlg.Show()
+			addPathEnt.SetText(dir)
+		})
 	})
 	addPathBtn := widget.NewButtonWithIcon("Add Path", theme.ContentAddIcon(), func() {
 		p := strings.TrimSpace(addPathEnt.Text)
@@ -1464,39 +1494,70 @@ func buildWasmPluginSection(
 	defaultDirLbl := widget.NewLabel(wasmCtrl.DefaultPluginsDir())
 	defaultDirLbl.Wrapping = fyne.TextWrapBreak
 
-	installWasmBtn := widget.NewButtonWithIcon("Install Local .wasm...", theme.FileApplicationIcon(), func() {
-		fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
-			if err != nil || r == nil {
+	var installWasmBtn *widget.Button
+	installWasmBtn = widget.NewButtonWithIcon("Install Local .wasm...", theme.FileApplicationIcon(), func() {
+		openNativeFileDialog(win, fileDialogRequest{
+			Title: "Install Local WebAssembly Plugin",
+			Filters: []fileDialogFilter{
+				{
+					Name:       "WebAssembly Plugins",
+					Extensions: []string{".wasm"},
+				},
+			},
+		}, func(wasmPath string, err error) {
+			if closed.Load() {
 				return
 			}
-			wasmPath := r.URI().Path()
-			_ = r.Close()
-			st, instErr := wasmCtrl.InstallFile(wasmPath, &wasmplugin.InstallRecord{Source: "local"})
-			if instErr != nil {
+			if err != nil {
 				if onStatus != nil {
-					onStatus(fmt.Sprintf("Wasm plugin install failed: %v", instErr))
+					onStatus(fmt.Sprintf("Wasm plugin select failed: %v", err))
 				}
-				dialog.ShowError(instErr, win)
+				dialog.ShowError(err, win)
 				return
 			}
-			if pluginMgr != nil {
-				pluginMgr.NotifyPluginInstalled(st.UUID, st.Version)
+			if wasmPath == "" {
+				return
 			}
-			syncAll(fmt.Sprintf("Installed WebAssembly plugin %s (%s)", st.Name, st.UUID))
-		}, win)
-		fd.SetFilter(storage.NewExtensionFileFilter([]string{".wasm"}))
-		fd.Show()
+			installWasmBtn.Disable()
+			if onStatus != nil {
+				onStatus("Installing WebAssembly plugin...")
+			}
+			go func() {
+				st, instErr := wasmCtrl.InstallFile(wasmPath, &wasmplugin.InstallRecord{Source: "local"})
+				dispatchUI(func() {
+					if closed.Load() {
+						return
+					}
+					installWasmBtn.Enable()
+					if instErr != nil {
+						if onStatus != nil {
+							onStatus(fmt.Sprintf("Wasm plugin install failed: %v", instErr))
+						}
+						dialog.ShowError(instErr, win)
+						return
+					}
+					if pluginMgr != nil {
+						pluginMgr.NotifyPluginInstalled(st.UUID, st.Version)
+					}
+					syncAll(fmt.Sprintf("Installed WebAssembly plugin %s (%s)", st.Name, st.UUID))
+				})
+			}()
+		})
 	})
 
 	addPathEnt := widget.NewEntry()
 	addPathEnt.SetPlaceHolder("Path to a .wasm plugin file or directory")
 	browseBtn := widget.NewButtonWithIcon("Browse...", theme.FolderOpenIcon(), func() {
-		dlg := dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
-			if err == nil && uri != nil {
-				addPathEnt.SetText(uri.Path())
+		openNativeFileDialog(win, fileDialogRequest{
+			Title:       "Select WebAssembly Plugins Folder",
+			InitialPath: strings.TrimSpace(addPathEnt.Text),
+			Directory:   true,
+		}, func(dir string, err error) {
+			if closed.Load() || err != nil || dir == "" {
+				return
 			}
-		}, win)
-		dlg.Show()
+			addPathEnt.SetText(dir)
+		})
 	})
 	addPathBtn := widget.NewButtonWithIcon("Add Path", theme.ContentAddIcon(), func() {
 		p := strings.TrimSpace(addPathEnt.Text)

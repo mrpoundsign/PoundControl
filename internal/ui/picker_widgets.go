@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"image/color"
 	"math"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -13,7 +12,6 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
-	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -451,21 +449,25 @@ func (c *imageFieldControl) refreshThumbnail() {
 }
 
 func (c *imageFieldControl) openFileDialog() {
-	if c.win == nil {
-		return
-	}
-	fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
+	openNativeFileDialog(c.win, fileDialogRequest{
+		Title:       "Select Button Image",
+		InitialPath: c.Value(),
+		Filters: []fileDialogFilter{
+			{
+				Name:       "Images",
+				Extensions: []string{".png", ".jpg", ".jpeg", ".svg"},
+			},
+		},
+	}, func(filePath string, err error) {
 		if err != nil {
 			if c.onStatus != nil {
 				c.onStatus("Select image failed: " + err.Error())
 			}
 			return
 		}
-		if r == nil {
+		if filePath == "" {
 			return
 		}
-		filePath := uriToLocalPath(r.URI())
-		_ = r.Close()
 		if impErr := c.ImportFile(filePath); impErr != nil {
 			if c.onStatus != nil {
 				c.onStatus("Import image failed: " + impErr.Error())
@@ -475,10 +477,7 @@ func (c *imageFieldControl) openFileDialog() {
 		if c.onStatus != nil {
 			c.onStatus("Imported button image — click Save to apply")
 		}
-	}, c.win)
-	fd.SetFilter(storage.NewExtensionFileFilter([]string{".png", ".jpg", ".jpeg", ".svg"}))
-	fd.Resize(fyne.NewSize(760, 520))
-	fd.Show()
+	})
 }
 
 type fileFieldControl struct {
@@ -535,34 +534,23 @@ func (c *fileFieldControl) SetValue(path string) {
 }
 
 func (c *fileFieldControl) openFileDialog() {
-	if c.win == nil {
-		return
+	var filters []fileDialogFilter
+	if len(c.extensions) > 0 {
+		filters = []fileDialogFilter{
+			{
+				Name:       "Supported Files",
+				Extensions: c.extensions,
+			},
+		}
 	}
-	fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
-		if err != nil || r == nil {
+	openNativeFileDialog(c.win, fileDialogRequest{
+		Title:       "Select File",
+		InitialPath: c.Value(),
+		Filters:     filters,
+	}, func(filePath string, err error) {
+		if err != nil || filePath == "" {
 			return
 		}
-		filePath := uriToLocalPath(r.URI())
-		_ = r.Close()
 		c.SetValue(filePath)
-	}, c.win)
-	if len(c.extensions) > 0 {
-		fd.SetFilter(storage.NewExtensionFileFilter(c.extensions))
-	}
-	fd.Resize(fyne.NewSize(760, 520))
-	fd.Show()
-}
-
-func uriToLocalPath(u fyne.URI) string {
-	if u == nil {
-		return ""
-	}
-	p := u.Path()
-	if strings.EqualFold(u.Scheme(), "file") {
-		if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
-			p = p[1:]
-		}
-		p = filepath.FromSlash(p)
-	}
-	return filepath.Clean(p)
+	})
 }
