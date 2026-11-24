@@ -192,7 +192,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -201,7 +201,7 @@ jobs:
         run: |
           SDK_MGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDK_MGR" --licenses >/dev/null || true
-          "$SDK_MGR" "platforms;android-37" "build-tools;36.0.0"
+          "$SDK_MGR" "platforms;android-37.0" "build-tools;36.0.0"
 
       - name: Test & Assemble Android & Wear OS APKs
         env:
