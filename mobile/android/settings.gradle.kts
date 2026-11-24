@@ -21,4 +21,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "PoundControlAndroid"
-include(":app")
+include(":protocol", ":app", ":wear")

@@ -1058,3 +1058,98 @@ func TestServerIndependentDeviceViewportsPersistenceAndFollowHost(t *testing.T) 
 		t.Fatalf("unexpected persisted device profiles: %+v", seenProf)
 	}
 }
+
+func TestServerEphemeralRelayedSessionIsolation(t *testing.T) {
+	eng, _, srv := newTestEngineAndServer(t)
+
+	profDefaultID := eng.Snapshot().ActiveProfileID
+	profStream, err := eng.CreateProfile("Stream", deck.GridSize{Cols: 3, Rows: 2}, 1)
+	if err != nil {
+		t.Fatalf("CreateProfile(Stream) error = %v", err)
+	}
+	profWatch, err := eng.CreateProfile("Watch", deck.GridSize{Cols: 2, Rows: 2}, 1)
+	if err != nil {
+		t.Fatalf("CreateProfile(Watch) error = %v", err)
+	}
+	if err := eng.SwitchProfile(profDefaultID); err != nil {
+		t.Fatalf("SwitchProfile(default) error = %v", err)
+	}
+
+	devA := performTestPairing(t, srv, "Phone A")
+	if err := srv.SetDeviceViewport(devA.deviceID, profStream.ID, false); err != nil {
+		t.Fatalf("SetDeviceViewport(devA, Stream) error = %v", err)
+	}
+
+	wsPhone := dialAuthenticatedWS(t, devA)
+	defer func() { _ = wsPhone.conn.Close() }()
+	wsWatch := dialAuthenticatedWS(t, devA)
+	defer func() { _ = wsWatch.conn.Close() }()
+
+	waitProf := func(ws *testWSSession, wantID string) ClientSnapshot {
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			rem := time.Until(deadline)
+			if rem <= 0 {
+				break
+			}
+			m := ws.recvSigned(t, rem)
+			if m.Type == "snapshot" && m.Snapshot != nil && m.Snapshot.ActiveProfileID == wantID {
+				return *m.Snapshot
+			}
+		}
+		t.Fatalf("timed out waiting for profile %s", wantID)
+		return ClientSnapshot{}
+	}
+
+	if initPhone := wsPhone.recvSigned(t, 2*time.Second); initPhone.Snapshot == nil || initPhone.Snapshot.ActiveProfileID != profStream.ID {
+		t.Fatalf("expected wsPhone initial profile %s, got %+v", profStream.ID, initPhone.Snapshot)
+	}
+	_ = wsWatch.recvSigned(t, 2*time.Second)
+
+	// Mark wsWatch as an ephemeral watch relay session targeting profWatch.
+	wsWatch.sendSigned(t, ClientCommand{
+		Type:      "configureSession",
+		Ephemeral: true,
+		ProfileID: profWatch.ID,
+	})
+	gotWatch := waitProf(wsWatch, profWatch.ID)
+	if gotWatch.FollowHost || gotWatch.Grid != profWatch.Grid {
+		t.Fatalf("unexpected ephemeral watch snapshot: %+v", gotWatch)
+	}
+
+	// Phone's persisted ProfileID must stay on profStream even after wsWatch switches to profDefaultID.
+	wsWatch.sendSigned(t, ClientCommand{
+		Type:      "switchProfile",
+		ProfileID: profDefaultID,
+	})
+	waitProf(wsWatch, profDefaultID)
+
+	for _, d := range srv.Status().Devices {
+		if d.ID == devA.deviceID && d.ProfileID != profStream.ID {
+			t.Fatalf("expected persisted phone ProfileID=%s untouched by ephemeral watch, got %s", profStream.ID, d.ProfileID)
+		}
+	}
+
+	// Updating devA via SetDeviceViewport updates wsPhone without hijacking wsWatch.
+	if err := srv.SetDeviceViewport(devA.deviceID, profWatch.ID, false); err != nil {
+		t.Fatalf("SetDeviceViewport(devA, Watch) error = %v", err)
+	}
+	waitProf(wsPhone, profWatch.ID)
+
+	wsWatch.sendSigned(t, ClientCommand{Type: "ping"})
+	var gotPong bool
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		m := wsWatch.recvSigned(t, time.Until(deadline))
+		if m.Type == "snapshot" && m.Snapshot != nil && m.Snapshot.ActiveProfileID != profDefaultID {
+			t.Fatalf("ephemeral watch session was pulled off %s onto %s", profDefaultID, m.Snapshot.ActiveProfileID)
+		}
+		if m.Type == "pong" {
+			gotPong = true
+			break
+		}
+	}
+	if !gotPong {
+		t.Fatal("expected pong from wsWatch")
+	}
+}

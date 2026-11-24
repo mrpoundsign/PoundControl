@@ -295,7 +295,7 @@ function Build-Android {
         $env:ANDROID_SDK_ROOT = $sdkHome
         Push-Location $androidDir
         try {
-            & $gradlew testDebugUnitTest assembleDebug --no-daemon
+            & $gradlew :protocol:testDebugUnitTest :app:testDebugUnitTest :wear:testDebugUnitTest :app:assembleDebug :wear:assembleDebug --no-daemon
             if ($LASTEXITCODE -ne 0) {
                 Write-Error "Android unit tests or APK build failed."
             }
@@ -312,10 +312,17 @@ function Build-Android {
     if (-not (Test-Path $apkSrc)) {
         Write-Error "Expected APK not found at $apkSrc."
     }
+    $wearApkSrc = Join-Path $androidDir "wear\build\outputs\apk\debug\wear-debug.apk"
+    if (-not (Test-Path $wearApkSrc)) {
+        Write-Error "Expected Wear APK not found at $wearApkSrc."
+    }
     if (-not (Test-Path $BinDir)) { New-Item -ItemType Directory -Path $BinDir | Out-Null }
     $apkOut = Join-Path $BinDir "poundcontrol-android.apk"
+    $wearApkOut = Join-Path $BinDir "poundcontrol-wear.apk"
     Copy-Item -Path $apkSrc -Destination $apkOut -Force
+    Copy-Item -Path $wearApkSrc -Destination $wearApkOut -Force
     Write-Host "[OK] Successfully built $apkOut" -ForegroundColor Green
+    Write-Host "[OK] Successfully built $wearApkOut" -ForegroundColor Green
 }
 
 switch ($Target) {

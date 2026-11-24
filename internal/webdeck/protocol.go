@@ -70,7 +70,7 @@ type ServerMessage struct {
 }
 
 // ClientCommand is an inbound interactive command received over WebSocket.
-// Supported types include ping, keyDown, keyUp, dialRotate, dialPress, prevPage, nextPage, closeFolder, switchProfile, setFollowHost, and unpair.
+// Supported types include ping, keyDown, keyUp, dialRotate, dialPress, prevPage, nextPage, closeFolder, switchProfile, setFollowHost, configureSession, and unpair.
 type ClientCommand struct {
 	Type       string `json:"type"`
 	Row        int    `json:"row"`
@@ -79,6 +79,7 @@ type ClientCommand struct {
 	Ticks      int    `json:"ticks"`
 	ProfileID  string `json:"profileId,omitempty"`
 	FollowHost bool   `json:"followHost,omitempty"`
+	Ephemeral  bool   `json:"ephemeral,omitempty"`
 }
 
 // WSAuthHello is sent by the host immediately after WebSocket upgrade to initiate mutual authentication.

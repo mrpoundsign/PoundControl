@@ -133,6 +133,7 @@ type wsClient struct {
 	deviceID     string
 	sessionID    string
 	viewportID   string
+	ephemeral    bool
 	unsubVP      func()
 	unregVP      func()
 	clientMacKey []byte
@@ -752,7 +753,7 @@ func (s *Server) SetDeviceViewport(deviceID, profileID string, followHost bool) 
 
 	var targets []*wsClient
 	for c := range s.clients {
-		if c.deviceID == devID && c.viewportID != "" {
+		if c.deviceID == devID && c.viewportID != "" && !c.ephemeral {
 			targets = append(targets, c)
 		}
 	}
@@ -1788,9 +1789,21 @@ func (s *Server) touchDeviceLastSeen(deviceID string) {
 	}
 }
 
-func (s *Server) syncDeviceViewportFromEngine(deviceID, viewportID string) {
+func (s *Server) syncDeviceViewportFromEngine(client *wsClient) {
+	if client == nil {
+		return
+	}
+	s.mu.RLock()
+	ephemeral := client.ephemeral
+	deviceID := client.deviceID
+	viewportID := client.viewportID
+	s.mu.RUnlock()
+	if ephemeral || strings.TrimSpace(deviceID) == "" {
+		return
+	}
+
 	vp, ok := s.engine.ViewportState(viewportID)
-	if !ok || strings.TrimSpace(deviceID) == "" {
+	if !ok {
 		return
 	}
 
@@ -1829,6 +1842,20 @@ func (s *Server) executeCommand(client *wsClient, cmd ClientCommand) error {
 			client.enqueuePayload(string(pong), false)
 		}
 		return nil
+	case "configureSession":
+		s.mu.Lock()
+		client.ephemeral = cmd.Ephemeral
+		s.mu.Unlock()
+		if cmd.Ephemeral {
+			if target := strings.TrimSpace(cmd.ProfileID); target != "" {
+				if err := s.engine.ViewportSwitchProfile(client.viewportID, target); err != nil {
+					_ = s.engine.SetViewportFollowHost(client.viewportID, false)
+				}
+			} else {
+				_ = s.engine.SetViewportFollowHost(client.viewportID, false)
+			}
+		}
+		return nil
 	case "keyDown":
 		coords := deck.Coordinates{Row: cmd.Row, Col: cmd.Col}
 		if !snap.Grid.Contains(coords) {
@@ -1837,7 +1864,7 @@ func (s *Server) executeCommand(client *wsClient, cmd ClientCommand) error {
 		if err := s.engine.ViewportPressKey(ctx, client.viewportID, coords); err != nil {
 			return err
 		}
-		s.syncDeviceViewportFromEngine(client.deviceID, client.viewportID)
+		s.syncDeviceViewportFromEngine(client)
 		return nil
 	case "keyUp":
 		coords := deck.Coordinates{Row: cmd.Row, Col: cmd.Col}
@@ -1861,7 +1888,7 @@ func (s *Server) executeCommand(client *wsClient, cmd ClientCommand) error {
 		if err := s.engine.ViewportPressDial(ctx, client.viewportID, cmd.Dial); err != nil {
 			return err
 		}
-		s.syncDeviceViewportFromEngine(client.deviceID, client.viewportID)
+		s.syncDeviceViewportFromEngine(client)
 		return nil
 	case "prevPage":
 		return s.engine.ViewportPrevPage(client.viewportID, true)
@@ -1876,13 +1903,13 @@ func (s *Server) executeCommand(client *wsClient, cmd ClientCommand) error {
 		if err := s.engine.ViewportSwitchProfile(client.viewportID, cmd.ProfileID); err != nil {
 			return err
 		}
-		s.syncDeviceViewportFromEngine(client.deviceID, client.viewportID)
+		s.syncDeviceViewportFromEngine(client)
 		return nil
 	case "setFollowHost":
 		if err := s.engine.SetViewportFollowHost(client.viewportID, cmd.FollowHost); err != nil {
 			return err
 		}
-		s.syncDeviceViewportFromEngine(client.deviceID, client.viewportID)
+		s.syncDeviceViewportFromEngine(client)
 		return nil
 	default:
 		return fmt.Errorf("unsupported command %q", cmd.Type)
