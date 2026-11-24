@@ -31,6 +31,9 @@ const (
 	FieldImage     FieldType = "image"
 	FieldFile      FieldType = "file"
 	FieldHotkey    FieldType = "hotkey"
+	FieldInfo      FieldType = "info"
+	FieldLink      FieldType = "link"
+	FieldButton    FieldType = "button"
 )
 
 // SelectOption defines one labeled choice for a FieldSelect or live OptionsKey setting.
@@ -83,6 +86,12 @@ type DynamicOptionsProvider interface {
 // whenever plugin-wide global settings are updated by the host UI or engine.
 type GlobalSettingsListener interface {
 	OnGlobalSettingsChanged(ctx context.Context, pluginUUID string, settings map[string]any) error
+}
+
+// ConfigActionHandler can be implemented optionally by a Provider to handle interactive
+// FieldButton actions invoked from a plugin's global Settings tab.
+type ConfigActionHandler interface {
+	OnConfigAction(ctx context.Context, pluginUUID, actionKey string, settings map[string]any) error
 }
 
 // PluginLifecycleListener can be implemented optionally by a Provider to pause or resume

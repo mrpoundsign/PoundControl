@@ -82,6 +82,7 @@ type wasmInstance struct {
 	eventFn          api.Function
 	timerFn          api.Function
 	globalSettingsFn api.Function
+	configActionFn   api.Function
 
 	lifeCtx    context.Context
 	lifeCancel context.CancelFunc
@@ -124,6 +125,7 @@ type Provider struct {
 var (
 	_ plugin.Provider               = (*Provider)(nil)
 	_ plugin.GlobalSettingsListener = (*Provider)(nil)
+	_ plugin.ConfigActionHandler    = (*Provider)(nil)
 )
 
 // NewProvider constructs a sandboxed wazero WebAssembly plugin provider.
@@ -377,6 +379,53 @@ func (p *Provider) OnGlobalSettingsChanged(_ context.Context, pluginUUID string,
 	return err
 }
 
+// OnConfigAction implements plugin.ConfigActionHandler by invoking the optional
+// pc_on_config_action(ptr, len) export when present on the target Wasm module.
+func (p *Provider) OnConfigAction(_ context.Context, pluginUUID, actionKey string, settings map[string]any) error {
+	pid := strings.TrimSpace(pluginUUID)
+	actKey := strings.TrimSpace(actionKey)
+	if pid == "" {
+		return errors.New("wasmplugin: plugin UUID cannot be empty")
+	}
+	if actKey == "" {
+		return errors.New("wasmplugin: config action key cannot be empty")
+	}
+
+	p.mu.RLock()
+	inst := p.instances[pid]
+	p.mu.RUnlock()
+	if inst == nil {
+		return fmt.Errorf("wasmplugin: unknown plugin %q", pid)
+	}
+	if curState, _ := inst.snapshotState(); curState != StatusRunning {
+		return fmt.Errorf("wasmplugin: plugin %q is not running", inst.manifest.Name)
+	}
+	if inst.configActionFn == nil {
+		return fmt.Errorf("wasmplugin: plugin %q does not export pc_on_config_action", inst.manifest.Name)
+	}
+
+	if settings == nil {
+		settings = map[string]any{}
+	}
+	raw, err := json.Marshal(GuestConfigActionEvent{
+		Action:   actKey,
+		Settings: settings,
+	})
+	if err != nil {
+		return err
+	}
+
+	timeout := max(p.callTimeout, maxHTTPTimeout+5*time.Second)
+	rc, err := inst.callWithBytesTimeout(inst.configActionFn, raw, timeout)
+	if err != nil {
+		return err
+	}
+	if rc != 0 {
+		return fmt.Errorf("wasmplugin: config action %q failed (code %d)", actKey, rc)
+	}
+	return nil
+}
+
 // Close implements plugin.Provider, canceling timers and closing all wazero runtimes.
 func (p *Provider) Close() error {
 	p.reloadMu.Lock()
@@ -475,6 +524,7 @@ func (p *Provider) loadInstance(path string) *wasmInstance {
 	inst.eventFn = mod.ExportedFunction("pc_handle_event")
 	inst.timerFn = mod.ExportedFunction("pc_on_timer")
 	inst.globalSettingsFn = mod.ExportedFunction("pc_on_global_settings")
+	inst.configActionFn = mod.ExportedFunction("pc_on_config_action")
 
 	if manifestFn == nil || inst.eventFn == nil {
 		inst.errMsg = "missing required PoundControl exports (pc_manifest, pc_handle_event)"
@@ -489,7 +539,7 @@ func (p *Provider) loadInstance(path string) *wasmInstance {
 		return inst
 	}
 
-	pm := gm.toPluginManifest()
+	pm := gm.toPluginManifest(filepath.Dir(path))
 	if err := pm.Validate(); err != nil {
 		inst.errMsg = fmt.Sprintf("invalid manifest: %v", err)
 		inst.closeInstance()
@@ -515,6 +565,14 @@ func (p *Provider) instantiateHostModule(ctx context.Context, rt wazero.Runtime,
 			var patch plugin.VisualPatch
 			if err := json.Unmarshal(patchBytes, &patch); err != nil {
 				return -2
+			}
+			if patch.ImageURI != nil && *patch.ImageURI != "" {
+				sanitized := sanitizeWasmImageURI(*patch.ImageURI, filepath.Dir(inst.path))
+				if sanitized == "" {
+					patch.ImageURI = nil
+				} else {
+					*patch.ImageURI = sanitized
+				}
 			}
 			p.mu.RLock()
 			host := p.host
@@ -786,6 +844,17 @@ func (inst *wasmInstance) readManifest(manifestFn api.Function) (GuestManifest, 
 }
 
 func (inst *wasmInstance) callWithBytes(fn api.Function, payload []byte) (int32, error) {
+	var timeout time.Duration
+	if inst.provider != nil {
+		timeout = inst.provider.callTimeout
+	}
+	return inst.callWithBytesTimeout(fn, payload, timeout)
+}
+
+func (inst *wasmInstance) callWithBytesTimeout(fn api.Function, payload []byte, timeout time.Duration) (int32, error) {
+	if timeout <= 0 {
+		timeout = defaultCallTimeout
+	}
 	inst.callMu.Lock()
 	defer inst.callMu.Unlock()
 
@@ -793,7 +862,7 @@ func (inst *wasmInstance) callWithBytes(fn api.Function, payload []byte) (int32,
 		return -1, errors.New("wasm module cannot accept calls")
 	}
 
-	ctx, cancel := context.WithTimeout(inst.lifeCtx, inst.provider.callTimeout)
+	ctx, cancel := context.WithTimeout(inst.lifeCtx, timeout)
 	defer cancel()
 
 	allocRes, err := inst.allocFn.Call(ctx, uint64(len(payload)))

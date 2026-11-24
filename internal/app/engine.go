@@ -2654,6 +2654,35 @@ func (e *Engine) saveGlobalSettings(pluginUUID string, settings map[string]any, 
 	return nil
 }
 
+// InvokePluginConfigAction invokes an interactive FieldButton action on the provider owning pluginUUID,
+// merging persisted global settings and OS keyring secrets with any unsaved formSettings edits.
+func (e *Engine) InvokePluginConfigAction(ctx context.Context, pluginUUID, actionKey string, formSettings map[string]any) error {
+	pid := strings.TrimSpace(pluginUUID)
+	if pid == "" {
+		return errors.New("plugin UUID cannot be empty")
+	}
+	actKey := strings.TrimSpace(actionKey)
+	if actKey == "" {
+		return errors.New("config action key cannot be empty")
+	}
+	if !e.IsPluginEnabled(pid) {
+		name := pid
+		if e.registry != nil {
+			if m, ok := e.registry.Manifest(pid); ok && m.Name != "" {
+				name = m.Name
+			}
+		}
+		return fmt.Errorf("plugin %q is disabled — enable it in the Plugins tab", name)
+	}
+	if e.registry == nil {
+		return errors.New("plugin registry is not initialized")
+	}
+
+	merged := e.GlobalSettings(pid)
+	maps.Copy(merged, formSettings)
+	return e.registry.InvokeConfigAction(ctx, pid, actKey, merged)
+}
+
 // ColorPalette returns a cloned slice of the user's global reusable color swatches.
 func (e *Engine) ColorPalette() []deck.ColorSwatch {
 	e.mu.RLock()

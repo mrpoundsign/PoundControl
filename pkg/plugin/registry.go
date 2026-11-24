@@ -501,6 +501,53 @@ func (r *Registry) NotifyGlobalSettingsChanged(ctx context.Context, pluginUUID s
 	return nil
 }
 
+// InvokeConfigAction forwards an interactive FieldButton action to the provider owning pluginUUID
+// (when enabled and implementing ConfigActionHandler).
+func (r *Registry) InvokeConfigAction(ctx context.Context, pluginUUID, actionKey string, settings map[string]any) error {
+	pid := strings.TrimSpace(pluginUUID)
+	if pid == "" {
+		return errors.New("plugin UUID cannot be empty")
+	}
+	actKey := strings.TrimSpace(actionKey)
+	if actKey == "" {
+		return errors.New("config action key cannot be empty")
+	}
+	manifest, ok := r.Manifest(pid)
+	if !ok {
+		return fmt.Errorf("unknown plugin %q", pid)
+	}
+	if !r.IsPluginEnabled(pid) {
+		name := manifest.Name
+		if name == "" {
+			name = pid
+		}
+		return fmt.Errorf("plugin %q is disabled — enable it in the Plugins tab", name)
+	}
+	for _, p := range r.Providers() {
+		for _, m := range p.Manifests() {
+			if m.UUID != pid {
+				continue
+			}
+			handler, ok := p.(ConfigActionHandler)
+			if !ok {
+				name := m.Name
+				if name == "" {
+					name = pid
+				}
+				return fmt.Errorf("plugin %q does not handle config actions", name)
+			}
+			var cloned map[string]any
+			if len(settings) > 0 {
+				cloned = maps.Clone(settings)
+			} else {
+				cloned = make(map[string]any)
+			}
+			return handler.OnConfigAction(ctx, pid, actKey, cloned)
+		}
+	}
+	return fmt.Errorf("unknown plugin %q", pid)
+}
+
 // Close closes every registered provider and returns any joined close errors.
 func (r *Registry) Close() error {
 	r.mu.Lock()

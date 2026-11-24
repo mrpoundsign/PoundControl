@@ -9,16 +9,17 @@ import (
 )
 
 type stubProvider struct {
-	name      string
-	kind      ProviderKind
-	manifests []Manifest
-	actions   []ActionDescriptor
-	host      HostAPI
-	events    []ActionEvent
-	enabled   map[string]bool
-	optKey    string
-	closed    bool
-	closeErr  error
+	name             string
+	kind             ProviderKind
+	manifests        []Manifest
+	actions          []ActionDescriptor
+	host             HostAPI
+	events           []ActionEvent
+	enabled          map[string]bool
+	optKey           string
+	closed           bool
+	closeErr         error
+	configActionFn   func(ctx context.Context, pluginUUID, actionKey string, settings map[string]any) error
 }
 
 func (s *stubProvider) Kind() ProviderKind     { return s.kind }
@@ -36,6 +37,12 @@ func (s *stubProvider) SetPluginEnabled(_ context.Context, pluginUUID string, en
 	}
 	s.enabled[pluginUUID] = enabled
 	return nil
+}
+func (s *stubProvider) OnConfigAction(ctx context.Context, pluginUUID, actionKey string, settings map[string]any) error {
+	if s.configActionFn != nil {
+		return s.configActionFn(ctx, pluginUUID, actionKey, settings)
+	}
+	return errors.New("config actions unsupported")
 }
 func (s *stubProvider) Close() error {
 	s.closed = true
@@ -271,5 +278,87 @@ func TestRegistryEnableDisableAndRequiredPlugins(t *testing.T) {
 	}
 	if _, ok := reg.Action("com.example.opt.act"); !ok {
 		t.Fatal("expected action restored after SetPluginEnabled(true)")
+	}
+}
+
+type noConfigActionProvider struct {
+	manifests []Manifest
+	actions   []ActionDescriptor
+}
+
+func (n *noConfigActionProvider) Kind() ProviderKind          { return ProviderBuiltin }
+func (n *noConfigActionProvider) Name() string                { return "NoConfigAction" }
+func (n *noConfigActionProvider) Manifests() []Manifest       { return n.manifests }
+func (n *noConfigActionProvider) Actions() []ActionDescriptor { return n.actions }
+func (n *noConfigActionProvider) BindHost(HostAPI)            {}
+func (n *noConfigActionProvider) Dispatch(context.Context, ActionEvent) error {
+	return nil
+}
+func (n *noConfigActionProvider) Close() error { return nil }
+
+func TestRegistryInvokeConfigAction(t *testing.T) {
+	reg := NewRegistry()
+
+	var (
+		gotPlugin   string
+		gotAction   string
+		gotSettings map[string]any
+	)
+	p := &stubProvider{
+		name: "Interactive",
+		kind: ProviderWasm,
+		manifests: []Manifest{{
+			UUID:     "com.example.interactive",
+			Name:     "Interactive",
+			Provider: ProviderWasm,
+			Actions:  []ActionDescriptor{{UUID: "com.example.interactive.act", Name: "Act"}},
+		}},
+		configActionFn: func(_ context.Context, pluginUUID, actionKey string, settings map[string]any) error {
+			gotPlugin = pluginUUID
+			gotAction = actionKey
+			gotSettings = settings
+			return nil
+		},
+	}
+	p.actions = p.manifests[0].Actions
+	if err := reg.RegisterProvider(p); err != nil {
+		t.Fatalf("RegisterProvider(p) error = %v", err)
+	}
+
+	noAct := &noConfigActionProvider{
+		manifests: []Manifest{{
+			UUID:     "com.example.static",
+			Name:     "Static",
+			Provider: ProviderBuiltin,
+			Actions:  []ActionDescriptor{{UUID: "com.example.static.act", Name: "Static Act"}},
+		}},
+	}
+	noAct.actions = noAct.manifests[0].Actions
+	if err := reg.RegisterProvider(noAct); err != nil {
+		t.Fatalf("RegisterProvider(noAct) error = %v", err)
+	}
+
+	if err := reg.InvokeConfigAction(context.Background(), "com.example.interactive", "authConnect", map[string]any{"clientId": "abc"}); err != nil {
+		t.Fatalf("InvokeConfigAction() error = %v", err)
+	}
+	if gotPlugin != "com.example.interactive" || gotAction != "authConnect" || gotSettings["clientId"] != "abc" {
+		t.Fatalf("unexpected InvokeConfigAction delivery: plugin=%q action=%q settings=%+v", gotPlugin, gotAction, gotSettings)
+	}
+
+	if err := reg.InvokeConfigAction(context.Background(), "com.example.unknown", "authConnect", nil); err == nil {
+		t.Fatal("expected error for unknown plugin")
+	}
+	if err := reg.InvokeConfigAction(context.Background(), "com.example.static", "btn", nil); err == nil {
+		t.Fatal("expected error when provider does not implement ConfigActionHandler")
+	}
+	if err := reg.InvokeConfigAction(context.Background(), "com.example.interactive", "", nil); err == nil {
+		t.Fatal("expected error for empty actionKey")
+	}
+
+	if err := reg.SetPluginEnabled("com.example.interactive", false); err != nil {
+		t.Fatalf("SetPluginEnabled(false) error = %v", err)
+	}
+	if err := reg.InvokeConfigAction(context.Background(), "com.example.interactive", "authConnect", nil); err == nil {
+		t.Fatal("expected error invoking config action on disabled plugin")
 	}
 }

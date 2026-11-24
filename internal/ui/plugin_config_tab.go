@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -47,6 +49,9 @@ func buildPluginConfigTab(
 		assetsDir:        assetsDir,
 		onStatus:         reportStatus,
 		secretPluginUUID: manifest.UUID,
+		onConfigAction: func(actionKey string, settings map[string]any) error {
+			return engine.InvokePluginConfigAction(context.Background(), manifest.UUID, actionKey, settings)
+		},
 		onCaptureHotkey: func(title string, target *widget.Entry) {
 			if win == nil || target == nil {
 				return
@@ -137,17 +142,35 @@ func buildPluginConfigTab(
 	}
 	headerItems = append(headerItems, widget.NewSeparator())
 
+	schemaTypes := make(map[string]plugin.FieldType, len(manifest.GlobalSettingsSchema))
+	for _, f := range manifest.GlobalSettingsSchema {
+		schemaTypes[f.Key] = f.Type
+	}
+
 	view.saveBtn = widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
 		collected, err := view.form.collectAndValidate()
 		if err != nil {
 			reportStatus(err.Error())
 			return
 		}
-		if err := engine.SaveGlobalSettings(manifest.UUID, collected); err != nil {
+		existing := engine.GlobalSettings(manifest.UUID)
+		merged := make(map[string]any, len(existing)+len(collected))
+		for k, v := range existing {
+			// Skip omitted keyring passwords so untouched secrets stay preserved in OS keyring.
+			if schemaTypes[k] == plugin.FieldPassword {
+				continue
+			}
+			merged[k] = v
+		}
+		maps.Copy(merged, collected)
+
+		if err := engine.SaveGlobalSettings(manifest.UUID, merged); err != nil {
 			reportStatus(fmt.Sprintf("Save %s settings failed: %v", manifest.Name, err))
 			return
 		}
+		view.form.refreshDynamicFields(engine.GlobalSettings(manifest.UUID))
 		view.form.refreshSecretStates()
+		view.formHost.Refresh()
 		reportStatus("Saved " + manifest.Name + " settings")
 	})
 	view.saveBtn.Importance = widget.HighImportance
@@ -155,6 +178,9 @@ func buildPluginConfigTab(
 	view.resetBtn = widget.NewButtonWithIcon("Reset Defaults", theme.ViewRefreshIcon(), func() {
 		defaults := make(map[string]any, len(manifest.GlobalSettingsSchema))
 		for _, f := range manifest.GlobalSettingsSchema {
+			if isDisplayOnlyFieldType(f.Type) {
+				continue
+			}
 			if f.Type == plugin.FieldPassword {
 				defaults[f.Key] = ""
 				continue
@@ -183,6 +209,9 @@ func buildPluginConfigTab(
 	unsub := engine.Subscribe(func(snap app.Snapshot) {
 		dispatchUI(func() {
 			view.form.refreshPalette(snap.ColorPalette)
+			view.form.refreshDynamicFields(engine.GlobalSettings(manifest.UUID))
+			view.form.refreshSecretStatesPreserveInput()
+			view.formHost.Refresh()
 		})
 	})
 

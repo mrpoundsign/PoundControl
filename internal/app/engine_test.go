@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -854,10 +855,13 @@ func TestEngineAppearanceBackgroundsHideTitleAndGlobalPalette(t *testing.T) {
 }
 
 type fakeGlobalConfigProvider struct {
-	mu           sync.Mutex
-	manifest     plugin.Manifest
-	lastNotified map[string]any
-	notifyCount  int
+	mu               sync.Mutex
+	manifest         plugin.Manifest
+	lastNotified     map[string]any
+	notifyCount      int
+	lastActionKey    string
+	lastActionArgs   map[string]any
+	actionErr        error
 }
 
 func (f *fakeGlobalConfigProvider) Kind() plugin.ProviderKind        { return plugin.ProviderWasm }
@@ -875,6 +879,14 @@ func (f *fakeGlobalConfigProvider) OnGlobalSettingsChanged(_ context.Context, _ 
 	f.notifyCount++
 	f.mu.Unlock()
 	return nil
+}
+func (f *fakeGlobalConfigProvider) OnConfigAction(_ context.Context, _ string, actionKey string, settings map[string]any) error {
+	f.mu.Lock()
+	f.lastActionKey = actionKey
+	f.lastActionArgs = maps.Clone(settings)
+	err := f.actionErr
+	f.mu.Unlock()
+	return err
 }
 
 func TestEngineGlobalSettingsSecretsAndListener(t *testing.T) {
@@ -973,6 +985,72 @@ func TestEngineGlobalSettingsSecretsAndListener(t *testing.T) {
 	}
 	if _, stillHas := eng.GlobalSettings(pluginUUID)["apiToken"]; stillHas {
 		t.Fatalf("expected apiToken removed from GlobalSettings, got %+v", eng.GlobalSettings(pluginUUID))
+	}
+}
+
+func TestEngineInvokePluginConfigActionMergesSecretsAndRespectsDisabled(t *testing.T) {
+	const pluginUUID = "com.test.global.actions"
+	prov := &fakeGlobalConfigProvider{
+		manifest: plugin.Manifest{
+			UUID:     pluginUUID,
+			Name:     "Twitch Sim",
+			Version:  "1.0.0",
+			Provider: plugin.ProviderWasm,
+			GlobalSettingsSchema: []plugin.SettingField{
+				{Key: "clientId", Label: "Client ID", Type: plugin.FieldText, Default: "default-cid"},
+				{Key: "accessToken", Label: "Access Token", Type: plugin.FieldPassword},
+				{Key: "authConnect", Label: "Sign In", Type: plugin.FieldButton},
+			},
+			Actions: []plugin.ActionDescriptor{
+				{UUID: pluginUUID + ".act", PluginUUID: pluginUUID, Name: "Act", Category: "Twitch Sim"},
+			},
+		},
+	}
+
+	reg := plugin.NewRegistry()
+	if err := reg.RegisterProvider(core.New()); err != nil {
+		t.Fatalf("RegisterProvider(core) error = %v", err)
+	}
+	if err := reg.RegisterProvider(prov); err != nil {
+		t.Fatalf("RegisterProvider(prov) error = %v", err)
+	}
+
+	memSecrets := secrets.NewMemoryStore()
+	eng, err := NewEngine(deck.NewMemoryStore(nil), reg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	eng.SetSecretStore(memSecrets)
+	t.Cleanup(func() { _ = eng.Close() })
+
+	if err := eng.SaveGlobalSettings(pluginUUID, map[string]any{
+		"clientId":    "saved-cid",
+		"accessToken": "keyring-secret",
+		"userId":      "42",
+	}); err != nil {
+		t.Fatalf("SaveGlobalSettings() error = %v", err)
+	}
+
+	// Unsaved form override for clientId overlays saved settings while preserving keyring secret & userId.
+	if err := eng.InvokePluginConfigAction(context.Background(), pluginUUID, "authConnect", map[string]any{
+		"clientId": "override-cid",
+	}); err != nil {
+		t.Fatalf("InvokePluginConfigAction() error = %v", err)
+	}
+
+	prov.mu.Lock()
+	gotKey := prov.lastActionKey
+	gotArgs := prov.lastActionArgs
+	prov.mu.Unlock()
+	if gotKey != "authConnect" || gotArgs["clientId"] != "override-cid" || gotArgs["accessToken"] != "keyring-secret" || gotArgs["userId"] != "42" {
+		t.Fatalf("unexpected merged InvokePluginConfigAction payload: key=%q args=%+v", gotKey, gotArgs)
+	}
+
+	if err := eng.SetPluginEnabled(pluginUUID, false); err != nil {
+		t.Fatalf("SetPluginEnabled(false) error = %v", err)
+	}
+	if err := eng.InvokePluginConfigAction(context.Background(), pluginUUID, "authConnect", nil); err == nil {
+		t.Fatal("expected error invoking config action on disabled plugin")
 	}
 }
 

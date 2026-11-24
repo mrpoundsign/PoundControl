@@ -863,3 +863,250 @@ func main() {}
 		t.Fatalf("expected subtitle updated from pc_on_global_settings to %q, got (%+v, %v)", "mrpoundsign", patch, ok)
 	}
 }
+
+func TestProviderConfigActionAndManifestIcons(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "guest_cfg_action")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll error = %v", err)
+	}
+
+	guestCode := `//go:build wasip1 && wasm
+
+package main
+
+import (
+	"encoding/json"
+	"unsafe"
+)
+
+//go:wasmimport poundcontrol pc_save_global_settings
+func pcSaveGlobalSettings(jsonPtr, jsonLen uint32) int32
+
+//go:wasmimport poundcontrol pc_update_visual
+func pcUpdateVisual(ctxPtr, ctxLen, patchPtr, patchLen uint32) int32
+
+var allocations = map[uint32][]byte{}
+
+//go:wasmexport pc_alloc
+func pcAlloc(size uint32) uint32 {
+	if size == 0 {
+		size = 1
+	}
+	b := make([]byte, size)
+	ptr := uint32(uintptr(unsafe.Pointer(&b[0])))
+	allocations[ptr] = b
+	return ptr
+}
+
+//go:wasmexport pc_free
+func pcFree(ptr uint32) {
+	delete(allocations, ptr)
+}
+
+func returnHostString(s string) uint64 {
+	raw := []byte(s)
+	ptr := pcAlloc(uint32(len(raw)))
+	copy(allocations[ptr], raw)
+	return (uint64(ptr) << 32) | uint64(len(raw))
+}
+
+func ptrLen(b []byte) (uint32, uint32) {
+	if len(b) == 0 {
+		return 0, 0
+	}
+	return uint32(uintptr(unsafe.Pointer(&b[0]))), uint32(len(b))
+}
+
+//go:wasmexport pc_manifest
+func pcManifest() uint64 {
+	manifest := map[string]any{
+		"uuid":         "com.test.wasm.cfgaction",
+		"name":         "Config Action Test",
+		"version":      "1.0.0",
+		"icon":         "data:image/svg+xml;base64,plug",
+		"categoryIcon": "data:image/svg+xml;base64,cat",
+		"globalSettingsSchema": []map[string]any{
+			{"key": "clientId", "label": "Client ID", "type": "text", "default": "default-cid"},
+			{"key": "deviceCode", "label": "Code", "type": "info"},
+			{"key": "authConnect", "label": "Connect", "type": "button"},
+		},
+		"actions": []map[string]any{
+			{"uuid": "com.test.wasm.cfgaction.act", "name": "Act", "icon": "data:image/svg+xml;base64,act"},
+		},
+	}
+	raw, _ := json.Marshal(manifest)
+	return returnHostString(string(raw))
+}
+
+//go:wasmexport pc_on_config_action
+func pcOnConfigAction(ptr, size uint32) int32 {
+	raw := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(ptr))), size)
+	var ev struct {
+		Action   string         ` + "`" + `json:"action"` + "`" + `
+		Settings map[string]any ` + "`" + `json:"settings"` + "`" + `
+	}
+	if err := json.Unmarshal(raw, &ev); err != nil {
+		return -1
+	}
+	if ev.Action == "positiveErr" {
+		return 1
+	}
+	if ev.Action != "authConnect" {
+		return -3
+	}
+	cid, _ := ev.Settings["clientId"].(string)
+	updated, _ := json.Marshal(map[string]any{
+		"clientId": cid,
+		"deviceCode": map[string]any{
+			"text":     "ABCD-1234",
+			"copyable": true,
+		},
+		"authConnect": map[string]any{
+			"label":    "Cancel Sign-In",
+			"disabled": false,
+		},
+	})
+	gp, gl := ptrLen(updated)
+	if rc := pcSaveGlobalSettings(gp, gl); rc != 0 {
+		return -4
+	}
+	return 0
+}
+
+//go:wasmexport pc_handle_event
+func pcHandleEvent(ptr, size uint32) int32 {
+	raw := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(ptr))), size)
+	var ev struct {
+		Context string ` + "`" + `json:"context"` + "`" + `
+	}
+	if err := json.Unmarshal(raw, &ev); err != nil {
+		return -1
+	}
+	img := "data:image/svg+xml;base64,safe"
+	if ev.Context == "unsafeImg" {
+		img = "file:///etc/passwd"
+	}
+	patchBytes, _ := json.Marshal(map[string]any{"image": img, "subtitle": ev.Context})
+	cp, cl := ptrLen([]byte(ev.Context))
+	pp, pl := ptrLen(patchBytes)
+	pcUpdateVisual(cp, cl, pp, pl)
+	return 0
+}
+
+func main() {}
+`
+	if err := os.WriteFile(filepath.Join(srcDir, "go.mod"), []byte("module guestcfgaction\n\ngo 1.24\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(go.mod) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte(guestCode), 0o600); err != nil {
+		t.Fatalf("WriteFile(main.go) error = %v", err)
+	}
+
+	defaultDir := filepath.Join(tmp, "wasm")
+	if err := os.MkdirAll(defaultDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll error = %v", err)
+	}
+	compileWasmFixture(t, srcDir, filepath.Join(defaultDir, "cfgaction.wasm"))
+
+	host := newFakeHostAPI()
+	prov := NewProvider(Options{DefaultPluginsDir: defaultDir})
+	prov.BindHost(host)
+	t.Cleanup(func() { _ = prov.Close() })
+
+	if err := prov.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	manifests := prov.Manifests()
+	if len(manifests) != 1 {
+		t.Fatalf("expected 1 manifest, got %+v", manifests)
+	}
+	if manifests[0].Icon != "data:image/svg+xml;base64,plug" ||
+		manifests[0].CategoryIcon != "data:image/svg+xml;base64,cat" ||
+		manifests[0].Actions[0].Icon != "data:image/svg+xml;base64,act" {
+		t.Fatalf("unexpected manifest/action icons: %+v", manifests[0])
+	}
+
+	if err := prov.OnConfigAction(context.Background(), "com.test.wasm.cfgaction", "authConnect", map[string]any{
+		"clientId": "custom-cid",
+	}); err != nil {
+		t.Fatalf("OnConfigAction(authConnect) error = %v", err)
+	}
+
+	gs := host.GetGlobalSettings("com.test.wasm.cfgaction")
+	if gs["clientId"] != "custom-cid" {
+		t.Fatalf("expected guest-saved clientId=custom-cid, got %+v", gs)
+	}
+	codeMap, ok := gs["deviceCode"].(map[string]any)
+	if !ok || codeMap["text"] != "ABCD-1234" || codeMap["copyable"] != true {
+		t.Fatalf("expected guest-saved copyable deviceCode map, got %#v", gs["deviceCode"])
+	}
+
+	// Non-zero guest return codes (both negative and positive) must fail the call without marking StatusError.
+	if err := prov.OnConfigAction(context.Background(), "com.test.wasm.cfgaction", "unknownBtn", nil); err == nil {
+		t.Fatal("expected error for negative guest return code")
+	}
+	if err := prov.OnConfigAction(context.Background(), "com.test.wasm.cfgaction", "positiveErr", nil); err == nil {
+		t.Fatal("expected error for positive non-zero guest return code")
+	}
+	if statuses := prov.Plugins(); len(statuses) != 1 || statuses[0].State != StatusRunning {
+		t.Fatalf("expected module to stay StatusRunning after non-zero return codes, got %+v", statuses)
+	}
+
+	// pc_update_visual accepts data:image/* URIs and strips unsafe file:// image URIs.
+	if err := prov.Dispatch(context.Background(), plugin.ActionEvent{
+		Type:       plugin.EventKeyDown,
+		Context:    "safeImg",
+		ActionUUID: "com.test.wasm.cfgaction.act",
+	}); err != nil {
+		t.Fatalf("Dispatch(safeImg) error = %v", err)
+	}
+	if pSafe, ok := host.latestPatch("safeImg"); !ok || pSafe.ImageURI == nil || *pSafe.ImageURI != "data:image/svg+xml;base64,safe" {
+		t.Fatalf("expected safe data:image URI preserved, got (%+v, %v)", pSafe, ok)
+	}
+
+	if err := prov.Dispatch(context.Background(), plugin.ActionEvent{
+		Type:       plugin.EventKeyDown,
+		Context:    "unsafeImg",
+		ActionUUID: "com.test.wasm.cfgaction.act",
+	}); err != nil {
+		t.Fatalf("Dispatch(unsafeImg) error = %v", err)
+	}
+	if pUnsafe, ok := host.latestPatch("unsafeImg"); !ok || pUnsafe.ImageURI != nil {
+		t.Fatalf("expected unsafe file:// image URI stripped, got (%+v, %v)", pUnsafe, ok)
+	}
+}
+
+func TestSanitizeWasmImageURI(t *testing.T) {
+	pluginDir := t.TempDir()
+	wantIcon := filepath.Join(pluginDir, "assets", "icon.svg")
+
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty", raw: "   ", want: ""},
+		{name: "data image svg", raw: " data:image/svg+xml;base64,abc ", want: "data:image/svg+xml;base64,abc"},
+		{name: "data image png", raw: "DATA:IMAGE/PNG;base64,xyz", want: "DATA:IMAGE/PNG;base64,xyz"},
+		{name: "relative subpath", raw: "assets/icon.svg", want: wantIcon},
+		{name: "reject data text html", raw: "data:text/html,<script>", want: ""},
+		{name: "reject file uri", raw: "file:///etc/passwd", want: ""},
+		{name: "reject http uri", raw: "http://example.com/a.png", want: ""},
+		{name: "reject https uri", raw: "https://example.com/a.png", want: ""},
+		{name: "reject parent traversal", raw: "../outside.png", want: ""},
+		{name: "reject nested traversal", raw: "assets/../../outside.png", want: ""},
+		{name: "reject dot self", raw: ".", want: ""},
+		{name: "reject posix abs", raw: "/etc/passwd", want: ""},
+		{name: "reject windows drive", raw: `C:\Windows\win.ini`, want: ""},
+		{name: "reject unc path", raw: `\\server\share\icon.png`, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeWasmImageURI(tc.raw, pluginDir); got != tc.want {
+				t.Fatalf("sanitizeWasmImageURI(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}

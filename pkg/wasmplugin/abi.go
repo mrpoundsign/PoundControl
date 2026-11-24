@@ -3,6 +3,7 @@ package wasmplugin
 
 import (
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -34,6 +35,8 @@ type GuestManifest struct {
 	Version              string                `json:"version"`
 	Author               string                `json:"author,omitempty"`
 	Description          string                `json:"description,omitempty"`
+	Icon                 string                `json:"icon,omitempty"`
+	CategoryIcon         string                `json:"categoryIcon,omitempty"`
 	Permissions          GuestPermissions      `json:"permissions,omitzero"`
 	GlobalSettingsSchema []plugin.SettingField `json:"globalSettingsSchema,omitempty"`
 	Actions              []GuestAction         `json:"actions"`
@@ -50,6 +53,7 @@ type GuestAction struct {
 	Name           string                `json:"name"`
 	Category       string                `json:"category,omitempty"`
 	Tooltip        string                `json:"tooltip,omitempty"`
+	Icon           string                `json:"icon,omitempty"`
 	DefaultTitle   string                `json:"defaultTitle,omitempty"`
 	DefaultColor   string                `json:"defaultColor,omitempty"`
 	DefaultImage   string                `json:"defaultImage,omitempty"`
@@ -90,7 +94,14 @@ type GuestNavCommand struct {
 	ProfileRef string `json:"profileRef,omitempty"`
 }
 
-func (gm GuestManifest) toPluginManifest() plugin.Manifest {
+// GuestConfigActionEvent is dispatched to a Wasm plugin's pc_on_config_action export
+// when the user clicks a FieldButton in the plugin's Settings tab.
+type GuestConfigActionEvent struct {
+	Action   string         `json:"action"`
+	Settings map[string]any `json:"settings,omitempty"`
+}
+
+func (gm GuestManifest) toPluginManifest(pluginDir string) plugin.Manifest {
 	actions := make([]plugin.ActionDescriptor, 0, len(gm.Actions))
 	for _, ga := range gm.Actions {
 		ctrls := make([]deck.ControllerType, len(ga.Controllers))
@@ -111,9 +122,10 @@ func (gm GuestManifest) toPluginManifest() plugin.Manifest {
 			Name:           strings.TrimSpace(ga.Name),
 			Category:       cat,
 			Tooltip:        strings.TrimSpace(ga.Tooltip),
+			Icon:           sanitizeWasmImageURI(ga.Icon, pluginDir),
 			DefaultTitle:   strings.TrimSpace(ga.DefaultTitle),
 			DefaultColor:   strings.TrimSpace(ga.DefaultColor),
-			DefaultImage:   strings.TrimSpace(ga.DefaultImage),
+			DefaultImage:   sanitizeWasmImageURI(ga.DefaultImage, pluginDir),
 			HideTitle:      ga.HideTitle,
 			Controllers:    ctrls,
 			SettingsSchema: schema,
@@ -131,10 +143,69 @@ func (gm GuestManifest) toPluginManifest() plugin.Manifest {
 		Version:              strings.TrimSpace(gm.Version),
 		Author:               strings.TrimSpace(gm.Author),
 		Description:          strings.TrimSpace(gm.Description),
+		Icon:                 sanitizeWasmImageURI(gm.Icon, pluginDir),
+		CategoryIcon:         sanitizeWasmImageURI(gm.CategoryIcon, pluginDir),
 		Provider:             plugin.ProviderWasm,
 		GlobalSettingsSchema: globalSchema,
 		Actions:              actions,
 	}
+}
+
+// sanitizeWasmImageURI restricts Wasm plugin image URIs to inline data:image/* URIs
+// or relative paths that stay strictly within pluginDir without escaping via ".." or symlinks.
+func sanitizeWasmImageURI(raw, pluginDir string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(trimmed), "data:image/") {
+		return trimmed
+	}
+	// Reject schemes (file:, http:, https:, non-image data:), Windows drive letters, UNC/absolute paths.
+	if strings.Contains(trimmed, ":") ||
+		strings.HasPrefix(trimmed, "/") ||
+		strings.HasPrefix(trimmed, `\`) ||
+		filepath.IsAbs(trimmed) {
+		return ""
+	}
+	dirTrimmed := strings.TrimSpace(pluginDir)
+	if dirTrimmed == "" {
+		return ""
+	}
+	baseAbs, err := filepath.Abs(dirTrimmed)
+	if err != nil {
+		return ""
+	}
+	joined := filepath.Clean(filepath.Join(baseAbs, filepath.FromSlash(trimmed)))
+	if !isSubpath(baseAbs, joined, false) {
+		return ""
+	}
+	if evalBase, err := filepath.EvalSymlinks(baseAbs); err == nil {
+		if evalTarget, err := filepath.EvalSymlinks(joined); err == nil {
+			if !isSubpath(evalBase, evalTarget, false) {
+				return ""
+			}
+		} else if evalParent, err := filepath.EvalSymlinks(filepath.Dir(joined)); err == nil {
+			if !isSubpath(evalBase, evalParent, true) {
+				return ""
+			}
+		}
+	}
+	return joined
+}
+
+func isSubpath(baseDir, target string, allowEqual bool) bool {
+	rel, err := filepath.Rel(baseDir, target)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return allowEqual
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return false
+	}
+	return true
 }
 
 // isHostAllowed verifies rawURL uses http/https and matches at least one explicit entry in allowedHosts.
