@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,13 +30,19 @@ const (
 	ActionMultiAction   = PluginUUID + ".multiaction"
 	ActionDelay         = PluginUUID + ".delay"
 	ActionCounter       = PluginUUID + ".counter"
+
+	maxMultiActionDepth = 8
 )
+
+type multiActionDepthKey struct{}
 
 // MultiActionStep defines one sequential step inside an ActionMultiAction sequence.
 type MultiActionStep struct {
+	ID         string         `json:"id,omitempty"`
 	ActionUUID string         `json:"actionUuid"`
 	Settings   map[string]any `json:"settings,omitempty"`
 	DelayMs    int            `json:"delayMs,omitempty"`
+	Disabled   bool           `json:"disabled,omitempty"`
 }
 
 type counterState struct {
@@ -191,12 +199,21 @@ func buildManifest() plugin.Manifest {
 			Provider:     plugin.ProviderBuiltin,
 			SettingsSchema: []plugin.SettingField{
 				{
+					Key:     "continueOnError",
+					Label:   "Continue on Error",
+					Type:    plugin.FieldBool,
+					Section: plugin.SectionAdvanced,
+					Default: false,
+					Help:    "Keep running remaining steps if one step fails.",
+				},
+				{
 					Key:         "steps",
 					Label:       "Steps JSON",
 					Type:        plugin.FieldMultiline,
+					Section:     plugin.SectionAdvanced,
 					Default:     "[]",
 					Placeholder: `[{"actionUuid":"com.github.mrpoundsign.poundcontrol.core.delay","settings":{"ms":150}}]`,
-					Help:        "JSON array of {\"actionUuid\", \"settings\", \"delayMs\"} objects executed in order.",
+					Help:        "JSON array of {\"actionUuid\", \"settings\", \"delayMs\", \"disabled\"} objects executed in order.",
 				},
 			},
 		},
@@ -301,7 +318,7 @@ func (p *Provider) Dispatch(ctx context.Context, ev plugin.ActionEvent) error {
 		return p.handleCounter(host, ev)
 	case ActionDelay:
 		if ev.Type == plugin.EventKeyDown || ev.Type == plugin.EventDialPress {
-			return sleepContext(ctx, time.Duration(intSetting(ev.Settings, "ms", 250))*time.Millisecond)
+			return SleepContext(ctx, time.Duration(intSetting(ev.Settings, "ms", 250))*time.Millisecond)
 		}
 		return nil
 	case ActionMultiAction:
@@ -409,32 +426,56 @@ func (p *Provider) handleMultiAction(ctx context.Context, host plugin.HostAPI, e
 	if host == nil || host.Deck() == nil {
 		return errors.New("core provider: deck controller unavailable")
 	}
-	steps, err := parseMultiActionSteps(ev.Settings)
+	depth, _ := ctx.Value(multiActionDepthKey{}).(int)
+	if depth >= maxMultiActionDepth {
+		host.UpdateVisual(ev.Context, plugin.VisualPatch{Flash: "alert"})
+		return fmt.Errorf("multi-action nesting depth exceeded maximum (%d)", maxMultiActionDepth)
+	}
+	childCtx := context.WithValue(ctx, multiActionDepthKey{}, depth+1)
+
+	steps, err := ParseMultiActionSteps(ev.Settings)
 	if err != nil {
 		host.UpdateVisual(ev.Context, plugin.VisualPatch{Flash: "alert"})
 		return err
 	}
+
+	continueOnErr := MultiActionContinueOnError(ev.Settings)
+	var firstErr error
 	for i, step := range steps {
-		if err := ctx.Err(); err != nil {
+		if step.Disabled {
+			continue
+		}
+		if err := childCtx.Err(); err != nil {
 			return err
 		}
 		if step.DelayMs > 0 {
-			if err := sleepContext(ctx, time.Duration(step.DelayMs)*time.Millisecond); err != nil {
+			if err := SleepContext(childCtx, time.Duration(step.DelayMs)*time.Millisecond); err != nil {
 				return err
 			}
 		}
 		if strings.TrimSpace(step.ActionUUID) != "" {
-			if err := host.Deck().TriggerAction(ctx, step.ActionUUID, step.Settings); err != nil {
-				host.UpdateVisual(ev.Context, plugin.VisualPatch{Flash: "alert"})
-				return fmt.Errorf("multi-action step %d (%s): %w", i, step.ActionUUID, err)
+			if err := host.Deck().TriggerAction(childCtx, step.ActionUUID, step.Settings); err != nil {
+				stepErr := fmt.Errorf("multi-action step %d (%s): %w", i, step.ActionUUID, err)
+				if !continueOnErr {
+					host.UpdateVisual(ev.Context, plugin.VisualPatch{Flash: "alert"})
+					return stepErr
+				}
+				if firstErr == nil {
+					firstErr = stepErr
+				}
 			}
 		}
+	}
+	if firstErr != nil {
+		host.UpdateVisual(ev.Context, plugin.VisualPatch{Flash: "alert"})
+		return firstErr
 	}
 	host.UpdateVisual(ev.Context, plugin.VisualPatch{Flash: "ok"})
 	return nil
 }
 
-func parseMultiActionSteps(settings map[string]any) ([]MultiActionStep, error) {
+// ParseMultiActionSteps decodes the "steps" entry from Multi-Action slot settings.
+func ParseMultiActionSteps(settings map[string]any) ([]MultiActionStep, error) {
 	if settings == nil {
 		return nil, nil
 	}
@@ -468,7 +509,126 @@ func parseMultiActionSteps(settings map[string]any) ([]MultiActionStep, error) {
 	}
 }
 
-func sleepContext(ctx context.Context, d time.Duration) error {
+// NormalizeMultiActionSteps converts legacy per-step delayMs offsets into explicit ActionDelay blocks,
+// assigns unique IDs to every step, and deep-clones settings maps.
+func NormalizeMultiActionSteps(steps []MultiActionStep) []MultiActionStep {
+	if len(steps) == 0 {
+		return nil
+	}
+	out := make([]MultiActionStep, 0, len(steps))
+	seenIDs := make(map[string]struct{}, len(steps))
+	uniqueID := func(raw string) string {
+		id := strings.TrimSpace(raw)
+		if id != "" {
+			if _, exists := seenIDs[id]; !exists {
+				seenIDs[id] = struct{}{}
+				return id
+			}
+		}
+		for {
+			id = deck.NewUUID()
+			if _, exists := seenIDs[id]; !exists {
+				seenIDs[id] = struct{}{}
+				return id
+			}
+		}
+	}
+
+	for _, step := range steps {
+		uuid := strings.TrimSpace(step.ActionUUID)
+		cloned := cloneStepMap(step.Settings)
+		if uuid == "" {
+			if step.DelayMs > 0 {
+				out = append(out, MultiActionStep{
+					ID:         uniqueID(step.ID),
+					ActionUUID: ActionDelay,
+					Settings:   map[string]any{"ms": step.DelayMs},
+					Disabled:   step.Disabled,
+				})
+			}
+			continue
+		}
+		if uuid == ActionDelay {
+			ms := intSetting(cloned, "ms", 250)
+			if step.DelayMs > 0 {
+				if _, hasMs := cloned["ms"]; hasMs {
+					ms += step.DelayMs
+				} else {
+					ms = step.DelayMs
+				}
+			}
+			ms = max(0, ms)
+			cloned["ms"] = ms
+			out = append(out, MultiActionStep{
+				ID:         uniqueID(step.ID),
+				ActionUUID: ActionDelay,
+				Settings:   cloned,
+				Disabled:   step.Disabled,
+			})
+			continue
+		}
+		if step.DelayMs > 0 {
+			out = append(out, MultiActionStep{
+				ID:         uniqueID(""),
+				ActionUUID: ActionDelay,
+				Settings:   map[string]any{"ms": step.DelayMs},
+				Disabled:   step.Disabled,
+			})
+		}
+		out = append(out, MultiActionStep{
+			ID:         uniqueID(step.ID),
+			ActionUUID: uuid,
+			Settings:   cloned,
+			Disabled:   step.Disabled,
+		})
+	}
+	return out
+}
+
+// EncodeMultiActionSteps serializes steps into the JSON string persisted under settings["steps"].
+func EncodeMultiActionSteps(steps []MultiActionStep) (string, error) {
+	if len(steps) == 0 {
+		return "[]", nil
+	}
+	encoded, err := json.Marshal(steps)
+	if err != nil {
+		return "", fmt.Errorf("encode multi-action steps: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// MultiActionContinueOnError reports whether a Multi-Action sequence keeps executing remaining steps after an error.
+func MultiActionContinueOnError(settings map[string]any) bool {
+	return boolSetting(settings, "continueOnError", false)
+}
+
+// StepDelayMs returns the delay duration in milliseconds represented by step.
+func StepDelayMs(step MultiActionStep) int {
+	if strings.TrimSpace(step.ActionUUID) == ActionDelay {
+		return max(0, intSetting(step.Settings, "ms", 250))
+	}
+	return max(0, step.DelayMs)
+}
+
+// MultiActionEstimatedDurationMs returns the total delay duration in milliseconds across all enabled steps.
+func MultiActionEstimatedDurationMs(steps []MultiActionStep) int {
+	total := 0
+	for _, step := range steps {
+		if step.Disabled {
+			continue
+		}
+		if strings.TrimSpace(step.ActionUUID) == ActionDelay {
+			total += max(0, intSetting(step.Settings, "ms", 250))
+		}
+		if step.DelayMs > 0 {
+			total += step.DelayMs
+		}
+	}
+	return total
+}
+
+// SleepContext pauses for d or returns early if ctx is canceled.
+func SleepContext(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return nil
 	}
@@ -479,6 +639,36 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 		return ctx.Err()
 	case <-timer.C:
 		return nil
+	}
+}
+
+func cloneStepMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return make(map[string]any)
+	}
+	out := make(map[string]any, len(src))
+	for k, v := range src {
+		out[k] = cloneStepValue(v)
+	}
+	return out
+}
+
+func cloneStepValue(v any) any {
+	switch tv := v.(type) {
+	case map[string]any:
+		return cloneStepMap(tv)
+	case []any:
+		cp := make([]any, len(tv))
+		for i, elem := range tv {
+			cp[i] = cloneStepValue(elem)
+		}
+		return cp
+	case map[string]string:
+		return maps.Clone(tv)
+	case []string:
+		return slices.Clone(tv)
+	default:
+		return v
 	}
 }
 

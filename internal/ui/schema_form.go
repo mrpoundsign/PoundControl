@@ -602,6 +602,87 @@ func (s *schemaFormState) refreshDynamicFields(settings map[string]any) {
 	}
 }
 
+func (s *schemaFormState) setFieldValues(settings map[string]any) {
+	for key, binding := range s.fields {
+		val, exists := settings[key]
+		if !exists {
+			val = binding.schema.Default
+		}
+		if binding.updateValue != nil {
+			binding.updateValue(val)
+			continue
+		}
+		if binding.secretEntry != nil {
+			continue
+		}
+		switch ctrl := binding.control.(type) {
+		case *colorFieldControl:
+			valStr := ""
+			if val != nil {
+				valStr = fmt.Sprint(val)
+			}
+			if ctrl.Value() != valStr {
+				ctrl.SetValue(valStr)
+			}
+			continue
+		case *imageFieldControl:
+			valStr := ""
+			if val != nil {
+				valStr = fmt.Sprint(val)
+			}
+			if ctrl.Value() != valStr {
+				ctrl.SetValue(valStr)
+			}
+			continue
+		case *fileFieldControl:
+			valStr := ""
+			if val != nil {
+				valStr = fmt.Sprint(val)
+			}
+			if ctrl.Value() != valStr {
+				ctrl.SetValue(valStr)
+			}
+			continue
+		}
+		switch w := binding.widget.(type) {
+		case *widget.Check:
+			b := toBoolValue(val)
+			if w.Checked != b {
+				w.SetChecked(b)
+			}
+		case *widget.Select:
+			curVal := ""
+			if val != nil {
+				curVal = fmt.Sprint(val)
+			}
+			for lbl, optVal := range binding.optMap {
+				if optVal == curVal || lbl == curVal {
+					if w.Selected != lbl {
+						w.SetSelected(lbl)
+					}
+					break
+				}
+			}
+		case *widget.SelectEntry:
+			valStr := ""
+			if val != nil {
+				valStr = fmt.Sprint(val)
+			}
+			if w.Text != valStr {
+				w.SetText(valStr)
+			}
+		case *widget.Entry:
+			valStr := ""
+			if val != nil {
+				valStr = fmt.Sprint(val)
+			}
+			if w.Text != valStr {
+				w.SetText(valStr)
+			}
+		}
+	}
+}
+
 func isDisplayOnlyFieldType(t plugin.FieldType) bool {
 	switch t {
 	case plugin.FieldInfo, plugin.FieldLink, plugin.FieldButton:

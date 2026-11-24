@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image/color"
 	"image/png"
@@ -24,6 +25,7 @@ import (
 	"github.com/mrpoundsign/PoundControl/internal/app"
 	"github.com/mrpoundsign/PoundControl/internal/version"
 	"github.com/mrpoundsign/PoundControl/internal/webdeck"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/core"
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/obs"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 	"github.com/mrpoundsign/PoundControl/pkg/plugin"
@@ -113,6 +115,7 @@ type MainWindow struct {
 	settingsCleanup      func()
 	catalogSearch        *widget.Entry
 	catalogClearBtn      *widget.Button
+	catalogSub           *widget.Label
 	catalogList          *fyne.Container
 	catalogButtons       map[string]*widget.Button
 	catalogGroupHeaders  map[string]*widget.Button
@@ -120,12 +123,24 @@ type MainWindow struct {
 	catalogCollapsed     map[string]bool
 	catalogIconCache    map[string]fyne.Resource
 	surface             *deckSurfaceView
-	deckTitle      *canvas.Text
-	deckHint       *canvas.Text
-	inspector      *ActionInspector
-	statusBarLbl   *widget.Label
-	confirmDlg     *dialog.ConfirmDialog
-	shortcuts      fyne.ShortcutHandler
+	deckCenterObj       fyne.CanvasObject
+	multiEditor         *MultiActionEditor
+	multiEditProfileID  string
+	multiEditPageIdx    int
+	multiEditFolderID   string
+	multiEditCoords     deck.Coordinates
+	multiEditSlotCtx    string
+	multiEditHistoryRev uint64
+	deckTitle           *canvas.Text
+	deckHint            *canvas.Text
+	inspector         *ActionInspector
+	statusBarLbl      *widget.Label
+	confirmDlg        *dialog.ConfirmDialog
+	unsavedDlg        *dialog.CustomDialog
+	unsavedSaveBtn    *widget.Button
+	unsavedDiscardBtn *widget.Button
+	unsavedCancelBtn  *widget.Button
+	shortcuts         fyne.ShortcutHandler
 
 	activePairAttemptID string
 	pairDialog          *dialog.CustomDialog
@@ -195,6 +210,21 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 	mw.inspector.SetOnSetPluginEnabled(mw.SetPluginEnabled)
 	mw.inspector.SetOnMoveSelected(mw.StartMoveSelected)
 	mw.inspector.SetOnCopySelected(mw.CopySelected)
+	mw.inspector.SetOnEditMultiAction(mw.openSelectedMultiActionEditor)
+
+	mw.multiEditor = newMultiActionEditor(multiActionEditorOptions{
+		engine:             engine,
+		resolveIcon:        mw.resolveActionIcon,
+		onBack:             mw.tryExitMultiActionEditor,
+		onStepsChanged:     mw.persistMultiActionSequence,
+		onSelectStep:       mw.syncInspectorForMultiStep,
+		onStepDataSynced:   mw.syncStepInspectorValues,
+		onBeforeStepChange: mw.inspector.FlushStepChanges,
+		onBeforeHatLeave: func(proceed func()) {
+			mw.guardUnsavedSlotChanges("selecting a sequence block", proceed)
+		},
+		onStatus: mw.setStatus,
+	})
 
 	mw.surface = newDeckSurfaceView(
 		mw.handleKeyTap,
@@ -264,31 +294,29 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 		}
 	})
 	mw.addCanvasShortcut(&fyne.ShortcutCut{}, func(s fyne.Shortcut) {
-		if mw.forwardShortcutToFocused(s) || !mw.isControlTabActive() || len(mw.win.Canvas().Overlays().List()) > 0 {
+		if mw.forwardShortcutToFocused(s) || !mw.isControlTabActive() || len(mw.win.Canvas().Overlays().List()) > 0 || mw.isMultiEditing() {
 			return
 		}
 		mw.StartMoveSelected()
 	})
 	mw.addCanvasShortcut(&fyne.ShortcutCopy{}, func(s fyne.Shortcut) {
-		if mw.forwardShortcutToFocused(s) || !mw.isControlTabActive() || len(mw.win.Canvas().Overlays().List()) > 0 {
+		if mw.forwardShortcutToFocused(s) || !mw.isControlTabActive() || len(mw.win.Canvas().Overlays().List()) > 0 || mw.isMultiEditing() {
 			return
 		}
 		mw.CopySelected()
 	})
 	mw.addCanvasShortcut(&fyne.ShortcutPaste{}, func(s fyne.Shortcut) {
-		if mw.forwardShortcutToFocused(s) || !mw.isControlTabActive() || len(mw.win.Canvas().Overlays().List()) > 0 {
+		if mw.forwardShortcutToFocused(s) || !mw.isControlTabActive() || len(mw.win.Canvas().Overlays().List()) > 0 || mw.isMultiEditing() {
 			return
 		}
 		mw.PasteSelected()
 	})
 	mw.addCanvasShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyEscape}, func(fyne.Shortcut) {
-		if mw.isControlTabActive() && len(mw.win.Canvas().Overlays().List()) == 0 && mw.clipMode != clipNone {
-			mw.ClearClipboard()
-		}
+		mw.handleEscapeKey()
 	})
 	win.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) {
-		if ev.Name == fyne.KeyEscape && mw.isControlTabActive() && len(mw.win.Canvas().Overlays().List()) == 0 && mw.clipMode != clipNone {
-			mw.ClearClipboard()
+		if ev.Name == fyne.KeyEscape {
+			mw.handleEscapeKey()
 		}
 	})
 
@@ -299,8 +327,13 @@ func NewMainWindow(a fyne.App, engine *app.Engine) *MainWindow {
 		})
 	})
 
+	win.SetCloseIntercept(mw.handleCloseRequest)
+
 	win.SetOnClosed(func() {
 		mw.cancelHoverPageTimer()
+		if mw.multiEditor != nil {
+			mw.multiEditor.Close()
+		}
 		if mw.surface != nil {
 			mw.surface.Close()
 		}
@@ -397,6 +430,7 @@ func (mw *MainWindow) SetRunMode(run bool) {
 		mw.syncing = false
 	}
 	if run {
+		mw.exitMultiActionEditor()
 		if mw.clipMode == clipMove || mw.dragActive {
 			mw.clearDragState()
 			if mw.clipMode == clipMove {
@@ -894,6 +928,23 @@ func (mw *MainWindow) handleRedo() {
 }
 
 func (mw *MainWindow) assignAction(actionUUID string) {
+	if mw.isMultiEditing() {
+		desc, hasDesc := mw.engine.Registry().Action(actionUUID)
+		if !hasDesc {
+			mw.setStatus("Unknown action " + actionUUID)
+			return
+		}
+		if actionUUID == core.ActionMultiAction {
+			mw.setStatus("Add individual actions directly to this sequence")
+			return
+		}
+		if !desc.SupportsController(deck.ControllerKeypad) {
+			mw.setStatus("Encoder-only actions cannot be added to a keypad Multi-Action")
+			return
+		}
+		mw.multiEditor.AppendAction(desc)
+		return
+	}
 	newDesc, hasDesc := mw.engine.Registry().Action(actionUUID)
 	if hasDesc && !newDesc.SupportsController(mw.selectedController) {
 		mw.performAssignAction(mw.selectedController, mw.selectedSlot, mw.selectedDial, actionUUID)
@@ -1015,6 +1066,12 @@ func (mw *MainWindow) handleKeyTap(c deck.Coordinates) {
 		mw.SelectSlot(c)
 		return
 	}
+	if mw.selectedController != deck.ControllerKeypad || c != mw.selectedSlot {
+		mw.guardUnsavedSlotChanges("selecting another slot", func() {
+			mw.SelectSlot(c)
+		})
+		return
+	}
 	mw.SelectSlot(c)
 }
 
@@ -1039,6 +1096,12 @@ func (mw *MainWindow) handleDialTap(dial int) {
 		}
 		mw.ClearClipboard()
 		mw.SelectDial(dial)
+		return
+	}
+	if mw.selectedController != deck.ControllerEncoder || dial != mw.selectedDial {
+		mw.guardUnsavedSlotChanges("selecting another slot", func() {
+			mw.SelectDial(dial)
+		})
 		return
 	}
 	mw.SelectDial(dial)
@@ -1118,7 +1181,35 @@ func (mw *MainWindow) applySnapshot(snap app.Snapshot) {
 	mw.surface.ApplySnapshot(snap, true, mw.selectedController, mw.selectedSlot, mw.selectedDial)
 	mw.syncSurfaceHighlights()
 	mw.syncClipboardUI()
-	mw.inspector.SetSelection(snap, mw.selectedController, mw.selectedSlot, mw.selectedDial)
+	if mw.isMultiEditing() {
+		stillSameContainer := snap.ActiveProfileID == mw.multiEditProfileID &&
+			snap.PageIndex == mw.multiEditPageIdx &&
+			snap.ActiveFolderID == mw.multiEditFolderID &&
+			mw.selectedController == deck.ControllerKeypad &&
+			mw.selectedSlot == mw.multiEditCoords
+		rendered, ok := mw.slotLookup(snap, deck.ControllerKeypad, mw.multiEditCoords, 0)
+		stillSameSlot := ok && rendered.Config != nil &&
+			rendered.Config.Context == mw.multiEditSlotCtx &&
+			rendered.Config.ActionUUID == core.ActionMultiAction
+		if !stillSameContainer || !stillSameSlot {
+			mw.exitMultiActionEditor()
+			return
+		}
+		if snap.HistoryRevision != mw.multiEditHistoryRev {
+			mw.multiEditHistoryRev = snap.HistoryRevision
+			mw.multiEditor.SyncFromSlot(slotDisplayLabel(rendered), rendered.Config.Settings)
+			if mw.multiEditor.SelectedStepIndex() >= 0 {
+				mw.syncInspectorForMultiStep(mw.multiEditor.SelectedStepIndex())
+			} else {
+				mw.inspector.ClearStepSelection()
+				mw.inspector.SetSelection(snap, mw.selectedController, mw.selectedSlot, mw.selectedDial)
+			}
+		} else if mw.multiEditor.SelectedStepIndex() < 0 {
+			mw.inspector.SetSelection(snap, mw.selectedController, mw.selectedSlot, mw.selectedDial)
+		}
+	} else {
+		mw.inspector.SetSelection(snap, mw.selectedController, mw.selectedSlot, mw.selectedDial)
+	}
 	mw.refreshStatusBar(snap)
 	if !slices.Equal(prevDisabled, snap.DisabledPlugins) {
 		mw.syncOBSBadgeVisibility()
@@ -1165,9 +1256,25 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 		}
 		idx := mw.profileSelect.SelectedIndex()
 		if idx >= 0 && idx < len(mw.profileIDs) {
-			if err := mw.engine.SwitchProfile(mw.profileIDs[idx]); err != nil {
-				mw.setStatus("Switch profile failed: " + err.Error())
+			targetID := mw.profileIDs[idx]
+			if targetID == mw.lastSnap.ActiveProfileID {
+				return
 			}
+			switchProfile := func() {
+				if err := mw.engine.SwitchProfile(targetID); err != nil {
+					mw.setStatus("Switch profile failed: " + err.Error())
+				}
+			}
+			if mw.inspector != nil && mw.inspector.HasUnsavedSlotChanges() {
+				mw.syncing = true
+				if mw.lastSnap.ActiveProfileName != "" {
+					mw.profileSelect.SetSelected(mw.lastSnap.ActiveProfileName)
+				}
+				mw.syncing = false
+				mw.guardUnsavedSlotChanges("switching profiles", switchProfile)
+				return
+			}
+			switchProfile()
 		}
 	})
 
@@ -1177,6 +1284,24 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 	mw.runModeCheck = widget.NewCheck("Run Mode", func(checked bool) {
 		if mw.syncing {
 			return
+		}
+		if checked && mw.inspector != nil {
+			if mw.isMultiEditing() && mw.inspector.stepMode {
+				if err := mw.inspector.FlushStepChanges(); err != nil {
+					mw.syncing = true
+					mw.runModeCheck.SetChecked(false)
+					mw.syncing = false
+					return
+				}
+			} else if mw.inspector.HasUnsavedSlotChanges() {
+				mw.syncing = true
+				mw.runModeCheck.SetChecked(false)
+				mw.syncing = false
+				mw.guardUnsavedSlotChanges("entering Run Mode", func() {
+					mw.SetRunMode(true)
+				})
+				return
+			}
 		}
 		mw.SetRunMode(checked)
 	})
@@ -1229,8 +1354,8 @@ func (mw *MainWindow) buildHeader() fyne.CanvasObject {
 
 func (mw *MainWindow) buildActionCatalog() fyne.CanvasObject {
 	heading := widget.NewLabelWithStyle("Action Catalog", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	sub := widget.NewLabel("Click an action to assign to the selected slot")
-	sub.Wrapping = fyne.TextWrapWord
+	mw.catalogSub = widget.NewLabel("Click an action to assign to the selected slot")
+	mw.catalogSub.Wrapping = fyne.TextWrapWord
 
 	mw.catalogSearch = widget.NewEntry()
 	mw.catalogSearch.SetPlaceHolder("Search plugins or actions...")
@@ -1258,7 +1383,7 @@ func (mw *MainWindow) buildActionCatalog() fyne.CanvasObject {
 	return container.NewStack(
 		panelBg,
 		container.NewBorder(
-			container.NewPadded(container.NewVBox(heading, sub, searchRow, widget.NewSeparator())),
+			container.NewPadded(container.NewVBox(heading, mw.catalogSub, searchRow, widget.NewSeparator())),
 			nil, nil, nil,
 			container.NewVScroll(container.NewPadded(mw.catalogList)),
 		),
@@ -1590,7 +1715,302 @@ func (mw *MainWindow) buildDeckCenter() fyne.CanvasObject {
 	)
 
 	canvasBg := canvas.NewRectangle(ColorObsidianSlate)
-	return container.NewStack(canvasBg, container.NewScroll(centered))
+	mw.deckCenterObj = container.NewStack(canvasBg, container.NewScroll(centered))
+	if mw.multiEditor != nil {
+		return container.NewStack(mw.deckCenterObj, mw.multiEditor.Object())
+	}
+	return mw.deckCenterObj
+}
+
+func (mw *MainWindow) isMultiEditing() bool {
+	return mw.multiEditor != nil && mw.multiEditor.Active()
+}
+
+func (mw *MainWindow) handleEscapeKey() {
+	if !mw.isControlTabActive() || len(mw.win.Canvas().Overlays().List()) > 0 {
+		return
+	}
+	if mw.clipMode != clipNone {
+		mw.ClearClipboard()
+		return
+	}
+	if mw.isMultiEditing() {
+		mw.tryExitMultiActionEditor()
+	}
+}
+
+func (mw *MainWindow) handleCloseRequest() {
+	if mw.isMultiEditing() && mw.inspector != nil && mw.inspector.stepMode {
+		if err := mw.inspector.FlushStepChanges(); err != nil {
+			return
+		}
+		mw.win.Close()
+		return
+	}
+	if mw.inspector != nil && mw.inspector.HasUnsavedSlotChanges() {
+		mw.guardUnsavedSlotChanges("closing PoundControl", func() {
+			mw.win.Close()
+		})
+		return
+	}
+	mw.win.Close()
+}
+
+func (mw *MainWindow) guardUnsavedSlotChanges(reason string, onProceed func()) {
+	if mw.inspector == nil || !mw.inspector.HasUnsavedSlotChanges() {
+		if onProceed != nil {
+			onProceed()
+		}
+		return
+	}
+	if mw.unsavedDlg != nil {
+		return
+	}
+
+	msg := widget.NewLabel(fmt.Sprintf(
+		"You have unsaved changes to %q.\n\nSave your changes before %s?",
+		mw.inspector.UnsavedTargetName(),
+		reason,
+	))
+	msg.Wrapping = fyne.TextWrapWord
+
+	var dlg *dialog.CustomDialog
+	dismiss := func() {
+		if mw.unsavedDlg == dlg {
+			mw.unsavedDlg = nil
+			mw.unsavedSaveBtn = nil
+			mw.unsavedDiscardBtn = nil
+			mw.unsavedCancelBtn = nil
+		}
+		if dlg != nil {
+			dlg.Hide()
+		}
+	}
+
+	mw.unsavedSaveBtn = widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
+		if !mw.inspector.SaveCurrent() {
+			dismiss()
+			return
+		}
+		dismiss()
+		if onProceed != nil {
+			onProceed()
+		}
+	})
+	mw.unsavedSaveBtn.Importance = widget.HighImportance
+
+	mw.unsavedDiscardBtn = widget.NewButton("Discard", func() {
+		mw.inspector.DiscardSlotChanges()
+		dismiss()
+		if onProceed != nil {
+			onProceed()
+		}
+	})
+	mw.unsavedDiscardBtn.Importance = widget.DangerImportance
+
+	mw.unsavedCancelBtn = widget.NewButton("Cancel", func() {
+		dismiss()
+	})
+
+	btnRow := container.NewHBox(
+		layout.NewSpacer(),
+		mw.unsavedCancelBtn,
+		mw.unsavedDiscardBtn,
+		mw.unsavedSaveBtn,
+	)
+	content := container.NewVBox(msg, widget.NewSeparator(), btnRow)
+	dlg = dialog.NewCustomWithoutButtons("Unsaved Changes", content, mw.win)
+	dlg.SetOnClosed(func() {
+		if mw.unsavedDlg == dlg {
+			mw.unsavedDlg = nil
+			mw.unsavedSaveBtn = nil
+			mw.unsavedDiscardBtn = nil
+			mw.unsavedCancelBtn = nil
+		}
+	})
+	mw.unsavedDlg = dlg
+	dlg.Resize(fyne.NewSize(420, 180))
+	dlg.Show()
+}
+
+func (mw *MainWindow) openSelectedMultiActionEditor() {
+	if mw.selectedController != deck.ControllerKeypad {
+		return
+	}
+	mw.openMultiActionEditor(mw.selectedSlot)
+}
+
+func (mw *MainWindow) openMultiActionEditor(coords deck.Coordinates) {
+	if mw.runMode || mw.multiEditor == nil || mw.deckCenterObj == nil {
+		return
+	}
+	mw.guardUnsavedSlotChanges("opening sequence editor", func() {
+		mw.openMultiActionEditorDirect(coords)
+	})
+}
+
+func (mw *MainWindow) openMultiActionEditorDirect(coords deck.Coordinates) {
+	if mw.runMode || mw.multiEditor == nil || mw.deckCenterObj == nil {
+		return
+	}
+	snap := mw.engine.Snapshot()
+	rendered, ok := mw.slotLookup(snap, deck.ControllerKeypad, coords, 0)
+	if !ok || rendered.Config == nil || rendered.Config.ActionUUID != core.ActionMultiAction {
+		return
+	}
+	if mw.clipMode != clipNone {
+		mw.ClearClipboard()
+	}
+	if mw.dragActive {
+		mw.clearDragState()
+	}
+
+	mw.selectedController = deck.ControllerKeypad
+	mw.selectedSlot = coords
+	mw.multiEditProfileID = snap.ActiveProfileID
+	mw.multiEditPageIdx = snap.PageIndex
+	mw.multiEditFolderID = snap.ActiveFolderID
+	mw.multiEditCoords = coords
+	mw.multiEditSlotCtx = rendered.Config.Context
+	mw.multiEditHistoryRev = snap.HistoryRevision
+
+	if mw.catalogSub != nil {
+		mw.catalogSub.SetText("Sequence Mode: click an action to append a block")
+	}
+	mw.deckCenterObj.Hide()
+	mw.multiEditor.Open(slotDisplayLabel(rendered), coords, rendered.Config.Settings)
+	mw.multiEditor.Object().Show()
+	mw.inspector.ClearStepSelection()
+	mw.inspector.SetEditingMultiAction(true)
+	mw.inspector.SetSelection(snap, deck.ControllerKeypad, coords, 0)
+	mw.setStatus("Editing sequence for " + slotDisplayLabel(rendered))
+}
+
+func (mw *MainWindow) tryExitMultiActionEditor() {
+	if !mw.isMultiEditing() {
+		return
+	}
+	if mw.inspector != nil && mw.inspector.stepMode {
+		if err := mw.inspector.FlushStepChanges(); err != nil {
+			return
+		}
+		mw.exitMultiActionEditor()
+		return
+	}
+	mw.guardUnsavedSlotChanges("leaving sequence editor", func() {
+		mw.exitMultiActionEditor()
+	})
+}
+
+func (mw *MainWindow) exitMultiActionEditor() {
+	if !mw.isMultiEditing() {
+		return
+	}
+	mw.multiEditor.Close()
+	mw.multiEditor.Object().Hide()
+	if mw.deckCenterObj != nil {
+		mw.deckCenterObj.Show()
+	}
+	mw.multiEditProfileID = ""
+	mw.multiEditPageIdx = 0
+	mw.multiEditFolderID = ""
+	mw.multiEditSlotCtx = ""
+	mw.multiEditHistoryRev = 0
+
+	if mw.catalogSub != nil {
+		mw.catalogSub.SetText("Click an action to assign to the selected slot")
+	}
+	mw.inspector.SetEditingMultiAction(false)
+	mw.inspector.ClearStepSelection()
+	mw.applySnapshot(mw.engine.Snapshot())
+	mw.setStatus("Returned to Virtual Deck")
+}
+
+func (mw *MainWindow) persistMultiActionSequence(steps []core.MultiActionStep, continueOnErr bool) error {
+	if !mw.isMultiEditing() {
+		return nil
+	}
+	encoded, err := core.EncodeMultiActionSteps(steps)
+	if err != nil {
+		return err
+	}
+	snap := mw.engine.Snapshot()
+	rendered, ok := mw.slotLookup(snap, deck.ControllerKeypad, mw.multiEditCoords, 0)
+	if !ok || rendered.Config == nil || rendered.Config.Context != mw.multiEditSlotCtx {
+		return errors.New("multi-action slot is no longer active")
+	}
+	settings := cloneStepSettingsMap(rendered.Config.Settings)
+	settings["steps"] = encoded
+	settings["continueOnError"] = continueOnErr
+
+	appearance := app.SlotAppearance{
+		Title:           rendered.Config.Title,
+		Color:           rendered.Config.Color,
+		BackgroundColor: rendered.Config.BackgroundColor,
+		BackgroundImage: rendered.Config.BackgroundImage,
+		HideTitle:       rendered.Config.HideTitle,
+		SetHotkey:       true,
+		Hotkey:          rendered.Config.Hotkey,
+	}
+	if err := mw.engine.UpdateKeypadSlotAppearance(mw.multiEditCoords, appearance, settings); err != nil {
+		return err
+	}
+	mw.multiEditHistoryRev = mw.engine.Snapshot().HistoryRevision
+	return nil
+}
+
+func (mw *MainWindow) syncInspectorForMultiStep(stepIdx int) {
+	if !mw.isMultiEditing() {
+		return
+	}
+	if stepIdx < 0 {
+		mw.inspector.ClearStepSelection()
+		mw.inspector.SetSelection(mw.engine.Snapshot(), deck.ControllerKeypad, mw.multiEditCoords, 0)
+		return
+	}
+	steps := mw.multiEditor.Steps()
+	if stepIdx >= len(steps) {
+		mw.inspector.ClearStepSelection()
+		mw.inspector.SetSelection(mw.engine.Snapshot(), deck.ControllerKeypad, mw.multiEditCoords, 0)
+		return
+	}
+	step := steps[stepIdx]
+	var desc *plugin.ActionDescriptor
+	if reg := mw.engine.Registry(); reg != nil {
+		if d, ok := reg.Action(step.ActionUUID); ok {
+			dcopy := d
+			desc = &dcopy
+		}
+	}
+	mw.inspector.SetStepSelection(stepIdx, len(steps), step, desc, stepInspectorCallbacks{
+		onSave: func(idx int, settings map[string]any) error {
+			return mw.multiEditor.UpdateStepSettings(idx, settings)
+		},
+		onTest: func(_ int, st core.MultiActionStep) {
+			if st.ActionUUID == core.ActionDelay {
+				mw.setStatus(fmt.Sprintf("Wait block configured for %dms", core.StepDelayMs(st)))
+				return
+			}
+			if err := mw.engine.TriggerAction(context.Background(), st.ActionUUID, st.Settings); err != nil {
+				mw.setStatus("Step test failed: " + err.Error())
+				return
+			}
+			mw.setStatus("Triggered step")
+		},
+		onDelete: func(idx int) {
+			mw.multiEditor.DeleteStep(idx)
+		},
+		onBackToButton: func() {
+			mw.multiEditor.SelectStep(-1)
+		},
+	})
+}
+
+func (mw *MainWindow) syncStepInspectorValues(stepIdx int, settings map[string]any) {
+	if !mw.isMultiEditing() || mw.multiEditor.SelectedStepIndex() != stepIdx {
+		return
+	}
+	mw.inspector.SyncStepSettings(settings)
 }
 
 func (mw *MainWindow) forwardShortcutToFocused(s fyne.Shortcut) bool {
@@ -1869,7 +2289,9 @@ func (mw *MainWindow) syncPageStrip(snap app.Snapshot) {
 		mw.pageAddBtn = nil
 		mw.pageDeleteBtn = nil
 		folderBtn := widget.NewButton("← Exit Folder ("+strings.Join(snap.FolderPath, " / ")+")", func() {
-			_ = mw.engine.CloseFolder()
+			mw.guardUnsavedSlotChanges("exiting folder", func() {
+				_ = mw.engine.CloseFolder()
+			})
 		})
 		hint := widget.NewLabel("Switch to root pages or cancel Move to pick another location")
 		mw.pageStrip.Objects = []fyne.CanvasObject{folderBtn, hint}
@@ -1886,19 +2308,28 @@ func (mw *MainWindow) syncPageStrip(snap app.Snapshot) {
 	for i, name := range pageNames {
 		pageNum := i + 1
 		b := widget.NewButton(name, func() {
-			if err := mw.engine.GoToPage(pageNum); err != nil {
-				mw.setStatus("Page switch failed: " + err.Error())
+			if !mw.lastSnap.InFolder && pageNum-1 == mw.lastSnap.PageIndex {
+				return
 			}
+			mw.guardUnsavedSlotChanges("switching pages", func() {
+				if err := mw.engine.GoToPage(pageNum); err != nil {
+					mw.setStatus("Page switch failed: " + err.Error())
+				}
+			})
 		})
 		btns[i] = b
 		objs = append(objs, b)
 	}
 	addBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
-		if _, err := mw.engine.AddPage(""); err != nil {
-			mw.setStatus("Add page failed: " + err.Error())
-		}
+		mw.guardUnsavedSlotChanges("adding a page", func() {
+			if _, err := mw.engine.AddPage(""); err != nil {
+				mw.setStatus("Add page failed: " + err.Error())
+			}
+		})
 	})
-	delBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), mw.confirmDeleteCurrentPage)
+	delBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
+		mw.guardUnsavedSlotChanges("deleting this page", mw.confirmDeleteCurrentPage)
+	})
 	if len(pageNames) <= 1 {
 		delBtn.Disable()
 	}
@@ -2048,6 +2479,10 @@ func (mw *MainWindow) handleTileDragMove(srcCoords deck.Coordinates, absPos fyne
 		return
 	}
 	if !mw.dragActive {
+		if mw.inspector != nil && mw.inspector.HasUnsavedSlotChanges() {
+			mw.setStatus("Save or discard unsaved changes before moving slots")
+			return
+		}
 		if _, ok := mw.slotLookup(mw.lastSnap, deck.ControllerKeypad, srcCoords, 0); !ok {
 			return
 		}
@@ -2148,6 +2583,10 @@ func (mw *MainWindow) handleDialDragMove(srcDial int, absPos fyne.Position) {
 		return
 	}
 	if !mw.dragActive {
+		if mw.inspector != nil && mw.inspector.HasUnsavedSlotChanges() {
+			mw.setStatus("Save or discard unsaved changes before moving slots")
+			return
+		}
 		if _, ok := mw.slotLookup(mw.lastSnap, deck.ControllerEncoder, deck.Coordinates{}, srcDial); !ok {
 			return
 		}
@@ -2191,6 +2630,16 @@ func (mw *MainWindow) handleKeySecondaryTap(c deck.Coordinates, absPos fyne.Posi
 	if mw.runMode || mw.win == nil || mw.win.Canvas() == nil {
 		return
 	}
+	if mw.selectedController != deck.ControllerKeypad || c != mw.selectedSlot {
+		mw.guardUnsavedSlotChanges("selecting another slot", func() {
+			mw.showKeyContextMenu(c, absPos)
+		})
+		return
+	}
+	mw.showKeyContextMenu(c, absPos)
+}
+
+func (mw *MainWindow) showKeyContextMenu(c deck.Coordinates, absPos fyne.Position) {
 	mw.SelectSlot(c)
 	snap := mw.engine.Snapshot()
 	rendered, hasRendered := snap.Slots[c.SlotKey()]
@@ -2204,6 +2653,14 @@ func (mw *MainWindow) handleKeySecondaryTap(c deck.Coordinates, absPos fyne.Posi
 	assigned := hasRendered && rendered.Config != nil
 	var items []*fyne.MenuItem
 	if assigned {
+		if rendered.Config.ActionUUID == core.ActionMultiAction {
+			items = append(items,
+				fyne.NewMenuItem("Edit Sequence...", func() {
+					mw.openMultiActionEditor(c)
+				}),
+				fyne.NewMenuItemSeparator(),
+			)
+		}
 		srcLoc := mw.engine.CurrentSlotLocation(deck.ControllerKeypad, c, 0)
 		items = append(items,
 			fyne.NewMenuItem("Move (Pick Slot)", func() {
@@ -2309,6 +2766,16 @@ func (mw *MainWindow) handleDialSecondaryTap(dial int, absPos fyne.Position) {
 	if mw.runMode || mw.win == nil || mw.win.Canvas() == nil {
 		return
 	}
+	if mw.selectedController != deck.ControllerEncoder || dial != mw.selectedDial {
+		mw.guardUnsavedSlotChanges("selecting another slot", func() {
+			mw.showDialContextMenu(dial, absPos)
+		})
+		return
+	}
+	mw.showDialContextMenu(dial, absPos)
+}
+
+func (mw *MainWindow) showDialContextMenu(dial int, absPos fyne.Position) {
 	mw.SelectDial(dial)
 	snap := mw.engine.Snapshot()
 	_, assigned := mw.slotLookup(snap, deck.ControllerEncoder, deck.Coordinates{}, dial)

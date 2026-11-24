@@ -1284,6 +1284,7 @@ func TestMainWindowMoveSwapCopyAcrossPagesAndProfiles(t *testing.T) {
 	if mw.clipMode != clipNone {
 		t.Fatalf("expected focused entry Ctrl+C not to hijack Studio slot copy, got mode=%v", mw.clipMode)
 	}
+	mw.inspector.titleEntry.SetText("Alpha")
 	mw.win.Canvas().Focus(nil)
 
 	// 5. Cross-profile Copy/Paste (including Folder subtree cloning) + Dial Move/Swap.

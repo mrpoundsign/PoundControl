@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -15,9 +16,17 @@ import (
 
 	"github.com/mrpoundsign/PoundControl/internal/app"
 	"github.com/mrpoundsign/PoundControl/internal/hotkey"
+	"github.com/mrpoundsign/PoundControl/pkg/builtin/core"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
+
+type stepInspectorCallbacks struct {
+	onSave         func(idx int, settings map[string]any) error
+	onTest         func(idx int, step core.MultiActionStep)
+	onDelete       func(idx int)
+	onBackToButton func()
+}
 
 // ActionInspector renders a schema-driven configuration form for the selected slot or dial.
 type ActionInspector struct {
@@ -32,6 +41,7 @@ type ActionInspector struct {
 	onSetPluginEnabled      func(string, bool) error
 	onMoveSelected          func()
 	onCopySelected          func()
+	onEditMultiAction       func()
 	assetsDir               string
 	palette                 []deck.ColorSwatch
 	root                    fyne.CanvasObject
@@ -42,6 +52,7 @@ type ActionInspector struct {
 	formScroll *container.Scroll
 	formBox    *fyne.Container
 	accordion  *widget.Accordion
+	moveCopyRow *fyne.Container
 	actionsRow *fyne.Container
 
 	sectionOpen map[string]bool // keyed by strings.ToLower(sectionTitle)
@@ -64,19 +75,34 @@ type ActionInspector struct {
 	copyBtn            *widget.Button
 	lastCapture        *hotkeyCaptureSession
 
-	selCtrl          deck.ControllerType
-	selCoords        deck.Coordinates
-	selDial          int
-	boundContext     string
-	boundActionID    string
-	boundAutoBack    bool
-	boundDisabled    bool
-	boundUnavailable bool
-	boundHasSchema   bool
-	boundPluginUUID  string
-	boundHistoryRev  uint64
-	curSettings      map[string]any
-	syncing          bool
+	selCtrl            deck.ControllerType
+	selCoords          deck.Coordinates
+	selDial            int
+	boundContext       string
+	boundActionID      string
+	boundAutoBack      bool
+	boundDisabled      bool
+	boundUnavailable   bool
+	boundHasSchema     bool
+	boundPluginUUID    string
+	boundHistoryRev    uint64
+	curSettings        map[string]any
+	syncing            bool
+	editingMultiAction bool
+	slotInitialSnap    string
+
+	stepMode           bool
+	stepIndex          int
+	stepTotal          int
+	stepData           core.MultiActionStep
+	stepDesc           *plugin.ActionDescriptor
+	stepNoSchema       bool
+	stepRawJSONEntry   *widget.Entry
+	stepInitialSnap    string
+	onStepSave         func(idx int, settings map[string]any) error
+	onStepTest         func(idx int, step core.MultiActionStep)
+	onStepDelete       func(idx int)
+	onStepBackToButton func()
 }
 
 // NewActionInspector constructs an inspector panel bound to engine.
@@ -126,8 +152,9 @@ func NewActionInspector(win fyne.Window, engine *app.Engine, onStatus func(strin
 		}
 	})
 	ins.copyBtn.Disable()
+	ins.moveCopyRow = container.NewGridWithColumns(2, ins.moveBtn, ins.copyBtn)
 	ins.actionsRow = container.NewVBox(
-		container.NewGridWithColumns(2, ins.moveBtn, ins.copyBtn),
+		ins.moveCopyRow,
 		container.NewGridWithColumns(3, ins.saveBtn, ins.triggerBtn, ins.clearBtn),
 	)
 
@@ -199,6 +226,20 @@ func (ins *ActionInspector) SetOnCopySelected(fn func()) {
 	ins.onCopySelected = fn
 }
 
+// SetOnEditMultiAction registers a callback invoked when the user clicks Edit Sequence in the inspector.
+func (ins *ActionInspector) SetOnEditMultiAction(fn func()) {
+	ins.onEditMultiAction = fn
+}
+
+// SetEditingMultiAction toggles whether the center-stage sequence editor is currently active for the selected slot.
+func (ins *ActionInspector) SetEditingMultiAction(editing bool) {
+	if ins.editingMultiAction == editing {
+		return
+	}
+	ins.editingMultiAction = editing
+	ins.InvalidateBinding()
+}
+
 // InvalidateBinding clears the cached inspector binding so the next SetSelection rebuilds controls cleanly.
 func (ins *ActionInspector) InvalidateBinding() {
 	ins.boundContext = ""
@@ -223,6 +264,9 @@ func (ins *ActionInspector) refreshPaletteSwatches(swatches []deck.ColorSwatch) 
 // SetSelection refreshes the inspector to reflect the currently selected slot or dial.
 // Form controls are rebuilt only when the bound action context or action UUID changes so active input focus is preserved.
 func (ins *ActionInspector) SetSelection(snap app.Snapshot, ctrl deck.ControllerType, coords deck.Coordinates, dial int) {
+	if ins.stepMode {
+		return
+	}
 	ins.refreshPaletteSwatches(snap.ColorPalette)
 	ins.selCtrl = ctrl
 	ins.selCoords = coords
@@ -308,6 +352,7 @@ func (ins *ActionInspector) clearForm(title, message string, canTrigger bool) {
 	ins.boundUnavailable = false
 	ins.boundHasSchema = false
 	ins.boundPluginUUID = ""
+	ins.slotInitialSnap = ""
 	ins.schemaForm.reset()
 	ins.titleEntry = nil
 	ins.accentColorCtrl = nil
@@ -479,8 +524,11 @@ func (ins *ActionInspector) rebuildForm(rendered *app.RenderedSlot) {
 	grouped := groupSchemaFields(schema)
 	var accItems []*widget.AccordionItem
 
-	genObjs := make([]fyne.CanvasObject, 0, 2+len(grouped.general)*2)
+	genObjs := make([]fyne.CanvasObject, 0, 4+len(grouped.general)*2)
 	genObjs = append(genObjs, widget.NewLabel("Title"), ins.titleEntry)
+	if cfg.ActionUUID == core.ActionMultiAction {
+		genObjs = append(genObjs, ins.buildMultiActionSummaryCard(cfg.Settings)...)
+	}
 	genObjs = append(genObjs, ins.buildSchemaObjects(grouped.general, cfg.Settings)...)
 	accItems = append(accItems, ins.makeAccordionSection(plugin.SectionGeneral, genObjs))
 
@@ -567,6 +615,7 @@ func (ins *ActionInspector) rebuildForm(rendered *app.RenderedSlot) {
 	if ins.copyBtn != nil {
 		ins.copyBtn.Enable()
 	}
+	ins.slotInitialSnap = ins.snapshotSlotForm()
 }
 
 func (ins *ActionInspector) saveSectionOpenState() {
@@ -606,8 +655,34 @@ func (ins *ActionInspector) RefreshDynamicOptions() {
 }
 
 func (ins *ActionInspector) handleSave() {
-	if ins.syncing || ins.boundActionID == "" {
-		return
+	ins.SaveCurrent()
+}
+
+// SaveCurrent validates and persists the currently active slot or sequence step form.
+// It returns true if saving succeeded (or there was nothing bound to save).
+func (ins *ActionInspector) SaveCurrent() bool {
+	if ins.syncing {
+		return false
+	}
+	if ins.stepMode {
+		settings, err := ins.collectStepSettings()
+		if err != nil {
+			ins.reportStatus(err.Error())
+			return false
+		}
+		if ins.onStepSave != nil {
+			if err := ins.onStepSave(ins.stepIndex, settings); err != nil {
+				ins.reportStatus("Save step failed: " + err.Error())
+				return false
+			}
+		}
+		ins.stepData.Settings = cloneStepSettingsMap(settings)
+		ins.stepInitialSnap = ins.snapshotStepForm()
+		ins.reportStatus("Saved step " + ins.actionLbl.Text)
+		return true
+	}
+	if ins.boundActionID == "" {
+		return true
 	}
 	title := ""
 	if ins.titleEntry != nil {
@@ -633,7 +708,7 @@ func (ins *ActionInspector) handleSave() {
 		settings, err = ins.schemaForm.collectAndValidate()
 		if err != nil {
 			ins.reportStatus(err.Error())
-			return
+			return false
 		}
 	}
 
@@ -644,7 +719,7 @@ func (ins *ActionInspector) handleSave() {
 			spec, hkErr := hotkey.Parse(rawHK)
 			if hkErr != nil {
 				ins.reportStatus("Invalid hotkey: " + hkErr.Error())
-				return
+				return false
 			}
 			canonicalHotkey = spec.String()
 			ins.hotkeyEntry.SetText(canonicalHotkey)
@@ -669,12 +744,158 @@ func (ins *ActionInspector) handleSave() {
 	}
 	if saveErr != nil {
 		ins.reportStatus("Save failed: " + saveErr.Error())
-		return
+		return false
 	}
+	ins.slotInitialSnap = ins.snapshotSlotForm()
 	ins.reportStatus("Saved " + ins.actionLbl.Text)
+	return true
+}
+
+// HasUnsavedSlotChanges reports whether the currently bound button or dial form has unpersisted edits.
+func (ins *ActionInspector) HasUnsavedSlotChanges() bool {
+	if ins.stepMode || ins.boundActionID == "" || ins.boundAutoBack || ins.slotInitialSnap == "" {
+		return false
+	}
+	return ins.snapshotSlotForm() != ins.slotInitialSnap
+}
+
+// HasUnsavedStepChanges reports whether the currently bound sequence step form has unpersisted edits.
+func (ins *ActionInspector) HasUnsavedStepChanges() bool {
+	if !ins.stepMode || ins.stepInitialSnap == "" {
+		return false
+	}
+	return ins.snapshotStepForm() != ins.stepInitialSnap
+}
+
+// UnsavedTargetName returns a display label for the slot or action currently being edited.
+func (ins *ActionInspector) UnsavedTargetName() string {
+	if ins.titleEntry != nil {
+		if t := strings.TrimSpace(ins.titleEntry.Text); t != "" {
+			return t
+		}
+	}
+	if ins.actionLbl != nil {
+		if t := strings.TrimSpace(ins.actionLbl.Text); t != "" {
+			return t
+		}
+	}
+	return "current action"
+}
+
+// DiscardSlotChanges drops tracking for pending slot edits and forces the next SetSelection to reload saved values.
+func (ins *ActionInspector) DiscardSlotChanges() {
+	ins.slotInitialSnap = ""
+	ins.InvalidateBinding()
+}
+
+// FlushStepChanges validates and auto-saves any pending edits on the active sequence step.
+func (ins *ActionInspector) FlushStepChanges() error {
+	if !ins.HasUnsavedStepChanges() {
+		return nil
+	}
+	settings, err := ins.collectStepSettings()
+	if err != nil {
+		ins.reportStatus(err.Error())
+		return err
+	}
+	if ins.onStepSave != nil {
+		if err := ins.onStepSave(ins.stepIndex, settings); err != nil {
+			ins.reportStatus("Auto-save step failed: " + err.Error())
+			return err
+		}
+	}
+	ins.stepData.Settings = cloneStepSettingsMap(settings)
+	ins.stepInitialSnap = ins.snapshotStepForm()
+	ins.reportStatus("Auto-saved step " + ins.actionLbl.Text)
+	return nil
+}
+
+type slotFormSnapshot struct {
+	Title     string         `json:"title"`
+	Color     string         `json:"color"`
+	BgColor   string         `json:"bgColor"`
+	BgImage   string         `json:"bgImage"`
+	HideTitle bool           `json:"hideTitle"`
+	Hotkey    string         `json:"hotkey"`
+	Settings  map[string]any `json:"settings,omitempty"`
+}
+
+func (ins *ActionInspector) snapshotSlotForm() string {
+	if ins.boundActionID == "" || ins.boundAutoBack {
+		return ""
+	}
+	snap := slotFormSnapshot{}
+	if ins.titleEntry != nil {
+		snap.Title = strings.TrimSpace(ins.titleEntry.Text)
+	}
+	if ins.accentColorCtrl != nil {
+		snap.Color = ins.accentColorCtrl.Value()
+	}
+	if ins.bgColorCtrl != nil {
+		snap.BgColor = ins.bgColorCtrl.Value()
+	}
+	if ins.bgImageCtrl != nil {
+		snap.BgImage = ins.bgImageCtrl.Value()
+	}
+	snap.HideTitle = ins.hideTitleCheck != nil && ins.hideTitleCheck.Checked
+	if ins.selCtrl == deck.ControllerKeypad && ins.hotkeyEntry != nil {
+		snap.Hotkey = strings.TrimSpace(ins.hotkeyEntry.Text)
+	}
+	if ins.boundHasSchema {
+		snap.Settings = ins.schemaForm.collectSettings()
+	}
+	encoded, err := json.Marshal(snap)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func (ins *ActionInspector) snapshotStepForm() string {
+	if !ins.stepMode {
+		return ""
+	}
+	if ins.stepDesc != nil && len(ins.stepDesc.SettingsSchema) == 0 && ins.stepDesc.Provider != plugin.ProviderStreamDeck {
+		return ""
+	}
+	if !ins.stepNoSchema {
+		encoded, err := json.Marshal(ins.schemaForm.collectSettings())
+		if err != nil {
+			return ""
+		}
+		return string(encoded)
+	}
+	if ins.stepRawJSONEntry != nil {
+		trimmed := strings.TrimSpace(ins.stepRawJSONEntry.Text)
+		if trimmed == "" {
+			return "{}"
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
+			if parsed == nil {
+				parsed = make(map[string]any)
+			}
+			encoded, mErr := json.Marshal(parsed)
+			if mErr == nil {
+				return string(encoded)
+			}
+		}
+		return "raw:" + trimmed
+	}
+	return ""
 }
 
 func (ins *ActionInspector) handleTrigger() {
+	if ins.stepMode {
+		stepCopy := cloneMultiActionStep(ins.stepData)
+		if settings, err := ins.collectStepSettings(); err == nil && settings != nil {
+			stepCopy.Settings = settings
+		}
+		if ins.onStepTest != nil {
+			ins.onStepTest(ins.stepIndex, stepCopy)
+		}
+		return
+	}
 	if ins.boundActionID == "" {
 		return
 	}
@@ -692,6 +913,12 @@ func (ins *ActionInspector) handleTrigger() {
 }
 
 func (ins *ActionInspector) handleClear() {
+	if ins.stepMode {
+		if ins.onStepDelete != nil {
+			ins.onStepDelete(ins.stepIndex)
+		}
+		return
+	}
 	var err error
 	if ins.selCtrl == deck.ControllerEncoder {
 		err = ins.engine.ClearDialSlot(ins.selDial)
@@ -730,4 +957,279 @@ func (ins *ActionInspector) openHotkeyCapture(title string, target *widget.Entry
 			ins.reportStatus("Captured " + captured + " — click Save to apply")
 		},
 	)
+}
+
+// SetStepSelection switches the inspector into Step Mode to edit a single Multi-Action block's settings.
+func (ins *ActionInspector) SetStepSelection(
+	idx, total int,
+	step core.MultiActionStep,
+	desc *plugin.ActionDescriptor,
+	cb stepInspectorCallbacks,
+) {
+	ins.syncing = true
+	defer func() { ins.syncing = false }()
+
+	ins.saveSectionOpenState()
+	ins.accordion = nil
+	ins.schemaForm.reset()
+	ins.titleEntry = nil
+	ins.accentColorCtrl = nil
+	ins.bgColorCtrl = nil
+	ins.bgImageCtrl = nil
+	ins.hideTitleCheck = nil
+	ins.hotkeyEntry = nil
+	ins.hotkeyCaptureBtn = nil
+	ins.openPIBtn = nil
+	ins.stepRawJSONEntry = nil
+
+	ins.stepMode = true
+	ins.stepIndex = idx
+	ins.stepTotal = total
+	ins.stepData = cloneMultiActionStep(step)
+	ins.stepDesc = desc
+	ins.onStepSave = cb.onSave
+	ins.onStepTest = cb.onTest
+	ins.onStepDelete = cb.onDelete
+	ins.onStepBackToButton = cb.onBackToButton
+
+	ins.slotLbl.SetText(fmt.Sprintf("Sequence Step %d of %d", idx+1, total))
+
+	name := step.ActionUUID
+	meta := "Missing Plugin • " + step.ActionUUID
+	if desc != nil {
+		name = desc.Name
+		meta = fmt.Sprintf("%s • %s", desc.Category, desc.Provider)
+		if desc.Tooltip != "" {
+			meta += "\n" + desc.Tooltip
+		}
+	}
+	if step.Disabled {
+		meta = "[Muted] " + meta
+	}
+	ins.actionLbl.SetText(name)
+	ins.metaLbl.SetText(meta)
+
+	backBtn := widget.NewButtonWithIcon("Button Properties", theme.NavigateBackIcon(), func() {
+		if ins.onStepBackToButton != nil {
+			ins.onStepBackToButton()
+		}
+	})
+	items := []fyne.CanvasObject{backBtn, widget.NewSeparator()}
+
+	switch {
+	case desc == nil:
+		ins.stepNoSchema = true
+		warnLbl := widget.NewLabel("The plugin for this step is not currently installed. Saved settings are preserved.")
+		warnLbl.Wrapping = fyne.TextWrapWord
+		warnLbl.Importance = widget.WarningImportance
+		ins.stepRawJSONEntry = widget.NewMultiLineEntry()
+		ins.stepRawJSONEntry.SetMinRowsVisible(6)
+		ins.stepRawJSONEntry.SetText(formatStepSettingsJSON(step.Settings))
+		items = append(items, warnLbl, widget.NewLabel("Step Settings JSON"), ins.stepRawJSONEntry)
+
+	case len(desc.SettingsSchema) > 0:
+		ins.stepNoSchema = false
+		grouped := groupSchemaFields(desc.SettingsSchema)
+		var accItems []*widget.AccordionItem
+		if len(grouped.general) > 0 {
+			accItems = append(accItems, ins.makeAccordionSection(plugin.SectionGeneral, ins.buildSchemaObjects(grouped.general, step.Settings)))
+		}
+		for _, cg := range grouped.custom {
+			accItems = append(accItems, ins.makeAccordionSection(cg.title, ins.buildSchemaObjects(cg.fields, step.Settings)))
+		}
+		if len(grouped.appearance) > 0 {
+			accItems = append(accItems, ins.makeAccordionSection(plugin.SectionAppearance, ins.buildSchemaObjects(grouped.appearance, step.Settings)))
+		}
+		if len(grouped.trigger) > 0 {
+			accItems = append(accItems, ins.makeAccordionSection(plugin.SectionTrigger, ins.buildSchemaObjects(grouped.trigger, step.Settings)))
+		}
+		if len(grouped.advanced) > 0 {
+			accItems = append(accItems, ins.makeAccordionSection(plugin.SectionAdvanced, ins.buildSchemaObjects(grouped.advanced, step.Settings)))
+		}
+		ins.accordion = widget.NewAccordion(accItems...)
+		ins.accordion.MultiOpen = true
+		items = append(items, ins.accordion)
+
+	case desc.Provider == plugin.ProviderStreamDeck:
+		ins.stepNoSchema = true
+		hint := widget.NewLabel("External Stream Deck action without a native form. Edit raw step settings JSON:")
+		hint.Wrapping = fyne.TextWrapWord
+		ins.stepRawJSONEntry = widget.NewMultiLineEntry()
+		ins.stepRawJSONEntry.SetMinRowsVisible(6)
+		ins.stepRawJSONEntry.SetText(formatStepSettingsJSON(step.Settings))
+		items = append(items, hint, widget.NewLabel("Step Settings JSON"), ins.stepRawJSONEntry)
+
+	default:
+		ins.stepNoSchema = true
+		noCfg := widget.NewLabel("This action has no configurable settings.")
+		noCfg.Wrapping = fyne.TextWrapWord
+		items = append(items, noCfg)
+	}
+
+	ins.formBox.Objects = items
+	ins.formBox.Refresh()
+	ins.formScroll.ScrollToTop()
+
+	if ins.moveCopyRow != nil {
+		ins.moveCopyRow.Hide()
+	}
+	ins.clearBtn.SetText("Remove")
+	ins.clearBtn.Enable()
+	if desc != nil {
+		ins.triggerBtn.Enable()
+	} else {
+		ins.triggerBtn.Disable()
+	}
+	if desc != nil && len(desc.SettingsSchema) == 0 && desc.Provider != plugin.ProviderStreamDeck {
+		ins.saveBtn.Disable()
+	} else {
+		ins.saveBtn.Enable()
+	}
+	ins.stepInitialSnap = ins.snapshotStepForm()
+}
+
+// SyncStepSettings updates the active step inspector's field values in-place without rebuilding controls.
+func (ins *ActionInspector) SyncStepSettings(settings map[string]any) {
+	if !ins.stepMode {
+		return
+	}
+	ins.stepData.Settings = cloneStepSettingsMap(settings)
+	if !ins.stepNoSchema {
+		ins.schemaForm.setFieldValues(settings)
+	} else if ins.stepRawJSONEntry != nil {
+		formatted := formatStepSettingsJSON(settings)
+		if ins.stepRawJSONEntry.Text != formatted {
+			ins.stepRawJSONEntry.SetText(formatted)
+		}
+	}
+	ins.stepInitialSnap = ins.snapshotStepForm()
+}
+
+// ClearStepSelection exits Step Mode and restores normal slot inspection controls.
+func (ins *ActionInspector) ClearStepSelection() {
+	if !ins.stepMode {
+		return
+	}
+	ins.stepMode = false
+	ins.stepIndex = 0
+	ins.stepTotal = 0
+	ins.stepData = core.MultiActionStep{}
+	ins.stepDesc = nil
+	ins.stepNoSchema = false
+	ins.stepRawJSONEntry = nil
+	ins.stepInitialSnap = ""
+	ins.onStepSave = nil
+	ins.onStepTest = nil
+	ins.onStepDelete = nil
+	ins.onStepBackToButton = nil
+	ins.clearBtn.SetText("Clear")
+	if ins.moveCopyRow != nil {
+		ins.moveCopyRow.Show()
+	}
+	ins.InvalidateBinding()
+}
+
+func (ins *ActionInspector) collectStepSettings() (map[string]any, error) {
+	if !ins.stepNoSchema {
+		return ins.schemaForm.collectAndValidate()
+	}
+	if ins.stepRawJSONEntry != nil {
+		trimmed := strings.TrimSpace(ins.stepRawJSONEntry.Text)
+		if trimmed == "" {
+			return make(map[string]any), nil
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+			return nil, fmt.Errorf("invalid step settings JSON: %w", err)
+		}
+		if parsed == nil {
+			parsed = make(map[string]any)
+		}
+		return parsed, nil
+	}
+	return cloneStepSettingsMap(ins.stepData.Settings), nil
+}
+
+func (ins *ActionInspector) buildMultiActionSummaryCard(settings map[string]any) []fyne.CanvasObject {
+	cardBg := canvas.NewRectangle(ColorElevatedSlate)
+	cardBg.CornerRadius = 8
+	cardBg.StrokeColor = ColorSlateBorder
+	cardBg.StrokeWidth = 1
+
+	box := container.NewVBox()
+	rawSteps, err := core.ParseMultiActionSteps(settings)
+	if err != nil {
+		warn := widget.NewLabel("Invalid sequence JSON (inspect under Advanced)")
+		warn.Wrapping = fyne.TextWrapWord
+		warn.Importance = widget.WarningImportance
+		box.Add(warn)
+	} else {
+		steps := core.NormalizeMultiActionSteps(rawSteps)
+		headerText := "Sequence (Empty)"
+		if len(steps) > 0 {
+			estMs := core.MultiActionEstimatedDurationMs(steps)
+			if estMs > 0 {
+				headerText = fmt.Sprintf("Sequence (%d blocks · ~%s)", len(steps), formatDurationCompact(estMs))
+			} else {
+				headerText = fmt.Sprintf("Sequence (%d blocks)", len(steps))
+			}
+		}
+		hdrLbl := widget.NewLabelWithStyle(headerText, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+		box.Add(hdrLbl)
+
+		const maxPreview = 4
+		reg := ins.engine.Registry()
+		for i, st := range steps {
+			if i >= maxPreview {
+				moreLbl := widget.NewLabel(fmt.Sprintf("… +%d more block(s)", len(steps)-maxPreview))
+				box.Add(moreLbl)
+				break
+			}
+			var desc *plugin.ActionDescriptor
+			if reg != nil {
+				if d, ok := reg.Action(st.ActionUUID); ok {
+					dcopy := d
+					desc = &dcopy
+				}
+			}
+			name := st.ActionUUID
+			if st.ActionUUID == core.ActionDelay {
+				name = "Wait"
+			} else if desc != nil && desc.Name != "" {
+				name = desc.Name
+			}
+			line := fmt.Sprintf("%d. %s — %s", i+1, name, summarizeMultiActionStep(desc, st))
+			lbl := widget.NewLabel(line)
+			lbl.Truncation = fyne.TextTruncateEllipsis
+			box.Add(lbl)
+		}
+	}
+
+	if ins.editingMultiAction {
+		editingLbl := widget.NewLabel("Editing sequence in center canvas — click a block to configure its settings.")
+		editingLbl.Wrapping = fyne.TextWrapWord
+		box.Add(editingLbl)
+	} else {
+		editBtn := widget.NewButtonWithIcon("Edit Sequence...", theme.ListIcon(), func() {
+			if ins.onEditMultiAction != nil {
+				ins.onEditMultiAction()
+			}
+		})
+		editBtn.Importance = widget.HighImportance
+		box.Add(editBtn)
+	}
+
+	card := container.NewStack(cardBg, container.NewPadded(box))
+	return []fyne.CanvasObject{card}
+}
+
+func formatStepSettingsJSON(settings map[string]any) string {
+	if len(settings) == 0 {
+		return "{}"
+	}
+	encoded, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
 }
