@@ -744,11 +744,20 @@ func (s *Server) SetDeviceViewport(deviceID, profileID string, followHost bool) 
 	next := s.cfg
 	next.Devices = slices.Clone(s.cfg.Devices)
 	next.Devices[idx].FollowHost = followHost
-	if !followHost && resolvedProfileID != "" {
+	if followHost {
+		next.Devices[idx].PageIndex = 0
+		next.Devices[idx].FolderStack = nil
+	} else if resolvedProfileID != "" {
+		if next.Devices[idx].ProfileID != resolvedProfileID {
+			next.Devices[idx].PageIndex = 0
+			next.Devices[idx].FolderStack = nil
+		}
 		next.Devices[idx].ProfileID = resolvedProfileID
 	}
 	changed := s.cfg.Devices[idx].FollowHost != next.Devices[idx].FollowHost ||
-		s.cfg.Devices[idx].ProfileID != next.Devices[idx].ProfileID
+		s.cfg.Devices[idx].ProfileID != next.Devices[idx].ProfileID ||
+		s.cfg.Devices[idx].PageIndex != next.Devices[idx].PageIndex ||
+		!slices.Equal(s.cfg.Devices[idx].FolderStack, next.Devices[idx].FolderStack)
 	s.cfg = next
 
 	var targets []*wsClient
@@ -1518,13 +1527,19 @@ func (s *Server) serveWSClient(conn *websocket.Conn) {
 	initialVP := app.Viewport{}
 	if ok {
 		initialVP = app.Viewport{
-			ProfileID:  dev.ProfileID,
-			FollowHost: dev.FollowHost,
+			ProfileID:   dev.ProfileID,
+			PageIndex:   dev.PageIndex,
+			FolderStack: slices.Clone(dev.FolderStack),
+			FollowHost:  dev.FollowHost,
 		}
 	}
 	vpID, unregVP := s.engine.RegisterViewport(initialVP)
 	client.viewportID = vpID
 	client.unregVP = unregVP
+
+	if ok && !dev.FollowHost && dev.ProfileID == "" {
+		s.syncDeviceViewportFromEngine(client)
+	}
 
 	s.touchDeviceLastSeen(client.deviceID)
 
@@ -1807,13 +1822,26 @@ func (s *Server) syncDeviceViewportFromEngine(client *wsClient) {
 		return
 	}
 
+	nextPage := vp.PageIndex
+	var nextStack []string
+	if vp.FollowHost {
+		nextPage = 0
+	} else if len(vp.FolderStack) > 0 {
+		nextStack = slices.Clone(vp.FolderStack)
+	}
+
 	s.opMu.Lock()
 	s.mu.Lock()
 	var updatedCfg *Config
 	for i := range s.cfg.Devices {
 		if s.cfg.Devices[i].ID == deviceID {
-			if s.cfg.Devices[i].ProfileID != vp.ProfileID || s.cfg.Devices[i].FollowHost != vp.FollowHost {
+			if s.cfg.Devices[i].ProfileID != vp.ProfileID ||
+				s.cfg.Devices[i].PageIndex != nextPage ||
+				!slices.Equal(s.cfg.Devices[i].FolderStack, nextStack) ||
+				s.cfg.Devices[i].FollowHost != vp.FollowHost {
 				s.cfg.Devices[i].ProfileID = vp.ProfileID
+				s.cfg.Devices[i].PageIndex = nextPage
+				s.cfg.Devices[i].FolderStack = nextStack
 				s.cfg.Devices[i].FollowHost = vp.FollowHost
 				cp := s.cfg
 				cp.Devices = slices.Clone(s.cfg.Devices)
@@ -1891,11 +1919,23 @@ func (s *Server) executeCommand(client *wsClient, cmd ClientCommand) error {
 		s.syncDeviceViewportFromEngine(client)
 		return nil
 	case "prevPage":
-		return s.engine.ViewportPrevPage(client.viewportID, true)
+		if err := s.engine.ViewportPrevPage(client.viewportID, true); err != nil {
+			return err
+		}
+		s.syncDeviceViewportFromEngine(client)
+		return nil
 	case "nextPage":
-		return s.engine.ViewportNextPage(client.viewportID, true)
+		if err := s.engine.ViewportNextPage(client.viewportID, true); err != nil {
+			return err
+		}
+		s.syncDeviceViewportFromEngine(client)
+		return nil
 	case "closeFolder":
-		return s.engine.ViewportCloseFolder(client.viewportID)
+		if err := s.engine.ViewportCloseFolder(client.viewportID); err != nil {
+			return err
+		}
+		s.syncDeviceViewportFromEngine(client)
+		return nil
 	case "switchProfile":
 		if strings.TrimSpace(cmd.ProfileID) == "" {
 			return nil

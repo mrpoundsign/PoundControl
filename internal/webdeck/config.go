@@ -38,14 +38,16 @@ const (
 
 // PairedDevice holds a paired remote device's verified Ed25519 identity and audit metadata.
 type PairedDevice struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	PublicKey   string `json:"publicKey"`
-	Fingerprint string `json:"fingerprint"`
-	PairedAt    string `json:"pairedAt"`
-	LastSeen    string `json:"lastSeen,omitempty"`
-	ProfileID   string `json:"profileId,omitempty"`
-	FollowHost  bool   `json:"followHost,omitempty"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	PublicKey   string   `json:"publicKey"`
+	Fingerprint string   `json:"fingerprint"`
+	PairedAt    string   `json:"pairedAt"`
+	LastSeen    string   `json:"lastSeen,omitempty"`
+	ProfileID   string   `json:"profileId,omitempty"`
+	PageIndex   int      `json:"pageIndex,omitempty"`
+	FolderStack []string `json:"folderStack,omitempty"`
+	FollowHost  bool     `json:"followHost,omitempty"`
 }
 
 // Config holds persisted LAN touch deck server settings, host identity, and paired device public keys.
@@ -98,6 +100,20 @@ func (c Config) normalized() Config {
 			dev.PairedAt = strings.TrimSpace(dev.PairedAt)
 			dev.LastSeen = strings.TrimSpace(dev.LastSeen)
 			dev.ProfileID = strings.TrimSpace(dev.ProfileID)
+			dev.PageIndex = max(dev.PageIndex, 0)
+			if len(dev.FolderStack) > 0 {
+				cleanStack := make([]string, 0, len(dev.FolderStack))
+				for _, fID := range dev.FolderStack {
+					if t := strings.TrimSpace(fID); t != "" {
+						cleanStack = append(cleanStack, t)
+					}
+				}
+				if len(cleanStack) > 0 {
+					dev.FolderStack = cleanStack
+				} else {
+					dev.FolderStack = nil
+				}
+			}
 			if dev.ID == "" || dev.PublicKey == "" {
 				continue
 			}

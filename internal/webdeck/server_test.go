@@ -25,6 +25,7 @@ import (
 	"github.com/mrpoundsign/PoundControl/pkg/builtin/core"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
 	"github.com/mrpoundsign/PoundControl/pkg/plugin"
+	"github.com/mrpoundsign/PoundControl/pkg/secrets"
 )
 
 type fakeDeckProvider struct {
@@ -91,7 +92,8 @@ func newTestEngineAndServer(t *testing.T) (*app.Engine, *fakeDeckProvider, *Serv
 	}
 	t.Cleanup(func() { _ = eng.Close() })
 
-	srv := NewServer(eng, nil)
+	secStore := secrets.NewMemoryStore()
+	srv := NewServer(eng, secStore)
 	t.Cleanup(func() { _ = srv.Close() })
 	if err := srv.SaveConfig(Config{
 		Enabled:  true,
@@ -1151,5 +1153,187 @@ func TestServerEphemeralRelayedSessionIsolation(t *testing.T) {
 	}
 	if !gotPong {
 		t.Fatal("expected pong from wsWatch")
+	}
+}
+
+func TestServerReconnectPreservesIndependentProfilePageAndFolder(t *testing.T) {
+	reg := plugin.NewRegistry()
+	if err := reg.RegisterProvider(core.New()); err != nil {
+		t.Fatalf("RegisterProvider(core) error = %v", err)
+	}
+	prov := &fakeDeckProvider{}
+	if err := reg.RegisterProvider(prov); err != nil {
+		t.Fatalf("RegisterProvider(fake) error = %v", err)
+	}
+	eng, err := app.NewEngine(deck.NewMemoryStore(nil), reg)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	t.Cleanup(func() { _ = eng.Close() })
+
+	secStore := secrets.NewMemoryStore()
+	srv := NewServer(eng, secStore)
+	if err := srv.SaveConfig(Config{
+		Enabled:  true,
+		Port:     0,
+		BindMode: BindLocalhost,
+	}); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	profA := eng.Snapshot().ActiveProfileID
+	profB, err := eng.CreateProfile("StreamDeckB", deck.GridSize{Cols: 3, Rows: 2}, 1)
+	if err != nil {
+		t.Fatalf("CreateProfile(StreamDeckB) error = %v", err)
+	}
+	if _, err := eng.AddPage("Page 2"); err != nil {
+		t.Fatalf("AddPage(Page 2) error = %v", err)
+	}
+	if err := eng.GoToPage(2); err != nil {
+		t.Fatalf("GoToPage(2) error = %v", err)
+	}
+	c00 := deck.Coordinates{Row: 0, Col: 0}
+	if _, err := eng.AssignKeypadAction(c00, core.ActionFolderOpen); err != nil {
+		t.Fatalf("AssignKeypadAction(FolderOpen) error = %v", err)
+	}
+	if err := eng.UpdateKeypadSlot(c00, "Media", "#FBBF24", map[string]any{
+		"folderName": "MediaFolder",
+	}); err != nil {
+		t.Fatalf("UpdateKeypadSlot(MediaFolder) error = %v", err)
+	}
+	if err := eng.SwitchProfile(profA); err != nil {
+		t.Fatalf("SwitchProfile(profA) error = %v", err)
+	}
+
+	waitSnap := func(ws *testWSSession, pred func(ClientSnapshot) bool, desc string) ClientSnapshot {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			rem := time.Until(deadline)
+			if rem <= 0 {
+				break
+			}
+			m := ws.recvSigned(t, rem)
+			if m.Type == "snapshot" && m.Snapshot != nil && pred(*m.Snapshot) {
+				return *m.Snapshot
+			}
+		}
+		t.Fatalf("timed out waiting for %s", desc)
+		return ClientSnapshot{}
+	}
+
+	// 1. Newly paired device pins its initial profile on first connect instead of drifting when Studio switches.
+	devInit := performTestPairing(t, srv, "Pinning Tablet")
+	wsInit := dialAuthenticatedWS(t, devInit)
+	initSnap := waitSnap(wsInit, func(s ClientSnapshot) bool { return s.ActiveProfileID == profA }, "initial profA")
+	if initSnap.FollowHost {
+		t.Fatalf("expected newly paired device FollowHost=false, got true")
+	}
+	_ = wsInit.conn.Close()
+
+	if err := eng.SwitchProfile(profB.ID); err != nil {
+		t.Fatalf("Studio SwitchProfile(profB) error = %v", err)
+	}
+
+	wsInit2 := dialAuthenticatedWS(t, devInit)
+	initReconn := wsInit2.recvSigned(t, 2*time.Second)
+	if initReconn.Snapshot == nil || initReconn.Snapshot.ActiveProfileID != profA {
+		t.Fatalf("expected pinned device to stay on %s on reconnect even though Studio moved to %s, got %+v", profA, profB.ID, initReconn.Snapshot)
+	}
+	_ = wsInit2.conn.Close()
+
+	// 2. Client switches profile, advances to Page 2, opens a folder, then reconnects after a server restart.
+	if err := eng.SwitchProfile(profA); err != nil {
+		t.Fatalf("Studio SwitchProfile(profA) error = %v", err)
+	}
+	devNav := performTestPairing(t, srv, "Persistent Deck")
+	wsNav := dialAuthenticatedWS(t, devNav)
+	_ = wsNav.recvSigned(t, 2*time.Second)
+
+	wsNav.sendSigned(t, ClientCommand{Type: "switchProfile", ProfileID: profB.ID})
+	waitSnap(wsNav, func(s ClientSnapshot) bool {
+		return s.ActiveProfileID == profB.ID && s.PageIndex == 0 && !s.InFolder
+	}, "client switch to profB page 0")
+
+	wsNav.sendSigned(t, ClientCommand{Type: "nextPage"})
+	waitSnap(wsNav, func(s ClientSnapshot) bool {
+		return s.ActiveProfileID == profB.ID && s.PageIndex == 1 && !s.InFolder
+	}, "client nextPage to page 1")
+
+	wsNav.sendSigned(t, ClientCommand{Type: "keyDown", Row: 0, Col: 0})
+	wsNav.sendSigned(t, ClientCommand{Type: "keyUp", Row: 0, Col: 0})
+	waitSnap(wsNav, func(s ClientSnapshot) bool {
+		return s.ActiveProfileID == profB.ID && s.PageIndex == 1 && s.InFolder && len(s.FolderPath) > 0
+	}, "client open MediaFolder")
+	_ = wsNav.conn.Close()
+
+	// Wait briefly for keyUp dispatch completion, then restart WebDeck server with Studio on profA.
+	time.Sleep(50 * time.Millisecond)
+	_ = srv.Close()
+
+	srv2 := NewServer(eng, secStore)
+	defer func() { _ = srv2.Close() }()
+	if err := srv2.StartFromConfig(); err != nil {
+		t.Fatalf("srv2.StartFromConfig() error = %v", err)
+	}
+	devNav.baseURL = "http://" + srv2.Status().ListenAddr
+
+	wsNav2 := dialAuthenticatedWS(t, devNav)
+	defer func() { _ = wsNav2.conn.Close() }()
+	reconn := wsNav2.recvSigned(t, 2*time.Second)
+	if reconn.Snapshot == nil ||
+		reconn.Snapshot.ActiveProfileID != profB.ID ||
+		reconn.Snapshot.PageIndex != 1 ||
+		!reconn.Snapshot.InFolder ||
+		!slices.Contains(reconn.Snapshot.FolderPath, "MediaFolder") {
+		t.Fatalf("expected reconnect to restore profB (%s) page 1 inside MediaFolder, got %+v", profB.ID, reconn.Snapshot)
+	}
+}
+
+func TestBuildClientSnapshotLabelAndSublabelFallback(t *testing.T) {
+	snap := app.Snapshot{
+		Grid:  deck.GridSize{Cols: 2, Rows: 1},
+		Slots: map[string]app.RenderedSlot{
+			"0,0": {
+				Config: &deck.SlotConfig{Context: "ctx-1", Title: "Play"},
+				Action: &plugin.ActionDescriptor{
+					Name:         "Play / Pause",
+					DefaultTitle: "Play",
+					HideTitle:    true,
+					Provider:     plugin.ProviderWasm,
+				},
+				Visual: app.SlotVisual{
+					ImageURI: "data:image/svg+xml;utf8,<svg/>",
+					Feedback: map[string]any{
+						"label":    "Playing",
+						"sublabel": "Song Name",
+					},
+				},
+			},
+			"0,1": {
+				Config: &deck.SlotConfig{Context: "ctx-2"},
+				Action: &plugin.ActionDescriptor{
+					Name:         "Panic Mute",
+					DefaultTitle: "Audio Safe",
+					HideTitle:    true,
+					Provider:     plugin.ProviderStreamDeck,
+				},
+				Visual: app.SlotVisual{
+					ImageURI: "data:image/svg+xml;utf8,<svg/>",
+				},
+			},
+		},
+	}
+
+	cs := buildClientSnapshot(snap, nil)
+	if cs.Slots["0,0"].Label != "Playing" || cs.Slots["0,0"].Sublabel != "Song Name" {
+		t.Fatalf("expected Watch label/sublabel from feedback on full-art SVG tile, got %+v", cs.Slots["0,0"])
+	}
+	if cs.Slots["0,0"].Title != "" {
+		t.Fatalf("expected full-art Title to remain empty, got %q", cs.Slots["0,0"].Title)
+	}
+	if cs.Slots["0,1"].Label != "Audio Safe" || !cs.Slots["0,1"].FullBleedArt {
+		t.Fatalf("expected DefaultTitle fallback label & FullBleedArt on sdPlugin tile, got %+v", cs.Slots["0,1"])
 	}
 }

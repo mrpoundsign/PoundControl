@@ -4,7 +4,7 @@ Website = "https://github.com/mrpoundsign/PoundControl"
   Icon = "assets/icon.png"
   Name = "PoundControl"
   ID = "com.github.mrpoundsign.poundcontrol"
-  Version = "0.1.0"
+  Version = "0.1.2"
   Build = 1
 
 [Migrations]

@@ -101,36 +101,40 @@ type GuestConfigActionEvent struct {
 	Settings map[string]any `json:"settings,omitempty"`
 }
 
+func (ga GuestAction) toPluginAction(pluginUUID, defaultCategory, pluginDir string) plugin.ActionDescriptor {
+	ctrls := make([]deck.ControllerType, len(ga.Controllers))
+	copy(ctrls, ga.Controllers)
+	if len(ctrls) == 0 {
+		ctrls = []deck.ControllerType{deck.ControllerKeypad}
+	}
+	schema := make([]plugin.SettingField, len(ga.SettingsSchema))
+	copy(schema, ga.SettingsSchema)
+
+	cat := strings.TrimSpace(ga.Category)
+	if cat == "" {
+		cat = defaultCategory
+	}
+	return plugin.ActionDescriptor{
+		UUID:           strings.TrimSpace(ga.UUID),
+		PluginUUID:     strings.TrimSpace(pluginUUID),
+		Name:           strings.TrimSpace(ga.Name),
+		Category:       cat,
+		Tooltip:        strings.TrimSpace(ga.Tooltip),
+		Icon:           sanitizeWasmImageURI(ga.Icon, pluginDir),
+		DefaultTitle:   strings.TrimSpace(ga.DefaultTitle),
+		DefaultColor:   strings.TrimSpace(ga.DefaultColor),
+		DefaultImage:   sanitizeWasmImageURI(ga.DefaultImage, pluginDir),
+		HideTitle:      ga.HideTitle,
+		Controllers:    ctrls,
+		SettingsSchema: schema,
+		Provider:       plugin.ProviderWasm,
+	}
+}
+
 func (gm GuestManifest) toPluginManifest(pluginDir string) plugin.Manifest {
 	actions := make([]plugin.ActionDescriptor, 0, len(gm.Actions))
 	for _, ga := range gm.Actions {
-		ctrls := make([]deck.ControllerType, len(ga.Controllers))
-		copy(ctrls, ga.Controllers)
-		if len(ctrls) == 0 {
-			ctrls = []deck.ControllerType{deck.ControllerKeypad}
-		}
-		schema := make([]plugin.SettingField, len(ga.SettingsSchema))
-		copy(schema, ga.SettingsSchema)
-
-		cat := strings.TrimSpace(ga.Category)
-		if cat == "" {
-			cat = gm.Name
-		}
-		actions = append(actions, plugin.ActionDescriptor{
-			UUID:           strings.TrimSpace(ga.UUID),
-			PluginUUID:     strings.TrimSpace(gm.UUID),
-			Name:           strings.TrimSpace(ga.Name),
-			Category:       cat,
-			Tooltip:        strings.TrimSpace(ga.Tooltip),
-			Icon:           sanitizeWasmImageURI(ga.Icon, pluginDir),
-			DefaultTitle:   strings.TrimSpace(ga.DefaultTitle),
-			DefaultColor:   strings.TrimSpace(ga.DefaultColor),
-			DefaultImage:   sanitizeWasmImageURI(ga.DefaultImage, pluginDir),
-			HideTitle:      ga.HideTitle,
-			Controllers:    ctrls,
-			SettingsSchema: schema,
-			Provider:       plugin.ProviderWasm,
-		})
+		actions = append(actions, ga.toPluginAction(gm.UUID, gm.Name, pluginDir))
 	}
 	var globalSchema []plugin.SettingField
 	if len(gm.GlobalSettingsSchema) > 0 {
