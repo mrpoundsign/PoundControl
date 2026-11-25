@@ -1475,3 +1475,36 @@ func TestEngineIndependentViewportsLifecycleAndClamping(t *testing.T) {
 	unregA()
 	unregA()
 }
+
+func TestNewEnginePersistsMigratedLegacyOBSVolumeSettings(t *testing.T) {
+	cfg := deck.DefaultConfig()
+	cfg.Profiles[0].Dials = 1
+	cfg.Profiles[0].Pages[0].Dials[0] = &deck.SlotConfig{
+		Context:    deck.NewUUID(),
+		ActionUUID: "com.github.mrpoundsign.poundcontrol.obs.audio.volume",
+		Title:      "Volume",
+		Settings: map[string]any{
+			"inputName":  "Music",
+			"mode":       "step",
+			"stepDb":     2.0,
+			"targetDb":   0.0,
+			"pushAction": "reset_0db",
+		},
+	}
+	store := deck.NewMemoryStore(cfg)
+
+	eng := newTestEngine(t, store)
+	_ = eng
+
+	saved, err := store.Load()
+	if err != nil {
+		t.Fatalf("store.Load() error = %v", err)
+	}
+	dialSettings := saved.Profiles[0].Pages[0].Dials[0].Settings
+	if dialSettings["stepPct"] != 5.0 || dialSettings["targetPct"] != 100.0 || dialSettings["pushAction"] != "reset_100" {
+		t.Fatalf("expected NewEngine to persist migrated settings, got %+v", dialSettings)
+	}
+	if _, hasOld := dialSettings["stepDb"]; hasOld {
+		t.Fatalf("expected stepDb removed from persisted config, got %+v", dialSettings)
+	}
+}

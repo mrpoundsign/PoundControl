@@ -2,10 +2,13 @@ package deck
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -372,6 +375,190 @@ func (c *Config) Normalize() {
 	if !activeFound {
 		c.ActiveProfileID = c.Profiles[0].ID
 	}
+	c.MigrateLegacySettings()
+}
+
+const (
+	obsAudioVolumeActionUUID = "com.github.mrpoundsign.poundcontrol.obs.audio.volume"
+	coreMultiActionUUID      = "com.github.mrpoundsign.poundcontrol.core.multiaction"
+)
+
+// MigrateLegacySettings upgrades legacy slot settings (such as OBS Audio Volume dB fields)
+// in place across all profiles, pages, folders, and Multi-Action step sequences.
+// Returns true if any slot or step was modified.
+func (c *Config) MigrateLegacySettings() bool {
+	if c == nil {
+		return false
+	}
+	changed := false
+	for _, prof := range c.Profiles {
+		if prof == nil {
+			continue
+		}
+		for _, pg := range prof.Pages {
+			if pg == nil {
+				continue
+			}
+			for _, slot := range pg.Slots {
+				if migrateSlotLegacySettings(slot) {
+					changed = true
+				}
+			}
+			for _, slot := range pg.Dials {
+				if migrateSlotLegacySettings(slot) {
+					changed = true
+				}
+			}
+		}
+		for _, f := range prof.Folders {
+			if f == nil {
+				continue
+			}
+			for _, slot := range f.Slots {
+				if migrateSlotLegacySettings(slot) {
+					changed = true
+				}
+			}
+			for _, slot := range f.Dials {
+				if migrateSlotLegacySettings(slot) {
+					changed = true
+				}
+			}
+		}
+	}
+	return changed
+}
+
+func migrateSlotLegacySettings(slot *SlotConfig) bool {
+	if slot == nil || len(slot.Settings) == 0 {
+		return false
+	}
+	switch slot.ActionUUID {
+	case obsAudioVolumeActionUUID:
+		return migrateOBSVolumeSettings(slot.Settings)
+	case coreMultiActionUUID:
+		rawSteps, ok := slot.Settings["steps"].(string)
+		if !ok || strings.TrimSpace(rawSteps) == "" {
+			return false
+		}
+		var steps []map[string]any
+		if err := json.Unmarshal([]byte(rawSteps), &steps); err != nil {
+			return false
+		}
+		stepChanged := false
+		for _, step := range steps {
+			if step == nil {
+				continue
+			}
+			uuidStr, _ := step["actionUuid"].(string)
+			if uuidStr != obsAudioVolumeActionUUID {
+				continue
+			}
+			settings, ok := step["settings"].(map[string]any)
+			if !ok || len(settings) == 0 {
+				continue
+			}
+			if migrateOBSVolumeSettings(settings) {
+				step["settings"] = settings
+				stepChanged = true
+			}
+		}
+		if !stepChanged {
+			return false
+		}
+		encoded, err := json.Marshal(steps)
+		if err != nil {
+			return false
+		}
+		slot.Settings["steps"] = string(encoded)
+		return true
+	default:
+		return false
+	}
+}
+
+func migrateOBSVolumeSettings(settings map[string]any) bool {
+	if len(settings) == 0 {
+		return false
+	}
+	changed := false
+	if rawTarget, hasLegacyTarget := settings["targetDb"]; hasLegacyTarget {
+		if _, hasTargetPct := settings["targetPct"]; !hasTargetPct {
+			if db, ok := parseLegacyFloat(rawTarget); ok {
+				settings["targetPct"] = obsDbToFaderPct(db)
+			}
+		}
+		delete(settings, "targetDb")
+		changed = true
+	}
+	if rawStep, hasLegacyStep := settings["stepDb"]; hasLegacyStep {
+		if _, hasStepPct := settings["stepPct"]; !hasStepPct {
+			if stepDb, ok := parseLegacyFloat(rawStep); ok {
+				settings["stepPct"] = obsStepDbToStepPct(stepDb)
+			}
+		}
+		delete(settings, "stepDb")
+		changed = true
+	}
+	if push, ok := settings["pushAction"].(string); ok && push == "reset_0db" {
+		settings["pushAction"] = "reset_100"
+		changed = true
+	}
+	return changed
+}
+
+func parseLegacyFloat(raw any) (float64, bool) {
+	switch v := raw.(type) {
+	case float64:
+		return v, !math.IsNaN(v) && !math.IsInf(v, 0)
+	case float32:
+		f := float64(v)
+		return f, !math.IsNaN(f) && !math.IsInf(f, 0)
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		f, err := v.Float64()
+		return f, err == nil && !math.IsNaN(f) && !math.IsInf(f, 0)
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		return f, err == nil && !math.IsNaN(f) && !math.IsInf(f, 0)
+	default:
+		return 0, false
+	}
+}
+
+func obsDbToFaderPct(db float64) float64 {
+	if math.IsNaN(db) || math.IsInf(db, -1) || db <= -100 {
+		return 0
+	}
+	if db >= 0 {
+		return 100
+	}
+	mul := math.Pow(10, db/20.0)
+	pct := math.Round(math.Cbrt(mul)*100.0*2.0) / 2.0
+	if pct < 0 {
+		return 0
+	}
+	if pct > 100 {
+		return 100
+	}
+	return pct
+}
+
+func obsStepDbToStepPct(stepDb float64) float64 {
+	if math.IsNaN(stepDb) || stepDb == 0 {
+		return 5
+	}
+	mag := math.Round(math.Abs(stepDb)*2.5*2.0) / 2.0
+	if mag < 0.5 {
+		mag = 0.5
+	}
+	if mag > 100 {
+		mag = 100
+	}
+	return math.Copysign(mag, stepDb)
 }
 
 // Validate checks structural invariants across profiles, pages, folders, and slots.

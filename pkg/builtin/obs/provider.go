@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -70,16 +71,16 @@ type obsState struct {
 	sourceItemID    map[sourceKey]int
 	sourceEnabled   map[sourceKey]bool
 	inputMuted      map[string]bool
-	inputVolumeDb   map[string]float64
+	inputVolumePct  map[string]float64
 }
 
 func newOBSState() obsState {
 	return obsState{
-		sceneSources:  make(map[string][]string),
-		sourceItemID:  make(map[sourceKey]int),
-		sourceEnabled: make(map[sourceKey]bool),
-		inputMuted:    make(map[string]bool),
-		inputVolumeDb: make(map[string]float64),
+		sceneSources:   make(map[string][]string),
+		sourceItemID:   make(map[sourceKey]int),
+		sourceEnabled:  make(map[sourceKey]bool),
+		inputMuted:     make(map[string]bool),
+		inputVolumePct: make(map[string]float64),
 	}
 }
 
@@ -222,7 +223,7 @@ func buildManifest() plugin.Manifest {
 			PluginUUID:   PluginUUID,
 			Name:         "Audio Volume",
 			Category:     "OBS Studio",
-			Tooltip:      "Adjust OBS audio input gain (dB) via keypad or rotary dial",
+			Tooltip:      "Adjust OBS audio input volume (0–100%) via keypad or rotary dial",
 			DefaultTitle: "Volume",
 			DefaultColor: "#38BDF8",
 			Controllers:  []deck.ControllerType{deck.ControllerKeypad, deck.ControllerEncoder},
@@ -242,23 +243,25 @@ func buildManifest() plugin.Manifest {
 					Type:    plugin.FieldSelect,
 					Default: "step",
 					Options: []plugin.SelectOption{
-						{Label: "Step Delta (dB)", Value: "step"},
-						{Label: "Set Exact (dB)", Value: "set"},
+						{Label: "Step Delta (%)", Value: "step"},
+						{Label: "Set Exact (%)", Value: "set"},
 					},
 				},
 				{
-					Key:         "stepDb",
-					Label:       "Step Delta (dB)",
+					Key:         "stepPct",
+					Label:       "Step Delta (%)",
 					Type:        plugin.FieldNumber,
-					Default:     2,
-					Placeholder: "2",
+					Default:     5,
+					Placeholder: "5",
+					Help:        "Volume change per press (supports 0.5% steps, negative lowers volume) or per dial tick.",
 				},
 				{
-					Key:         "targetDb",
-					Label:       "Target Volume (dB)",
+					Key:         "targetPct",
+					Label:       "Target Volume (%)",
 					Type:        plugin.FieldNumber,
-					Default:     0,
-					Placeholder: "0",
+					Default:     100,
+					Placeholder: "100",
+					Help:        "Exact volume (0–100%, supports 0.5% steps) applied when Keypad Mode is Set Exact (%).",
 				},
 				{
 					Key:     "pushAction",
@@ -267,8 +270,8 @@ func buildManifest() plugin.Manifest {
 					Default: "toggle_mute",
 					Options: []plugin.SelectOption{
 						{Label: "Toggle Mute", Value: "toggle_mute"},
-						{Label: "Reset to 0 dB", Value: "reset_0db"},
-						{Label: "Step Delta (dB)", Value: "step"},
+						{Label: "Reset to 100%", Value: "reset_100"},
+						{Label: "Step Delta (%)", Value: "step"},
 					},
 				},
 			},
@@ -849,8 +852,8 @@ func (p *Provider) execAudioVolume(ctx context.Context, ev plugin.ActionEvent) e
 		return errors.New("audio volume requires inputName")
 	}
 
-	stepDb := floatSetting(ev.Settings, "stepDb", 2.0)
-	targetDb := floatSetting(ev.Settings, "targetDb", 0.0)
+	stepPct := resolveStepPctSetting(ev.Settings)
+	targetPct := resolveTargetPctSetting(ev.Settings)
 	mode := stringSetting(ev.Settings, "mode", "step")
 	pushAction := stringSetting(ev.Settings, "pushAction", "toggle_mute")
 
@@ -862,56 +865,63 @@ func (p *Provider) execAudioVolume(ctx context.Context, ev plugin.ActionEvent) e
 		})
 	}
 
-	var newDb float64
+	var newPct float64
 	switch {
 	case ev.Type == plugin.EventDialRotate:
-		curDb, err := p.ensureInputVolumeDb(ctx, input)
+		curPct, err := p.ensureInputVolumePct(ctx, input)
 		if err != nil {
 			return err
 		}
-		newDb = clampDb(curDb + float64(ev.Ticks)*stepDb)
-	case ev.Type == plugin.EventDialPress && pushAction == "reset_0db":
-		newDb = 0.0
+		step := math.Abs(stepPct)
+		if step == 0 {
+			step = 5.0
+		}
+		newPct = roundHalfPct(curPct + float64(ev.Ticks)*step)
+	case ev.Type == plugin.EventDialPress && (pushAction == "reset_100" || pushAction == "reset_0db"):
+		newPct = 100.0
 	case mode == "set":
-		newDb = clampDb(targetDb)
+		newPct = roundHalfPct(targetPct)
 	default:
-		curDb, err := p.ensureInputVolumeDb(ctx, input)
+		curPct, err := p.ensureInputVolumePct(ctx, input)
 		if err != nil {
 			return err
 		}
-		newDb = clampDb(curDb + stepDb)
+		newPct = roundHalfPct(curPct + stepPct)
 	}
 
 	if _, err := p.client.Call(ctx, "SetInputVolume", map[string]any{
-		"inputName":     input,
-		"inputVolumeDb": newDb,
+		"inputName":      input,
+		"inputVolumeMul": faderPctToMul(newPct),
 	}); err != nil {
 		return err
 	}
 
 	p.mu.Lock()
-	p.state.inputVolumeDb[input] = newDb
+	p.state.inputVolumePct[input] = newPct
 	p.mu.Unlock()
 	p.refreshAllSlots()
 	return nil
 }
 
-func (p *Provider) ensureInputVolumeDb(ctx context.Context, input string) (float64, error) {
+func (p *Provider) ensureInputVolumePct(ctx context.Context, input string) (float64, error) {
 	p.mu.RLock()
-	curDb, ok := p.state.inputVolumeDb[input]
+	curPct, ok := p.state.inputVolumePct[input]
 	p.mu.RUnlock()
 	if ok {
-		return curDb, nil
+		return curPct, nil
 	}
 	resp, err := p.client.Call(ctx, "GetInputVolume", map[string]any{"inputName": input})
 	if err != nil {
 		return 0, err
 	}
-	curDb = floatMapVal(resp, "inputVolumeDb", 0)
+	curPct, valid := extractInputVolumePct(resp)
+	if !valid {
+		curPct = 0
+	}
 	p.mu.Lock()
-	p.state.inputVolumeDb[input] = curDb
+	p.state.inputVolumePct[input] = curPct
 	p.mu.Unlock()
-	return curDb, nil
+	return curPct, nil
 }
 
 func (p *Provider) execStream(ctx context.Context, ev plugin.ActionEvent) error {
@@ -1164,9 +1174,11 @@ func (p *Provider) warmSlotState(actionUUID string, settings map[string]any) {
 			p.mu.Unlock()
 		}
 		if resp, err := p.client.Call(ctx, "GetInputVolume", map[string]any{"inputName": input}); err == nil {
-			p.mu.Lock()
-			p.state.inputVolumeDb[input] = floatMapVal(resp, "inputVolumeDb", 0)
-			p.mu.Unlock()
+			if pct, valid := extractInputVolumePct(resp); valid {
+				p.mu.Lock()
+				p.state.inputVolumePct[input] = pct
+				p.mu.Unlock()
+			}
 		}
 		p.refreshAllSlots()
 
@@ -1274,9 +1286,13 @@ func (p *Provider) handleOBSEvent(ev Event) {
 	case "InputVolumeChanged":
 		name := stringMapVal(ev.Data, "inputName")
 		if name != "" {
-			p.mu.Lock()
-			p.state.inputVolumeDb[name] = floatMapVal(ev.Data, "inputVolumeDb", 0)
-			p.mu.Unlock()
+			if pct, valid := extractInputVolumePct(ev.Data); valid {
+				p.mu.Lock()
+				p.state.inputVolumePct[name] = pct
+				p.mu.Unlock()
+			} else {
+				needsRefresh = false
+			}
 		}
 	case "SceneItemEnableStateChanged":
 		scene := stringMapVal(ev.Data, "sceneName")
@@ -1344,14 +1360,16 @@ func (p *Provider) refreshContext(ctxID, flash string) {
 	p.mu.RLock()
 	host := p.host
 	slot, ok := p.slots[ctxID]
-	st := p.state
+	var patch plugin.VisualPatch
+	if ok && host != nil {
+		patch = buildVisualPatch(slot, p.state, connected, flash)
+	}
 	p.mu.RUnlock()
 
 	if !ok || host == nil {
 		return
 	}
 
-	patch := buildVisualPatch(slot, st, connected, flash)
 	host.UpdateVisual(ctxID, patch)
 }
 
@@ -1417,12 +1435,21 @@ func buildVisualPatch(slot trackedSlot, st obsState, connected bool, flash strin
 		input := stringSetting(slot.settings, "inputName", "")
 		if st.inputMuted[input] {
 			sub, col, state = "MUTED", "#EF4444", 1
-		} else if db, cached := st.inputVolumeDb[input]; cached {
-			sub, col = fmt.Sprintf("%.1f dB", db), "#38BDF8"
+			fb = map[string]any{
+				"value":     "MUTED",
+				"indicator": 0,
+			}
+		} else if volPct, cached := st.inputVolumePct[input]; cached {
+			pct := roundHalfPct(volPct)
+			sub, col = formatVolumePct(pct), "#38BDF8"
+			fb = map[string]any{
+				"value":     sub,
+				"indicator": pct,
+			}
 		} else {
 			sub, col = "Ready", "#38BDF8"
+			fb = map[string]any{"value": sub}
 		}
-		fb = map[string]any{"value": sub}
 
 	case ActionStream:
 		if st.streaming {
@@ -1503,8 +1530,132 @@ func extractNames(raw any, field string) []string {
 	return names
 }
 
-func clampDb(db float64) float64 {
-	return min(max(db, -100.0), 26.0)
+func roundHalfPct(pct float64) float64 {
+	if math.IsNaN(pct) || pct <= 0 {
+		return 0
+	}
+	if pct >= 100 {
+		return 100
+	}
+	rounded := math.Round(pct*2.0) / 2.0
+	if rounded == 0 {
+		return 0
+	}
+	return min(max(rounded, 0), 100)
+}
+
+func faderPctToMul(pct float64) float64 {
+	if math.IsNaN(pct) || pct <= 0 {
+		return 0
+	}
+	if pct >= 100 {
+		return 1
+	}
+	def := min(max(pct, 0), 100) / 100.0
+	return def * def * def
+}
+
+func mulToFaderPct(mul float64) float64 {
+	if math.IsNaN(mul) || mul <= 0 {
+		return 0
+	}
+	if mul >= 1 {
+		return 100
+	}
+	return roundHalfPct(math.Cbrt(mul) * 100.0)
+}
+
+func dbToFaderPct(db float64) float64 {
+	if math.IsNaN(db) || math.IsInf(db, -1) || db <= -100 {
+		return 0
+	}
+	if db >= 0 {
+		return 100
+	}
+	return mulToFaderPct(math.Pow(10, db/20.0))
+}
+
+func stepDbToStepPct(stepDb float64) float64 {
+	if math.IsNaN(stepDb) || stepDb == 0 {
+		return 5
+	}
+	mag := min(max(math.Round(math.Abs(stepDb)*2.5*2.0)/2.0, 0.5), 100)
+	return math.Copysign(mag, stepDb)
+}
+
+func formatVolumePct(pct float64) string {
+	return strconv.FormatFloat(roundHalfPct(pct), 'f', -1, 64) + "%"
+}
+
+func extractInputVolumePct(m map[string]any) (float64, bool) {
+	if m == nil {
+		return 0, false
+	}
+	if rawMul, exists := m["inputVolumeMul"]; exists && rawMul != nil {
+		if mul, ok := numericValue(rawMul); ok {
+			return mulToFaderPct(mul), true
+		}
+	}
+	if rawDb, exists := m["inputVolumeDb"]; exists {
+		if rawDb == nil {
+			// OBS WebSocket serializes -inf dB (slider at bottom) as JSON null.
+			return 0, true
+		}
+		if db, ok := numericValue(rawDb); ok {
+			return dbToFaderPct(db), true
+		}
+	}
+	return 0, false
+}
+
+func resolveStepPctSetting(settings map[string]any) float64 {
+	if v, ok := numericSetting(settings, "stepPct"); ok {
+		return v
+	}
+	if v, ok := numericSetting(settings, "stepDb"); ok {
+		return stepDbToStepPct(v)
+	}
+	return 5.0
+}
+
+func resolveTargetPctSetting(settings map[string]any) float64 {
+	if v, ok := numericSetting(settings, "targetPct"); ok {
+		return roundHalfPct(v)
+	}
+	if v, ok := numericSetting(settings, "targetDb"); ok {
+		return dbToFaderPct(v)
+	}
+	return 100.0
+}
+
+func numericSetting(settings map[string]any, key string) (float64, bool) {
+	if settings == nil {
+		return 0, false
+	}
+	v, ok := settings[key]
+	if !ok || v == nil {
+		return 0, false
+	}
+	return numericValue(v)
+}
+
+func numericValue(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, !math.IsNaN(n) && !math.IsInf(n, 0)
+	case float32:
+		f := float64(n)
+		return f, !math.IsNaN(f) && !math.IsInf(f, 0)
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		return parsed, err == nil && !math.IsNaN(parsed) && !math.IsInf(parsed, 0)
+	default:
+		return 0, false
+	}
 }
 
 func stringSetting(settings map[string]any, key, def string) string {
@@ -1560,31 +1711,6 @@ func intSetting(settings map[string]any, key string, def int) int {
 		return int(n)
 	case string:
 		if parsed, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
-			return parsed
-		}
-		return def
-	default:
-		return def
-	}
-}
-
-func floatSetting(settings map[string]any, key string, def float64) float64 {
-	if settings == nil {
-		return def
-	}
-	v, ok := settings[key]
-	if !ok || v == nil {
-		return def
-	}
-	switch n := v.(type) {
-	case float64:
-		return n
-	case int:
-		return float64(n)
-	case int64:
-		return float64(n)
-	case string:
-		if parsed, err := strconv.ParseFloat(strings.TrimSpace(n), 64); err == nil {
 			return parsed
 		}
 		return def

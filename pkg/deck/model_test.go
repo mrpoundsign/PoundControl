@@ -157,3 +157,90 @@ func TestConfigDisabledPluginsNormalizeCloneAndJSON(t *testing.T) {
 		t.Fatalf("DisabledPlugins after JSON roundtrip = %v, want %v", decoded.DisabledPlugins, want)
 	}
 }
+
+func TestConfigMigrateLegacyOBSVolumeSettings(t *testing.T) {
+	cfg := DefaultConfig()
+	prof := cfg.Profiles[0]
+	prof.Dials = 1
+
+	// Keypad slot with negative stepDb and targetDb.
+	prof.Pages[0].Slots["0,0"] = &SlotConfig{
+		Context:    NewUUID(),
+		ActionUUID: obsAudioVolumeActionUUID,
+		Settings: map[string]any{
+			"inputName": "Mic",
+			"mode":      "set",
+			"stepDb":    -2.0,
+			"targetDb":  -18.0,
+		},
+	}
+	// Dial with legacy pushAction reset_0db and fractional stepDb.
+	prof.Pages[0].Dials[0] = &SlotConfig{
+		Context:    NewUUID(),
+		ActionUUID: obsAudioVolumeActionUUID,
+		Settings: map[string]any{
+			"inputName":  "Music",
+			"mode":       "step",
+			"stepDb":     0.5,
+			"targetDb":   0.0,
+			"pushAction": "reset_0db",
+		},
+	}
+	// Folder slot with multi-action containing a nested OBS volume step and unknown step fields.
+	stepsJSON := `[{"id":"s1","actionUuid":"com.github.mrpoundsign.poundcontrol.obs.audio.volume","settings":{"inputName":"Desktop","mode":"set","stepDb":2,"targetDb":-100,"customExtra":"keep"},"delayMs":25,"disabled":false}]`
+	prof.Folders["f1"] = &Folder{
+		ID:   "f1",
+		Name: "Audio",
+		Slots: map[string]*SlotConfig{
+			"0,1": {
+				Context:    NewUUID(),
+				ActionUUID: coreMultiActionUUID,
+				Settings: map[string]any{
+					"steps": stepsJSON,
+				},
+			},
+		},
+		Dials: make(map[int]*SlotConfig),
+	}
+
+	if !cfg.MigrateLegacySettings() {
+		t.Fatal("expected MigrateLegacySettings() to report changes")
+	}
+
+	kSettings := prof.Pages[0].Slots["0,0"].Settings
+	if kSettings["stepPct"] != -5.0 || kSettings["targetPct"] != 50.0 {
+		t.Fatalf("unexpected migrated keypad settings: %+v", kSettings)
+	}
+	if _, hasOld := kSettings["stepDb"]; hasOld {
+		t.Fatalf("expected stepDb removed, got %+v", kSettings)
+	}
+	if _, hasOld := kSettings["targetDb"]; hasOld {
+		t.Fatalf("expected targetDb removed, got %+v", kSettings)
+	}
+
+	dSettings := prof.Pages[0].Dials[0].Settings
+	if dSettings["stepPct"] != 1.5 || dSettings["targetPct"] != 100.0 || dSettings["pushAction"] != "reset_100" {
+		t.Fatalf("unexpected migrated dial settings: %+v", dSettings)
+	}
+
+	var migratedSteps []map[string]any
+	rawMigratedSteps, _ := prof.Folders["f1"].Slots["0,1"].Settings["steps"].(string)
+	if err := json.Unmarshal([]byte(rawMigratedSteps), &migratedSteps); err != nil {
+		t.Fatalf("unmarshal migrated multi-action steps: %v", err)
+	}
+	if len(migratedSteps) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(migratedSteps))
+	}
+	nested := migratedSteps[0]["settings"].(map[string]any)
+	if nested["stepPct"] != 5.0 || nested["targetPct"] != 0.0 || nested["customExtra"] != "keep" {
+		t.Fatalf("unexpected migrated multi-action step settings: %+v", nested)
+	}
+	if migratedSteps[0]["delayMs"] != float64(25) {
+		t.Fatalf("expected delayMs preserved, got %+v", migratedSteps[0])
+	}
+
+	// Idempotency check.
+	if cfg.MigrateLegacySettings() {
+		t.Fatal("expected second MigrateLegacySettings() call to report false")
+	}
+}

@@ -159,9 +159,13 @@ func NewEngine(store deck.Store, reg *plugin.Registry) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load deck config: %w", err)
 	}
+	migrated := cfg.MigrateLegacySettings()
 	cfg.Normalize()
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid deck config: %w", err)
+	}
+	if migrated {
+		_ = store.Save(cfg.Clone())
 	}
 
 	eng := &Engine{
