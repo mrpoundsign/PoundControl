@@ -2,6 +2,7 @@ package obs
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -39,10 +40,13 @@ type mockOBSServer struct {
 	inputs          []string
 	inputMuted      map[string]bool
 	inputDb         map[string]float64
+	inputMul        map[string]float64
 	customCalls     []string
 }
 
 func newMockOBSServer(password string) *mockOBSServer {
+	micMul := math.Pow(10, -6.0/20.0)
+	deskMul := math.Pow(10, -12.0/20.0)
 	m := &mockOBSServer{
 		Password:     password,
 		conns:        make(map[*websocket.Conn]struct{}),
@@ -58,6 +62,7 @@ func newMockOBSServer(password string) *mockOBSServer {
 		inputs:     []string{"Mic/Aux", "Desktop Audio"},
 		inputMuted: map[string]bool{"Mic/Aux": false, "Desktop Audio": false},
 		inputDb:    map[string]float64{"Mic/Aux": -6.0, "Desktop Audio": -12.0},
+		inputMul:   map[string]float64{"Mic/Aux": micMul, "Desktop Audio": deskMul},
 	}
 
 	wsSrv := websocket.Server{
@@ -287,11 +292,31 @@ func (m *mockOBSServer) handleRequest(reqType string, data map[string]any) (map[
 
 	case "GetInputVolume":
 		input := stringMapVal(data, "inputName")
-		return map[string]any{"inputVolumeDb": m.inputDb[input]}, 100, ""
+		mul := m.inputMul[input]
+		var dbVal any
+		if mul > 0 {
+			dbVal = m.inputDb[input]
+		}
+		return map[string]any{
+			"inputVolumeMul": mul,
+			"inputVolumeDb":  dbVal,
+		}, 100, ""
 
 	case "SetInputVolume":
 		input := stringMapVal(data, "inputName")
-		m.inputDb[input] = floatMapVal(data, "inputVolumeDb", 0)
+		if _, hasMul := data["inputVolumeMul"]; hasMul {
+			mul := max(floatMapVal(data, "inputVolumeMul", 0), 0)
+			m.inputMul[input] = mul
+			if mul > 0 {
+				m.inputDb[input] = 20.0 * math.Log10(mul)
+			} else {
+				m.inputDb[input] = -100.0
+			}
+		} else {
+			db := floatMapVal(data, "inputVolumeDb", 0)
+			m.inputDb[input] = db
+			m.inputMul[input] = math.Pow(10, db/20.0)
+		}
 		return nil, 100, ""
 
 	case "GetStreamStatus":

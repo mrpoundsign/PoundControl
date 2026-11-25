@@ -64,6 +64,24 @@ class WearLayoutModeTest {
         assertEquals(CrownTickResult(0, 0f), WearDeckHelper.accumulateCrownTicks(0f, Float.NaN))
         assertEquals(CrownTickResult(0, 0f), WearDeckHelper.accumulateCrownTicks(0f, 1f, threshold = 0f))
         assertEquals(CrownTickResult(0, 0f), WearDeckHelper.accumulateCrownTicks(0f, 1f, maxStep = 0))
+
+        // Pixel Watch scaled rotary scroll (100px / 2.0 density = 50dp per scroll unit, threshold 14dp).
+        val deltaDp = WearDeckHelper.scaleRotaryDeltaDp(
+            rawAxisScroll = -0.35f,
+            verticalScrollFactorPx = 100f,
+            density = 2.0f,
+        )
+        assertEquals(17.5f, deltaDp, 0.0001f)
+        val scaledStep = WearDeckHelper.accumulateCrownTicks(
+            accum = 0f,
+            delta = deltaDp,
+            threshold = WearDeckHelper.DEFAULT_CROWN_STEP_DP,
+        )
+        assertEquals(1, scaledStep.ticks)
+        assertEquals(3.5f, scaledStep.remainingAccum, 0.0001f)
+
+        assertEquals(0f, WearDeckHelper.scaleRotaryDeltaDp(Float.NaN, 100f, 2.0f), 0.0001f)
+        assertEquals(-32f, WearDeckHelper.scaleRotaryDeltaDp(1f, 0f, 0f), 0.0001f)
     }
 
     @Test

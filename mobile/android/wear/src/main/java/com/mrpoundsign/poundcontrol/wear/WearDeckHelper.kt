@@ -38,6 +38,29 @@ object WearDeckHelper {
     const val SKY_BLUE_ARGB: Int = 0xFF38BDF8.toInt()
     const val STATUS_OK_ARGB: Int = 0xFF22C55E.toInt()
     const val STATUS_ALERT_ARGB: Int = 0xFFEF4444.toInt()
+    const val DEFAULT_CROWN_STEP_DP: Float = 14f
+
+    /**
+     * Scales a raw `MotionEvent.AXIS_SCROLL` rotary delta into normalized display-independent pixels,
+     * negating the axis so clockwise crown rotation produces a positive delta.
+     */
+    fun scaleRotaryDeltaDp(
+        rawAxisScroll: Float,
+        verticalScrollFactorPx: Float,
+        density: Float,
+    ): Float {
+        if (!rawAxisScroll.isFinite()) return 0f
+        val scrollDpPerUnit = if (verticalScrollFactorPx.isFinite() &&
+            verticalScrollFactorPx > 0f &&
+            density.isFinite() &&
+            density > 0f
+        ) {
+            verticalScrollFactorPx / density
+        } else {
+            32f
+        }
+        return -rawAxisScroll * scrollDpPerUnit
+    }
 
     /**
      * Returns true when the Keys view should render as a compact grid instead of a scrollable list.

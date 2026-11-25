@@ -13,6 +13,7 @@ import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.animation.AccelerateDecelerateInterpolator
@@ -23,6 +24,7 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.core.view.InputDeviceCompat
 import androidx.core.view.MotionEventCompat
+import androidx.core.view.ViewConfigurationCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.gms.wearable.MessageClient
 import com.google.android.gms.wearable.MessageEvent
@@ -81,6 +83,7 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
 
     private var crownAccumulator: Float = 0f
     private var pendingCrownTicks: Int = 0
+    private var verticalScrollFactorPx: Float = 0f
     private val flushCrownRunnable = Runnable { flushPendingCrownTicks() }
 
     private val activeGlowTiles = ArrayList<GlowTileView>()
@@ -119,6 +122,10 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
         super.onCreate(savedInstanceState)
         layoutMode = LayoutMode.fromStorageKey(prefs.getString(KEY_LAYOUT_MODE, null))
         keepScreenOn = prefs.getBoolean(KEY_KEEP_SCREEN_ON, false)
+        verticalScrollFactorPx = ViewConfigurationCompat.getScaledVerticalScrollFactor(
+            ViewConfiguration.get(this),
+            this,
+        )
         applyKeepScreenOnFlag()
 
         setContentView(buildContentView())
@@ -132,6 +139,7 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
         Wearable.getMessageClient(this).addListener(this)
         startOpenAndKeepalive()
         syncShimmerAnimator()
+        requestDialFocusIfActive()
     }
 
     override fun onPause() {
@@ -148,49 +156,63 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
 
     override fun onMessageReceived(messageEvent: MessageEvent) {
         if (!messageEvent.path.startsWith(WearProtocol.PATH_PREFIX)) return
-        connectedPhoneNodeId = messageEvent.sourceNodeId
         val payload = messageEvent.data.toString(Charsets.UTF_8)
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            connectedPhoneNodeId = messageEvent.sourceNodeId
 
-        when (messageEvent.path) {
-            WearProtocol.PATH_SNAPSHOT -> {
-                val snap = DeckSnapshot.fromJsonString(payload) ?: return
-                latestSnapshot = snap
-                if (latestStatus.state == WatchStatusMessage.STATE_CONNECTING) {
-                    latestStatus = WatchStatusMessage(WatchStatusMessage.STATE_LIVE, "Phone Relay")
+            when (messageEvent.path) {
+                WearProtocol.PATH_SNAPSHOT -> {
+                    val snap = DeckSnapshot.fromJsonString(payload) ?: return@runOnUiThread
+                    latestSnapshot = snap
+                    if (latestStatus.state == WatchStatusMessage.STATE_CONNECTING) {
+                        latestStatus = WatchStatusMessage(WatchStatusMessage.STATE_LIVE, "Phone Relay")
+                    }
+                    ensureValidSelectedDial(snap)
+                    renderActiveTab()
                 }
-                ensureValidSelectedDial(snap)
-                renderAll()
-            }
 
-            WearProtocol.PATH_STATUS -> {
-                val msg = WatchStatusMessage.fromJson(payload) ?: return
-                latestStatus = msg
-                renderAll()
+                WearProtocol.PATH_STATUS -> {
+                    val msg = WatchStatusMessage.fromJson(payload) ?: return@runOnUiThread
+                    latestStatus = msg
+                    renderActiveTab()
+                }
             }
         }
     }
 
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
-        if (currentTab == Tab.DIALS &&
-            ev.action == MotionEvent.ACTION_SCROLL &&
-            ev.isFromSource(InputDeviceCompat.SOURCE_ROTARY_ENCODER) &&
-            isLiveOrInteractive()
-        ) {
-            val delta = -ev.getAxisValue(MotionEventCompat.AXIS_SCROLL)
-            val result = WearDeckHelper.accumulateCrownTicks(
-                accum = crownAccumulator,
-                delta = delta,
-                threshold = 0.75f,
-                maxStep = 20,
-            )
-            crownAccumulator = result.remainingAccum
-            if (result.ticks != 0) {
-                queueCrownTicks(result.ticks)
-                dialArcView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-            }
+        if (handleRotaryEvent(ev)) {
             return true
         }
         return super.dispatchGenericMotionEvent(ev)
+    }
+
+    private fun handleRotaryEvent(ev: MotionEvent): Boolean {
+        if (currentTab != Tab.DIALS ||
+            ev.action != MotionEvent.ACTION_SCROLL ||
+            !ev.isFromSource(InputDeviceCompat.SOURCE_ROTARY_ENCODER) ||
+            !isLiveOrInteractive()
+        ) {
+            return false
+        }
+        val deltaDp = WearDeckHelper.scaleRotaryDeltaDp(
+            rawAxisScroll = ev.getAxisValue(MotionEventCompat.AXIS_SCROLL),
+            verticalScrollFactorPx = verticalScrollFactorPx,
+            density = resources.displayMetrics.density,
+        )
+        val result = WearDeckHelper.accumulateCrownTicks(
+            accum = crownAccumulator,
+            delta = deltaDp,
+            threshold = WearDeckHelper.DEFAULT_CROWN_STEP_DP,
+            maxStep = 20,
+        )
+        crownAccumulator = result.remainingAccum
+        if (result.ticks != 0) {
+            queueCrownTicks(result.ticks)
+            dialArcView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        }
+        return true
     }
 
     private fun isLiveOrInteractive(): Boolean {
@@ -208,7 +230,7 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
                     state = WatchStatusMessage.STATE_OFFLINE,
                     detail = "No paired phone found over Bluetooth",
                 )
-                renderAll()
+                renderActiveTab()
                 return@launch
             }
             connectedPhoneNodeId = nodeId
@@ -217,7 +239,7 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
                     state = WatchStatusMessage.STATE_CONNECTING,
                     detail = "Connecting via phone relay...",
                 )
-                renderAll()
+                renderActiveTab()
             }
 
             val opened = sendWearMessage(nodeId, WearProtocol.PATH_OPEN, ByteArray(0))
@@ -226,7 +248,7 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
                     state = WatchStatusMessage.STATE_OFFLINE,
                     detail = "Unable to reach phone over Bluetooth",
                 )
-                renderAll()
+                renderActiveTab()
                 return@launch
             }
 
@@ -244,7 +266,7 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
             state = WatchStatusMessage.STATE_CONNECTING,
             detail = "Reconnecting to phone relay...",
         )
-        renderAll()
+        renderActiveTab()
         startOpenAndKeepalive()
     }
 
@@ -262,7 +284,7 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
                     state = WatchStatusMessage.STATE_OFFLINE,
                     detail = "Phone disconnected over Bluetooth",
                 )
-                renderAll()
+                renderActiveTab()
                 return@launch
             }
             connectedPhoneNodeId = nodeId
@@ -272,7 +294,7 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
                     state = WatchStatusMessage.STATE_OFFLINE,
                     detail = "Bluetooth command delivery failed",
                 )
-                renderAll()
+                renderActiveTab()
             }
         }
     }
@@ -450,6 +472,9 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
         dialArcView = DialArcView(this).apply {
             val size = dp(124)
             layoutParams = LinearLayout.LayoutParams(size, size)
+            isFocusable = true
+            isFocusableInTouchMode = true
+            setOnGenericMotionListener { _, ev -> handleRotaryEvent(ev) }
             setOnClickListener {
                 val dial = currentSelectedDial() ?: return@setOnClickListener
                 if (!dial.assigned) return@setOnClickListener
@@ -572,8 +597,16 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
 
     private fun switchTab(tab: Tab) {
         if (currentTab == tab) return
+        if (currentTab == Tab.DIALS) {
+            flushPendingCrownTicks()
+        }
+        resetCrownInput()
         currentTab = tab
-        renderAll()
+        renderTabs()
+        renderActiveTab()
+        if (tab == Tab.DIALS) {
+            requestDialFocusIfActive()
+        }
     }
 
     private fun renderAll() {
@@ -584,6 +617,33 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
         renderDialsView()
         renderMenuView()
         syncShimmerAnimator()
+    }
+
+    private fun renderActiveTab() {
+        renderHeaderStrip()
+        renderVisibilityAndOverlay()
+        when (currentTab) {
+            Tab.KEYS -> renderKeysView()
+            Tab.DIALS -> renderDialsView()
+            Tab.MENU -> renderMenuView()
+        }
+        syncShimmerAnimator()
+    }
+
+    private fun resetCrownInput() {
+        mainHandler.removeCallbacks(flushCrownRunnable)
+        crownAccumulator = 0f
+        pendingCrownTicks = 0
+    }
+
+    private fun requestDialFocusIfActive() {
+        if (currentTab == Tab.DIALS && dialsActiveGroup.visibility == View.VISIBLE) {
+            dialArcView.post {
+                if (currentTab == Tab.DIALS && dialsActiveGroup.visibility == View.VISIBLE) {
+                    dialArcView.requestFocus()
+                }
+            }
+        }
     }
 
     private fun renderTabs() {
@@ -998,6 +1058,8 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
                     }
                     setOnClickListener {
                         it.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        flushPendingCrownTicks()
+                        resetCrownInput()
                         selectedDialIndex = d.index
                         renderDialsView()
                     }
@@ -1013,6 +1075,9 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
             "Dial ${activeIdx + 1}/${assignedDials.size}"
         } else {
             "Crown Ready"
+        }
+        if (currentTab == Tab.DIALS && !dialArcView.hasFocus()) {
+            requestDialFocusIfActive()
         }
     }
 

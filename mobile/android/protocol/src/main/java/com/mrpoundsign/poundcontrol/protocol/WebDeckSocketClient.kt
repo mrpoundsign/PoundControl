@@ -86,22 +86,19 @@ class WebDeckSocketClient(
     fun isConnected(): Boolean = synchronized(lock) { ws != null && session != null }
 
     fun sendCommand(jsonPayload: String): Boolean {
-        val currentWs: WebSocket
-        val frameJson: String
         synchronized(lock) {
             val curWs = ws ?: return false
             val curSess = session ?: return false
             curSess.txSeq += 1L
             val seq = curSess.txSeq
             val mac = WebDeckCrypto.computeFrameMAC(curSess.clientMacKey, "c2s", seq, jsonPayload)
-            frameJson = JSONObject()
+            val frameJson = JSONObject()
                 .put("seq", seq)
                 .put("payload", jsonPayload)
                 .put("mac", WebDeckCrypto.toBase64(mac))
                 .toString()
-            currentWs = curWs
+            return curWs.send(frameJson)
         }
-        return currentWs.send(frameJson)
     }
 
     private fun openSocketLocked() {
