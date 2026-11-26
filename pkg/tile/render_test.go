@@ -205,3 +205,24 @@ func TestImportImageAssetAndCropSquare(t *testing.T) {
 		t.Fatalf("CropSquare(20x10) bounds = %+v, want 10x10", b)
 	}
 }
+
+func TestRenderSVGRoundedRectCopiesRxToRy(t *testing.T) {
+	svg := `<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144"><rect x="4" y="4" width="136" height="136" rx="22" fill="#0F172A" stroke="#22C55E" stroke-width="4"/></svg>`
+	uri := "data:image/svg+xml;utf8," + url.PathEscape(svg)
+	img, err := DecodeImage(uri, 144)
+	if err != nil {
+		t.Fatalf("DecodeImage() error = %v", err)
+	}
+
+	// Pixel inside the top-left 22px corner radius cutaway must remain transparent.
+	_, _, _, cornerAlpha := img.At(5, 5).RGBA()
+	if cornerAlpha != 0 {
+		t.Fatalf("expected transparent curved corner at (5,5), got alpha=%d", cornerAlpha)
+	}
+
+	// Center pixel must be opaque #0F172A.
+	r, g, b, a := img.At(72, 72).RGBA()
+	if a == 0 || uint8(r>>8) != 0x0F || uint8(g>>8) != 0x17 || uint8(b>>8) != 0x2A {
+		t.Fatalf("expected opaque #0F172A at center (72,72), got rgba=(%d,%d,%d,%d)", r>>8, g>>8, b>>8, a>>8)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"log"
 	"path/filepath"
 
+	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
 
 	"github.com/mrpoundsign/PoundControl/assets"
@@ -125,6 +126,14 @@ func main() {
 	win.SetOBSController(obsProvider)
 	win.SetSDPluginController(sdHost)
 	win.SetWasmPluginController(wasmHost)
+	wasmHost.SetOnActionsChanged(func() {
+		fyne.Do(func() {
+			_ = win.SyncExternalPlugins()
+		})
+	})
+	fyne.Do(func() {
+		_ = win.SyncExternalPlugins()
+	})
 	win.SetPIViewer(ui.NewDefaultPIViewer())
 
 	oaClient := sdplugin.NewCatalogueClient()

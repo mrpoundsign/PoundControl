@@ -18,6 +18,7 @@ import (
 
 	"github.com/mrpoundsign/PoundControl/internal/app"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 	"github.com/mrpoundsign/PoundControl/pkg/tile"
 )
 
@@ -75,6 +76,7 @@ type deckTileWidget struct {
 	shimmerPhase float64
 	assigned     bool
 	autoBack     bool
+	fullBleedArt bool
 	selected     bool
 	hovered      bool
 	dropTarget   bool
@@ -119,7 +121,7 @@ func (t *deckTileWidget) SetSelected(selected bool) {
 }
 
 func (t *deckTileWidget) isActive() bool {
-	return (t.assigned || t.autoBack) && t.state > 0
+	return (!t.fullBleedArt || t.decodedImg == nil) && (t.assigned || t.autoBack) && t.state > 0
 }
 
 func (t *deckTileWidget) setShimmerPhase(phase float64) {
@@ -144,6 +146,7 @@ func (t *deckTileWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 		t.state = 0
 		t.assigned = false
 		t.autoBack = false
+		t.fullBleedArt = false
 	} else {
 		t.title = rendered.Visual.Title
 		t.subtitle = rendered.Visual.Subtitle
@@ -180,6 +183,11 @@ func (t *deckTileWidget) ApplySlot(rendered *app.RenderedSlot, selected bool) {
 		t.state = rendered.Visual.State
 		t.assigned = rendered.Config != nil
 		t.autoBack = rendered.AutoBack
+		t.fullBleedArt = rendered.Action != nil &&
+			rendered.Action.Provider == plugin.ProviderStreamDeck &&
+			uri != "" &&
+			strings.TrimSpace(t.title) == "" &&
+			strings.TrimSpace(t.subtitle) == ""
 	}
 	t.selected = selected
 	t.Refresh()
@@ -401,6 +409,9 @@ func (r *deckTileRenderer) Layout(size fyne.Size) {
 		r.coordTxt.Hide()
 		if hasArt {
 			pad := float32(5)
+			if r.tile.fullBleedArt {
+				pad = 1.5
+			}
 			r.artImg.Move(fyne.NewPos(bodyPos.X+pad, bodyPos.Y+pad))
 			r.artImg.Resize(fyne.NewSize(max(float32(16), drawW-pad*2), max(float32(16), drawH-pad*2)))
 			r.artImg.Show()
@@ -569,6 +580,7 @@ func (r *deckTileRenderer) Refresh() {
 
 	hasText := strings.TrimSpace(r.tile.title) != "" || strings.TrimSpace(r.tile.subtitle) != ""
 	fullArt := (hasDecoded || hasBgImg) && !hasText
+	sdFullArt := fullArt && hasDecoded && r.tile.fullBleedArt
 
 	accentCol := ColorSlateBorder
 	if r.tile.accentHex != "" {
@@ -579,7 +591,7 @@ func (r *deckTileRenderer) Refresh() {
 	r.accentCol = accentCol
 
 	active := r.tile.isActive()
-	ambient := !active && (r.tile.assigned || r.tile.autoBack) && isChromaticColor(accentCol)
+	ambient := !active && !sdFullArt && (r.tile.assigned || r.tile.autoBack) && isChromaticColor(accentCol)
 
 	if !fullArt && (r.tile.assigned || r.tile.autoBack) {
 		r.accentBar.Show()
@@ -627,6 +639,9 @@ func (r *deckTileRenderer) Refresh() {
 	case r.tile.hovered:
 		r.bg.StrokeColor = ColorSecondarySlate
 		r.bg.StrokeWidth = 1.5
+	case sdFullArt:
+		r.bg.StrokeColor = ColorSlateBorder
+		r.bg.StrokeWidth = 1.0
 	case r.tile.assigned || r.tile.autoBack:
 		r.bg.StrokeColor = accentCol
 		r.bg.StrokeWidth = 1.5

@@ -103,6 +103,7 @@ All string/JSON payloads passed to guest exports are UTF-8 encoded without NUL t
 | `pc_on_timer` | Optional | `(ptr: uint32, len: uint32) -> (rc: int32)` | `0` OK, `< 0` error |
 | `pc_on_global_settings` | Optional | `(ptr: uint32, len: uint32) -> (rc: int32)` | `0` OK, `< 0` error |
 | `pc_on_config_action` | Optional | `(ptr: uint32, len: uint32) -> (rc: int32)` | `0` OK, `!= 0` surfaces error to UI without crashing module |
+| `pc_on_start` | Optional | `() -> (rc: int32)` | `0` OK, `!= 0` logged on startup |
 
 ### 3.1 `pc_manifest() -> uint64`
 
@@ -190,6 +191,15 @@ All imports reside in the WebAssembly import module **`"poundcontrol"`**.
 | `pc_http_request` | `(reqPtr, reqLen, respPtr, respCap: uint32) -> int32` | `>= 0` bytes written, `-neededLen` retry |
 | `pc_set_timer` | `(idPtr, idLen, ctxPtr, ctxLen, intervalMs: uint32) -> int32` | `0` OK, `< 0` error |
 | `pc_deck_nav` | `(cmdPtr, cmdLen: uint32) -> int32` | `0` OK, `< 0` error |
+| `pc_register_actions` | `(actionsPtr, actionsLen: uint32) -> int32` | `0` OK, `< 0` error |
+
+### 3.6 `pc_on_start() -> int32`
+
+Optional guest export called asynchronously once after the module is loaded and published in the plugin registry. Use it to initialize background polling timers via [`pc_set_timer`](#47-pc_set_timer) or dynamically register actions via [`pc_register_actions`](#49-pc_register_actions) without blocking `pc_manifest`.
+
+### 4.9 `pc_register_actions`
+
+Replaces this module's active action catalog at runtime with the UTF-8 JSON array of [`GuestAction`](#51-manifest-json-schema) objects at `(actionsPtr, actionsLen)` and notifies Studio asynchronously to refresh the Action Catalog and reload visible deck tiles. Returns `0` OK, `-1` memory read error, `-2` invalid JSON, or `-3` update error.
 
 ### 4.1 `pc_update_visual`
 

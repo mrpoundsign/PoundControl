@@ -69,6 +69,7 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
     private val prefs by lazy { getSharedPreferences(PREFS_NAME, MODE_PRIVATE) }
 
     private var currentTab: Tab = Tab.KEYS
+    private var lastDeckTab: Tab = Tab.KEYS
     private var layoutMode: LayoutMode = LayoutMode.AUTO
     private var keepScreenOn: Boolean = false
 
@@ -92,10 +93,8 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
 
     private var keepaliveJob: Job? = null
 
-    private lateinit var tabKeysBtn: TextView
-    private lateinit var tabDialsBtn: TextView
     private lateinit var tabMenuBtn: TextView
-    private lateinit var headerStripView: TextView
+    private lateinit var tabDeckToggleBtn: TextView
 
     private lateinit var keysScrollView: ScrollView
     private lateinit var keysContainer: LinearLayout
@@ -367,8 +366,9 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
     private fun buildContentView(): View {
         val isRound = resources.configuration.isScreenRound
         val topPad = dp(if (isRound) 10 else 6)
+        val bottomBarPad = dp(if (isRound) 10 else 6)
         val sidePad = dp(if (isRound) 16 else 8)
-        val bottomScrollPad = dp(if (isRound) 28 else 12)
+        val bottomScrollPad = dp(6)
 
         val root = FrameLayout(this).apply {
             setBackgroundColor(WearDeckHelper.OBSIDIAN_SLATE_ARGB)
@@ -382,37 +382,20 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
             setPadding(sidePad, topPad, sidePad, 0)
         }
 
-        val tabBar = LinearLayout(this).apply {
+        val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(4))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             )
         }
-        tabKeysBtn = createTabPill("Keys") { switchTab(Tab.KEYS) }
-        tabDialsBtn = createTabPill("Dials") { switchTab(Tab.DIALS) }
-        tabMenuBtn = createTabPill("Menu") { switchTab(Tab.MENU) }
-        tabBar.addView(tabKeysBtn)
-        tabBar.addView(tabDialsBtn)
-        tabBar.addView(tabMenuBtn)
-        mainColumn.addView(tabBar)
-
-        headerStripView = TextView(this).apply {
-            textSize = 10f
-            setTextColor(0xFF94A3B8.toInt())
-            gravity = Gravity.CENTER
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            setPadding(dp(4), dp(4), dp(4), dp(4))
+        tabMenuBtn = createTabPill("Menu") {
+            switchTab(if (currentTab == Tab.MENU) lastDeckTab else Tab.MENU)
         }
-        mainColumn.addView(
-            headerStripView,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ),
-        )
+        topBar.addView(tabMenuBtn)
+        mainColumn.addView(topBar)
 
         val contentStack = FrameLayout(this).apply {
             clipChildren = false
@@ -585,6 +568,27 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
         contentStack.addView(statusOverlay)
 
         mainColumn.addView(contentStack)
+
+        val bottomBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(4), 0, bottomBarPad)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        }
+        tabDeckToggleBtn = createTabPill("⇄ Dials") {
+            val target = when (currentTab) {
+                Tab.KEYS -> Tab.DIALS
+                Tab.DIALS -> Tab.KEYS
+                Tab.MENU -> lastDeckTab
+            }
+            switchTab(target)
+        }
+        bottomBar.addView(tabDeckToggleBtn)
+        mainColumn.addView(bottomBar)
+
         root.addView(
             mainColumn,
             FrameLayout.LayoutParams(
@@ -601,6 +605,9 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
             flushPendingCrownTicks()
         }
         resetCrownInput()
+        if (tab == Tab.KEYS || tab == Tab.DIALS) {
+            lastDeckTab = tab
+        }
         currentTab = tab
         renderTabs()
         renderActiveTab()
@@ -611,7 +618,6 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
 
     private fun renderAll() {
         renderTabs()
-        renderHeaderStrip()
         renderVisibilityAndOverlay()
         renderKeysView()
         renderDialsView()
@@ -620,7 +626,6 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
     }
 
     private fun renderActiveTab() {
-        renderHeaderStrip()
         renderVisibilityAndOverlay()
         when (currentTab) {
             Tab.KEYS -> renderKeysView()
@@ -647,29 +652,13 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
     }
 
     private fun renderTabs() {
-        styleTabPill(tabKeysBtn, selected = currentTab == Tab.KEYS)
-        styleTabPill(tabDialsBtn, selected = currentTab == Tab.DIALS)
         styleTabPill(tabMenuBtn, selected = currentTab == Tab.MENU)
-    }
-
-    private fun renderHeaderStrip() {
-        val snap = latestSnapshot
-        if (snap == null) {
-            headerStripView.text = statusLabel(latestStatus.state)
-            return
+        tabDeckToggleBtn.text = when (currentTab) {
+            Tab.KEYS -> "⇄ Dials"
+            Tab.DIALS -> "⇄ Keys"
+            Tab.MENU -> if (lastDeckTab == Tab.DIALS) "⇄ Dials" else "⇄ Keys"
         }
-        val dot = when (latestStatus.state) {
-            WatchStatusMessage.STATE_LIVE -> "●"
-            WatchStatusMessage.STATE_CONNECTING -> "◐"
-            else -> "○"
-        }
-        val pagePart = if (snap.pageCount > 1) " • ${snap.pageIndex + 1}/${snap.pageCount}" else ""
-        val folderPart = if (snap.inFolder && snap.folderPath.isNotEmpty()) {
-            " • ${snap.folderPath.last()}"
-        } else {
-            ""
-        }
-        headerStripView.text = "$dot ${snap.activeProfileName}$pagePart$folderPart"
+        styleTabPill(tabDeckToggleBtn, selected = currentTab != Tab.MENU)
     }
 
     private fun renderVisibilityAndOverlay() {
@@ -861,12 +850,15 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
                 activeGlowTiles.add(rowCard)
             }
 
+            val displayTitle = slot.title.ifBlank { slot.label }.ifBlank { "Key ${r + 1},${c + 1}" }
+            val displaySub = slot.subtitle.ifBlank { slot.sublabel }
+
             val textCol = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
             val titleView = TextView(this).apply {
-                text = slot.title.ifBlank { "Key ${r + 1},${c + 1}" }
+                text = displayTitle
                 textSize = 12f
                 setTypeface(null, Typeface.BOLD)
                 setTextColor(fg)
@@ -875,9 +867,9 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
             }
             textCol.addView(titleView)
 
-            if (slot.subtitle.isNotBlank()) {
+            if (displaySub.isNotBlank()) {
                 val subView = TextView(this).apply {
-                    text = slot.subtitle
+                    text = displaySub
                     textSize = 10f
                     setTextColor(resolveSubtitleColor(effectiveAccent, effectiveFill, fg))
                     maxLines = 1
@@ -936,20 +928,23 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
             activeGlowTiles.add(tile)
         }
 
+        val displayTitle = slot.title.ifBlank { slot.label }.ifBlank { "Key" }
+        val displaySub = slot.subtitle.ifBlank { slot.sublabel }
+
         val titleView = TextView(this).apply {
-            text = slot.title.ifBlank { "Key" }
+            text = displayTitle
             textSize = 11.5f
             setTypeface(null, Typeface.BOLD)
             setTextColor(fg)
             gravity = Gravity.CENTER
-            maxLines = if (slot.subtitle.isBlank()) 2 else 1
+            maxLines = if (displaySub.isBlank()) 2 else 1
             ellipsize = TextUtils.TruncateAt.END
         }
         tile.addView(titleView)
 
-        if (slot.subtitle.isNotBlank()) {
+        if (displaySub.isNotBlank()) {
             val subView = TextView(this).apply {
-                text = slot.subtitle
+                text = displaySub
                 textSize = 9.5f
                 setTextColor(resolveSubtitleColor(effectiveAccent, effectiveFill, fg))
                 gravity = Gravity.CENTER
@@ -1208,9 +1203,7 @@ class WearMainActivity : ComponentActivity(), MessageClient.OnMessageReceivedLis
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply {
-                marginEnd = dp(4)
-            }
+            )
             setOnClickListener {
                 it.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                 onClick()

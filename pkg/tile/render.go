@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +36,10 @@ var (
 	fontsOnce   sync.Once
 	regularFont *opentype.Font
 	boldFont    *opentype.Font
+
+	rectTagRe = regexp.MustCompile(`(?is)<rect\b[^>]*>`)
+	rectRxRe  = regexp.MustCompile(`(?is)\brx\s*=\s*(?:"([^"]*)"|'([^']*)')`)
+	rectRyRe  = regexp.MustCompile(`(?is)\bry\s*=\s*(?:"([^"]*)"|'([^']*)')`)
 )
 
 func initFonts() {
@@ -261,7 +266,7 @@ func looksLikeSVG(data []byte) bool {
 }
 
 func renderSVG(svgData []byte, size int) (image.Image, error) {
-	stripped := stripTextElements(svgData)
+	stripped := normalizeRectRadii(stripTextElements(svgData))
 	icon, err := oksvg.ReadIconStream(bytes.NewReader(stripped), oksvg.WarnErrorMode)
 	if err != nil {
 		return nil, fmt.Errorf("parse SVG shapes: %w", err)
@@ -289,6 +294,47 @@ func renderSVG(svgData []byte, size int) (image.Image, error) {
 
 	drawSVGTextOverlays(dst, svgData, vbX, vbY, scale, offX, offY)
 	return dst, nil
+}
+
+// normalizeRectRadii mirrors rx <-> ry when a <rect> specifies only one corner radius,
+// since srwiley/oksvg does not default omitted ry to rx (or vice versa) as SVG requires.
+func normalizeRectRadii(src []byte) []byte {
+	return rectTagRe.ReplaceAllFunc(src, func(tag []byte) []byte {
+		rxM := rectRxRe.FindSubmatch(tag)
+		ryM := rectRyRe.FindSubmatch(tag)
+		rxVal := firstNonEmptySubmatch(rxM)
+		ryVal := firstNonEmptySubmatch(ryM)
+		var extra string
+		switch {
+		case rxM != nil && ryM == nil && rxVal != "":
+			extra = fmt.Sprintf(` ry="%s"`, rxVal)
+		case ryM != nil && rxM == nil && ryVal != "":
+			extra = fmt.Sprintf(` rx="%s"`, ryVal)
+		default:
+			return tag
+		}
+		if bytes.HasSuffix(tag, []byte("/>")) {
+			out := make([]byte, 0, len(tag)+len(extra))
+			out = append(out, tag[:len(tag)-2]...)
+			out = append(out, extra...)
+			out = append(out, '/', '>')
+			return out
+		}
+		out := make([]byte, 0, len(tag)+len(extra))
+		out = append(out, tag[:len(tag)-1]...)
+		out = append(out, extra...)
+		out = append(out, '>')
+		return out
+	})
+}
+
+func firstNonEmptySubmatch(m [][]byte) string {
+	for i := 1; i < len(m); i++ {
+		if len(m[i]) > 0 {
+			return string(m[i])
+		}
+	}
+	return ""
 }
 
 // stripTextElements removes <text>...</text> (and self-closing <text .../>) elements

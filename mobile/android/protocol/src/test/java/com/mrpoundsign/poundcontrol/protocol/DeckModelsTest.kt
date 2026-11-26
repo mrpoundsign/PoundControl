@@ -38,6 +38,8 @@ class DeckModelsTest {
                   "assigned": true,
                   "title": "Mute Mic",
                   "subtitle": "LIVE",
+                  "label": "Playing",
+                  "sublabel": "Track A",
                   "color": "#EF4444",
                   "bgColor": "#1E293B",
                   "imageUrl": "data:image/png;base64,AAAA",
@@ -82,6 +84,8 @@ class DeckModelsTest {
         assertEquals(listOf("Audio"), reparsed.folderPath)
         assertEquals("Mute Mic", reparsed.slots["0,1"]?.title)
         assertEquals("LIVE", reparsed.slots["0,1"]?.subtitle)
+        assertEquals("Playing", reparsed.slots["0,1"]?.label)
+        assertEquals("Track A", reparsed.slots["0,1"]?.sublabel)
         assertEquals(1, reparsed.slots["0,1"]?.state)
         assertEquals("← Back", reparsed.slots["0,0"]?.title)
         assertEquals(1, reparsed.dialSlots.size)

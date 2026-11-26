@@ -51,6 +51,8 @@ data class DeckSlot(
     val autoBack: Boolean = false,
     val title: String = "",
     val subtitle: String = "",
+    val label: String = "",
+    val sublabel: String = "",
     val color: String = "",
     val bgColor: String = "",
     val state: Int = 0,
@@ -61,6 +63,8 @@ data class DeckSlot(
         if (autoBack) put("autoBack", true)
         put("title", title)
         if (subtitle.isNotEmpty()) put("subtitle", subtitle)
+        if (label.isNotEmpty()) put("label", label)
+        if (sublabel.isNotEmpty()) put("sublabel", sublabel)
         if (color.isNotEmpty()) put("color", color)
         if (bgColor.isNotEmpty()) put("bgColor", bgColor)
         if (state != 0) put("state", state)
@@ -73,6 +77,8 @@ data class DeckSlot(
             autoBack = obj.optBoolean("autoBack", false),
             title = obj.optString("title", ""),
             subtitle = obj.optString("subtitle", ""),
+            label = obj.optString("label", ""),
+            sublabel = obj.optString("sublabel", ""),
             color = obj.optString("color", ""),
             bgColor = obj.optString("bgColor", ""),
             state = obj.optInt("state", 0),
