@@ -8,9 +8,10 @@
 > 2. **Feedback & Explicit Approval on Decisions**: Always present clear options, findings, and proposed designs, then wait for user approval before moving forward. Never jump ahead to file tickets, create branches, or write code based on assumptions. Once a specific plan is approved, executing that agreed plan autonomously is expected, but any new findings, deviations, or decisions must pause for communication and approval.
 > 3. **One ticket at a time**: We work on exactly one issue/ticket at a time unless explicitly directed otherwise. Exactly **1 commit per issue** (aspirational goal; multiple commits or tickets on a branch only when aligned).
 > 4. **Pre-Commit Quality Gate**: Before every single commit, ALWAYS run:
->    - `go fix -diff ./...` (must report 0 diff)
->    - `golangci-lint-v2 run ./...` (must report 0 issues)
+>    - `go fix -diff ./cmd/... ./internal/... ./pkg/...` (must report 0 diff)
+>    - `golangci-lint-v2 run ./cmd/... ./internal/... ./pkg/...` (must report 0 issues)
 >    - `go test -count=1 -v ./cmd/... ./internal/... ./pkg/...` (all unit & UI tests must pass)
+>    *(Note: Do NOT pass bare `./...` in WSL after Gradle builds — it traverses `mobile/android/.gradle/` and `mobile/android/*/build/` over 9P and hangs.)*
 > 5. **User tests GUI before committing**: Always stop and let the user manually test the GUI binary (`build/bin/poundcontrol.exe` or `build/bin/poundcontrol`) before any changes are committed to git. Never launch GUI binaries interactively in agent subshells.
 > 6. **Prioritize Built-in Agent Tools Over Shelling Out**: Always use built-in tools (`read_file`, `write_file`, `edit_file`) for inspecting and editing files. Only shell out via `run_command` when strictly necessary (e.g., git operations, building/running tests, linting, or `gh` CLI).
 > 7. **In-Place Build Outputs Only (`build/bin/`)**: Keep compiled binaries, installers, and runtime artifacts strictly inside `build/bin/` (gitignored). Never copy build outputs outside the repository.
@@ -47,11 +48,16 @@ PoundControl/
 ├── cmd/
 │   ├── poundcontrol/        # Main Fyne Desktop Studio & Virtual Deck entry point
 │   └── installer/        # Guided setup installer (appinstaller, Milestone 6)
+├── docs/                 # WASM_PLUGIN_ABI.md specification & GitHub Pages site
+├── examples/             # Reference WASM & plugin examples
 ├── internal/
 │   ├── app/              # App controller, atomic config store, wiring
+│   ├── hotkey/           # Global desktop hotkey listener
 │   ├── ui/               # Fyne Studio GUI, Obsidian theme, pop-out pad, inspectors
 │   ├── version/          # App metadata and build version constants
 │   └── webdeck/          # LAN HTTP/WS touch deck & PI HTTP bridge
+├── mobile/
+│   └── android/          # Kotlin multi-module companion (:protocol, :app phone deck, :wear Wear OS)
 ├── pkg/
 │   ├── deck/             # Core domain types (GridSize, Coordinates, Profile, Page, Engine)
 │   ├── plugin/           # Unified Plugin/Provider/Action abstractions & registry
@@ -83,5 +89,14 @@ PoundControl/
    - **Linux / macOS / WSL Bash**:
      - `./build.sh` (lint + test + native GUI build to `build/bin/poundcontrol`)
      - `./build.sh gui-win` (MinGW cross-compile -> `build/bin/poundcontrol.exe`)
-3. **Config & Test Isolation**:
+   - **WSL Lint Scope Gotcha**: After Gradle runs, always target `./cmd/... ./internal/... ./pkg/...` explicitly for `go fix -diff` and `golangci-lint-v2 run` instead of `./...` so WSL 9P does not walk `mobile/android/.gradle/` and `mobile/android/*/build/`.
+3. **Android & Wear OS Companion (`mobile/android/`)**:
+   - Build and run unit tests with `.\gradlew.bat :protocol:test :wear:testDebugUnitTest :app:assembleDebug :wear:assembleDebug` inside `mobile\android\`.
+   - Deploy APKs with `adb -s <serial> install -r ...`.
+4. **Config & Test Isolation**:
    - Any persistent configuration or plugin data store must accept an explicit base directory or store interface so unit tests strictly use `t.TempDir()` or memory stores.
+5. **Key Runtime Patterns**:
+   - **Dynamic WASM Action Registration**: `pkg/wasmplugin` supports `pc_on_start` and `pc_register_actions` with live catalog refresh (`SetOnActionsChanged` → `win.SyncExternalPlugins()`).
+   - **Independent Client Viewports Across Reconnects**: `internal/webdeck` (`PairedDevice`) persists each paired phone/watch/web client's independent `Profile`, `PageIndex`, and `FolderStack` across reconnects instead of snapping back to the desktop window's active view.
+   - **Borderless Full-Art Tiles & Rounded SVG Rects**: Full-bleed `.sdPlugin` / `FullBleedArt` tiles render edge-to-edge without outer color glow or double borders; `pkg/tile` (`normalizeRectRadii`) copies `<rect rx>` → `ry` when `ry` is omitted so `oksvg` renders curved corners accurately.
+   - **Wear OS Round Watch UI (`WearMainActivity.kt`)**: Omits the top profile banner, places `Menu` at top center and a single `⇄ Dials` / `⇄ Keys` toggle at bottom center, displays `feedback.label` / `feedback.sublabel` before falling back to `"Key"`, and drives the cubic 0–100% OBS dial volume curve.
