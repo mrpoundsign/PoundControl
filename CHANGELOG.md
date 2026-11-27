@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.4 — 2026-11-27
+
+### Changed
+- **Compressed Windows Setup Installer (`appinstaller@v0.2.0`) & Fyne v2.8.3**:
+  - Switched `PoundControl-Setup.exe` to build-time zstd-compressed embedded payloads via `appinstaller@v0.2.0` (reducing installer size from ~57.1 MB to ~37.1 MB) and upgraded the Fyne GUI toolkit to `v2.8.3`.
+
+---
+
 ## v0.1.3 — 2026-11-26
 
 ### Fixed
