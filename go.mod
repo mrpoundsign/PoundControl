@@ -4,13 +4,13 @@ go 1.27.4
 
 require (
 	filippo.io/edwards25519 v1.2.0
-	fyne.io/fyne/v2 v2.8.2
+	fyne.io/fyne/v2 v2.8.3
 	github.com/gen2brain/malgo v0.11.26
 	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/jchv/go-webview2 v0.0.0-20260205173254-56598839c808
 	github.com/jfreymuth/oggvorbis v1.0.6
 	github.com/mewkiz/flac v1.0.14
-	github.com/mrpoundsign/appinstaller v0.1.0
+	github.com/mrpoundsign/appinstaller v0.2.0
 	github.com/ncruces/zenity v0.10.15
 	github.com/rymdport/portal v0.4.2
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
@@ -50,6 +50,7 @@ require (
 	github.com/jeandeaual/go-locale v0.0.0-20250612000132-0ef82f21eade // indirect
 	github.com/josephspurrier/goversioninfo v1.7.0 // indirect
 	github.com/jsummers/gobmp v0.0.0-20230614200233-a9de23ed2e25 // indirect
+	github.com/klauspost/compress v1.20.5 // indirect
 	github.com/mattn/go-runewidth v0.0.24 // indirect
 	github.com/mewkiz/pkg v0.0.0-20250417130911-3f050ff8c56d // indirect
 	github.com/mewpkg/term v0.0.0-20241026122259-37a80af23985 // indirect
