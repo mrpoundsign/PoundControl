@@ -296,6 +296,12 @@
                   <td><code>(ptr: uint32, len: uint32) -&gt; (rc: int32)</code></td>
                   <td><code>0</code> OK, <code>!= 0</code> surfaces error to UI without crashing module</td>
                 </tr>
+                <tr>
+                  <th scope="row"><code>pc_on_start</code></th>
+                  <td><span class="status-badge status-optional">Optional</span></td>
+                  <td><code>() -&gt; (rc: int32)</code></td>
+                  <td><code>0</code> OK, <code>!= 0</code> logged on startup</td>
+                </tr>
               </tbody>
             </table>
           </div>
@@ -407,6 +413,11 @@
             <li>Uses an extended <strong>20-second</strong> call timeout (<code>max(callTimeout, maxHTTPTimeout + 5s)</code>) so outbound OAuth/HTTP calls up to <code>15s</code> can finish cleanly.</li>
             <li>Returning any non-zero code (<code>!= 0</code>) reports an error in the Studio status bar <strong>without</strong> marking the module as <code>error</code> (so logical errors like <code>"Verify Connection failed"</code> or <code>"Missing Client ID"</code> keep the plugin running).</li>
           </ul>
+
+          <h3>3.6 <code>pc_on_start() -&gt; int32</code></h3>
+          <p>
+            Optional guest export called asynchronously once after the module is loaded and published in the plugin registry. Use it to initialize background polling timers via <a href="#import-timer"><code>pc_set_timer</code></a> or dynamically register actions via <a href="#import-register-actions"><code>pc_register_actions</code></a> without blocking <code>pc_manifest</code>.
+          </p>
         </section>
 
         <section id="imports" class="doc-section" tabindex="-1">
@@ -464,6 +475,11 @@
                   <td><code>(cmdPtr, cmdLen: uint32) -&gt; int32</code></td>
                   <td><code>0</code> OK, <code>&lt; 0</code> error</td>
                 </tr>
+                <tr>
+                  <th scope="row"><code>pc_register_actions</code></th>
+                  <td><code>(actionsPtr, actionsLen: uint32) -&gt; int32</code></td>
+                  <td><code>0</code> OK, <code>&lt; 0</code> error</td>
+                </tr>
               </tbody>
             </table>
           </div>
@@ -471,9 +487,9 @@
           <h3>4.1 <code>pc_update_visual</code></h3>
           <p>Updates live title, subtitle, colors, icon, active state, encoder feedback, or flash animation on the action instance identified by <code>ctxPtr/ctxLen</code>. Payload is a partial JSON <code>VisualPatch</code> — omitted/<code>null</code> fields leave the current property unchanged:</p>
           <figure class="code-figure">
-            <figcaption>VisualPatch JSON payload</figcaption>
+            <figcaption id="fig-visual-patch">VisualPatch JSON payload</figcaption>
             <div class="copyable">
-              <pre><code id="code-visual-patch">{
+              <pre role="region" aria-labelledby="fig-visual-patch" tabindex="0"><code id="code-visual-patch">{
   "title": "Optional Override",
   "subtitle": "LIVE 1.2K",
   "color": "#9146FF",
@@ -482,7 +498,9 @@
   "state": 1,
   "feedback": {
     "value": "75%",
-    "indicator": { "value": 75 }
+    "indicator": { "value": 75 },
+    "label": "VOICE",
+    "sublabel": "75%"
   },
   "flash": "ok"
 }</code></pre>
@@ -500,7 +518,8 @@
           </figure>
           <ul>
             <li><code>backgroundColor</code>: A non-empty hex value overrides the slot's user-configured background color and temporarily suppresses any custom background image; passing <code>""</code> clears the override and restores both.</li>
-            <li><code>image</code>: Accepts an inline <code>data:image/*</code> data URI, a safe relative file path inside the <code>.wasm</code> plugin's directory (no <code>..</code> escapes, symlink escapes outside the plugin folder, absolute paths, <code>file://</code>, <code>http(s)://</code>, or non-image <code>data:</code> URIs), or <code>""</code> to clear an overridden image. Unsafe non-empty URIs are ignored without clearing existing slot artwork.</li>
+            <li><code>image</code>: Accepts an inline <code>data:image/*</code> data URI (including full-bleed <code>144&times;144</code> SVG tiles), a safe relative file path inside the <code>.wasm</code> plugin's directory (no <code>..</code> escapes, symlink escapes outside the plugin folder, absolute paths, <code>file://</code>, <code>http(s)://</code>, or non-image <code>data:</code> URIs), or <code>""</code> to clear an overridden image. Unsafe non-empty URIs are ignored without clearing existing slot artwork.</li>
+            <li><code>feedback</code>: Supplies live encoder values (<code>value</code>, <code>indicator</code>) as well as compact Wear OS Watch client strings (<code>label</code> and <code>sublabel</code>).</li>
             <li><code>flash</code>: Supported values are <code>""</code>, <code>"ok"</code>, and <code>"alert"</code>.</li>
             <li>Returns <code>0</code> on success, <code>-1</code> on invalid memory bounds, <code>-2</code> on invalid JSON.</li>
           </ul>
@@ -617,6 +636,12 @@
             <li><code>"switchProfile"</code> — Switch active profile by <code>"profileRef"</code> (ID or name)</li>
           </ul>
           <p>Returns <code>0</code> OK, <code>-1</code> memory read error, <code>-2</code> invalid JSON, <code>-3</code> deck control unavailable, <code>-4</code> unknown action, <code>-5</code> navigation error.</p>
+
+          <h3 id="import-register-actions">4.9 <code>pc_register_actions</code></h3>
+          <p>
+            Replaces this module's active action catalog at runtime with the UTF-8 JSON array of <code>GuestAction</code> objects at <code>(actionsPtr, actionsLen)</code> and notifies Studio asynchronously to refresh the Action Catalog and reload visible deck tiles.
+          </p>
+          <p>Returns <code>0</code> OK, <code>-1</code> memory read error, <code>-2</code> invalid JSON, or <code>-3</code> update error.</p>
         </section>
 
         <section id="manifest" class="doc-section" tabindex="-1">
@@ -705,6 +730,7 @@
           </figure>
           <ul>
             <li><strong><code>controllers</code>:</strong> Array of <code>"Keypad"</code> and/or <code>"Encoder"</code>. Defaults to <code>["Keypad"]</code> when omitted.</li>
+            <li><strong><code>hideTitle</code>:</strong> Set to <code>true</code> for full-bleed borderless <code>144&times;144</code> SVG/PNG deck tiles where artwork renders its own labels.</li>
             <li><strong>Icon fallback &amp; URI sanitization (<code>icon</code>, <code>categoryIcon</code>, <code>defaultImage</code>):</strong> If an action omits <code>icon</code>, Studio falls back to that action's <code>defaultImage</code> in the Action Catalog. Category icons resolve in order: <code>categoryIcon</code> &rarr; <code>icon</code> &rarr; the first action's <code>icon</code> / <code>defaultImage</code>. All Wasm image/icon fields accept inline <code>data:image/*</code> URIs or safe relative paths strictly inside the <code>.wasm</code> plugin's directory; paths using <code>..</code> escapes, symlink escapes outside the plugin folder, absolute paths, <code>file://</code>, <code>http(s)://</code>, or non-image <code>data:</code> schemes are rejected and stripped to <code>""</code>.</li>
           </ul>
 

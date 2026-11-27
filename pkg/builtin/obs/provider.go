@@ -71,7 +71,9 @@ type obsState struct {
 	sourceItemID    map[sourceKey]int
 	sourceEnabled   map[sourceKey]bool
 	inputMuted      map[string]bool
+	inputMuteSeq    map[string]uint64
 	inputVolumePct  map[string]float64
+	inputVolumeSeq  map[string]uint64
 }
 
 func newOBSState() obsState {
@@ -80,7 +82,9 @@ func newOBSState() obsState {
 		sourceItemID:   make(map[sourceKey]int),
 		sourceEnabled:  make(map[sourceKey]bool),
 		inputMuted:     make(map[string]bool),
+		inputMuteSeq:   make(map[string]uint64),
 		inputVolumePct: make(map[string]float64),
+		inputVolumeSeq: make(map[string]uint64),
 	}
 }
 
@@ -93,6 +97,7 @@ type Provider struct {
 	manifest    plugin.Manifest
 	slots       map[string]trackedSlot
 	state       obsState
+	stateEpoch  uint64
 	statusSubs  map[uint64]func(ClientStatus)
 	statusSeq   uint64
 	closed      bool
@@ -841,6 +846,7 @@ func (p *Provider) execToggleMute(ctx context.Context, ev plugin.ActionEvent) er
 
 	p.mu.Lock()
 	p.state.inputMuted[input] = muted
+	p.state.inputMuteSeq[input]++
 	p.mu.Unlock()
 	p.refreshAllSlots()
 	return nil
@@ -898,6 +904,7 @@ func (p *Provider) execAudioVolume(ctx context.Context, ev plugin.ActionEvent) e
 
 	p.mu.Lock()
 	p.state.inputVolumePct[input] = newPct
+	p.state.inputVolumeSeq[input]++
 	p.mu.Unlock()
 	p.refreshAllSlots()
 	return nil
@@ -906,6 +913,8 @@ func (p *Provider) execAudioVolume(ctx context.Context, ev plugin.ActionEvent) e
 func (p *Provider) ensureInputVolumePct(ctx context.Context, input string) (float64, error) {
 	p.mu.RLock()
 	curPct, ok := p.state.inputVolumePct[input]
+	epoch := p.stateEpoch
+	startSeq := p.state.inputVolumeSeq[input]
 	p.mu.RUnlock()
 	if ok {
 		return curPct, nil
@@ -919,7 +928,12 @@ func (p *Provider) ensureInputVolumePct(ctx context.Context, input string) (floa
 		curPct = 0
 	}
 	p.mu.Lock()
-	p.state.inputVolumePct[input] = curPct
+	if latest, exists := p.state.inputVolumePct[input]; exists {
+		curPct = latest
+	} else if p.stateEpoch == epoch && p.state.inputVolumeSeq[input] == startSeq {
+		p.state.inputVolumePct[input] = curPct
+		p.state.inputVolumeSeq[input]++
+	}
 	p.mu.Unlock()
 	return curPct, nil
 }
@@ -1168,19 +1182,37 @@ func (p *Provider) warmSlotState(actionUUID string, settings map[string]any) {
 		if input == "" {
 			return
 		}
+		p.mu.RLock()
+		epoch := p.stateEpoch
+		muteSeq := p.state.inputMuteSeq[input]
+		volSeq := p.state.inputVolumeSeq[input]
+		p.mu.RUnlock()
+
+		updated := false
 		if resp, err := p.client.Call(ctx, "GetInputMute", map[string]any{"inputName": input}); err == nil {
+			muted := boolMapVal(resp, "inputMuted", false)
 			p.mu.Lock()
-			p.state.inputMuted[input] = boolMapVal(resp, "inputMuted", false)
+			if p.stateEpoch == epoch && p.state.inputMuteSeq[input] == muteSeq {
+				p.state.inputMuted[input] = muted
+				p.state.inputMuteSeq[input]++
+				updated = true
+			}
 			p.mu.Unlock()
 		}
 		if resp, err := p.client.Call(ctx, "GetInputVolume", map[string]any{"inputName": input}); err == nil {
 			if pct, valid := extractInputVolumePct(resp); valid {
 				p.mu.Lock()
-				p.state.inputVolumePct[input] = pct
+				if p.stateEpoch == epoch && p.state.inputVolumeSeq[input] == volSeq {
+					p.state.inputVolumePct[input] = pct
+					p.state.inputVolumeSeq[input]++
+					updated = true
+				}
 				p.mu.Unlock()
 			}
 		}
-		p.refreshAllSlots()
+		if updated {
+			p.refreshAllSlots()
+		}
 
 	case ActionToggleSource:
 		p.mu.RLock()
@@ -1281,6 +1313,7 @@ func (p *Provider) handleOBSEvent(ev Event) {
 		if name != "" {
 			p.mu.Lock()
 			p.state.inputMuted[name] = boolMapVal(ev.Data, "inputMuted", false)
+			p.state.inputMuteSeq[name]++
 			p.mu.Unlock()
 		}
 	case "InputVolumeChanged":
@@ -1289,6 +1322,7 @@ func (p *Provider) handleOBSEvent(ev Event) {
 			if pct, valid := extractInputVolumePct(ev.Data); valid {
 				p.mu.Lock()
 				p.state.inputVolumePct[name] = pct
+				p.state.inputVolumeSeq[name]++
 				p.mu.Unlock()
 			} else {
 				needsRefresh = false
@@ -1337,6 +1371,7 @@ func (p *Provider) handleOBSEvent(ev Event) {
 
 func (p *Provider) resetState() {
 	p.mu.Lock()
+	p.stateEpoch++
 	p.state = newOBSState()
 	p.mu.Unlock()
 }
