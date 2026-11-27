@@ -9,4 +9,4 @@ const (
 )
 
 // Version is the semantic version string, overridden at build time via -ldflags when releasing.
-var Version = "0.1.2-dev"
+var Version = "0.1.2"
