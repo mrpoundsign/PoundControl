@@ -10,6 +10,7 @@ import (
 
 	"github.com/mrpoundsign/PoundControl/internal/app"
 	"github.com/mrpoundsign/PoundControl/pkg/deck"
+	"github.com/mrpoundsign/PoundControl/pkg/plugin"
 )
 
 // ClientProfile is the sanitized profile summary exposed to remote touch deck clients.
@@ -29,6 +30,9 @@ type ClientSlot struct {
 	BackgroundColor    string `json:"bgColor,omitempty"`
 	BackgroundImageURL string `json:"bgImageUrl,omitempty"`
 	ImageURL           string `json:"imageUrl,omitempty"`
+	Label              string `json:"label,omitempty"`
+	Sublabel           string `json:"sublabel,omitempty"`
+	FullBleedArt       bool   `json:"fullBleedArt,omitempty"`
 	State              int    `json:"state,omitempty"`
 	Flash              string `json:"flash,omitempty"`
 }
@@ -152,7 +156,14 @@ func buildClientSnapshot(snap app.Snapshot, mapImage func(string) string) Client
 			BackgroundColor:    r.Visual.BackgroundColor,
 			BackgroundImageURL: resolveClientImageURL(r.Visual.BackgroundImage, mapImage),
 			ImageURL:           resolveClientImageURL(r.Visual.ImageURI, mapImage),
-			State:              r.Visual.State,
+			Label:              resolveSlotLabel(r),
+			Sublabel:           resolveSlotSublabel(r),
+			FullBleedArt: r.Action != nil &&
+				r.Action.Provider == plugin.ProviderStreamDeck &&
+				strings.TrimSpace(r.Visual.ImageURI) != "" &&
+				strings.TrimSpace(r.Visual.Title) == "" &&
+				strings.TrimSpace(r.Visual.Subtitle) == "",
+			State: r.Visual.State,
 			Flash:              r.Visual.Flash,
 		}
 	}
@@ -208,6 +219,40 @@ func buildClientSnapshot(snap app.Snapshot, mapImage func(string) string) Client
 		Slots:             slots,
 		DialSlots:         dials,
 	}
+}
+
+func resolveSlotLabel(r app.RenderedSlot) string {
+	if raw, ok := r.Visual.Feedback["label"]; ok && raw != nil {
+		if s := strings.TrimSpace(fmt.Sprint(raw)); s != "" {
+			return s
+		}
+	}
+	if s := strings.TrimSpace(r.Visual.Title); s != "" {
+		return s
+	}
+	if r.Config != nil {
+		if s := strings.TrimSpace(r.Config.Title); s != "" {
+			return s
+		}
+	}
+	if r.Action != nil {
+		if s := strings.TrimSpace(r.Action.DefaultTitle); s != "" {
+			return s
+		}
+		if s := strings.TrimSpace(r.Action.Name); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func resolveSlotSublabel(r app.RenderedSlot) string {
+	if raw, ok := r.Visual.Feedback["sublabel"]; ok && raw != nil {
+		if s := strings.TrimSpace(fmt.Sprint(raw)); s != "" {
+			return s
+		}
+	}
+	return strings.TrimSpace(r.Visual.Subtitle)
 }
 
 // NormalizeDataImageURI converts plain UTF-8 or URL-encoded SVG data URIs (which may contain

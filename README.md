@@ -15,20 +15,20 @@
 Grab the file for your device from the **[Latest GitHub Release](https://github.com/mrpoundsign/PoundControl/releases/latest)**:
 
 ### Windows (64-bit)
-- **Guided Installer (Recommended)**: Download `PoundControl_v*_windows_amd64_setup.exe` and double-click to install with Start Menu / Desktop shortcuts, clean uninstall support, and automatic SHA-256 self-updates.
-- **Portable Binary**: Download `PoundControl_v*_windows_amd64.exe` and run it directly from any folder — no installation needed.
+- **Guided Installer (Recommended)**: Download `PoundControl-v*-windows-amd64-setup.exe` and double-click to install with Start Menu / Desktop shortcuts, clean uninstall support, and automatic SHA-256 self-updates.
+- **Portable Binary**: Download `PoundControl-v*-windows-amd64.exe` and run it directly from any folder — no installation needed.
 - *First-launch note*: Because release binaries are unsigned with a commercial EV certificate, Windows SmartScreen may show *"Windows protected your PC"*. Click **More info → Run anyway** (you can also verify the file against `checksums.txt` or `gh attestation verify` below).
 
 ### macOS
-1. Download `PoundControl_v*_darwin_all.zip` from the [Latest Release](https://github.com/mrpoundsign/PoundControl/releases/latest) and unzip it.
+1. Download `PoundControl-v*-darwin-arm64.zip` from the [Latest Release](https://github.com/mrpoundsign/PoundControl/releases/latest) and unzip it.
 2. Drag `PoundControl.app` into your **Applications** folder.
 3. On first launch, if macOS Gatekeeper warns about an unidentified developer, **Control-click (right-click) `PoundControl.app` → Open → Open**, or open **System Settings → Privacy & Security → Open Anyway**.
 
 ### Linux (`x86_64`)
-1. Download `PoundControl_v*_linux_amd64.tar.gz` from the [Latest Release](https://github.com/mrpoundsign/PoundControl/releases/latest).
+1. Download `PoundControl-v*-linux-amd64.tar.gz` from the [Latest Release](https://github.com/mrpoundsign/PoundControl/releases/latest).
 2. Extract and run:
    ```bash
-   mkdir -p poundcontrol && tar -xzf PoundControl_v*_linux_amd64.tar.gz -C poundcontrol
+   mkdir -p poundcontrol && tar -xzf PoundControl-v*-linux-amd64.tar.gz -C poundcontrol
    cd poundcontrol
    ./poundcontrol
    ```
@@ -41,16 +41,16 @@ Use any phone, iPad, or secondary device on the same Wi-Fi network without insta
 3. Scan the QR code with your phone/tablet camera (or open the shown URL and enter the PIN), then approve the pairing prompt in Desktop Studio.
 
 ### Android Companion App
-1. On your Android phone or tablet (Android 8.0+), download `PoundControl_v*_android.apk` from the [Latest Release](https://github.com/mrpoundsign/PoundControl/releases/latest).
+1. On your Android phone or tablet (Android 8.0+), download `PoundControl-v*-android.apk` from the [Latest Release](https://github.com/mrpoundsign/PoundControl/releases/latest).
 2. Tap the downloaded APK and allow **Install unknown apps** when prompted by Android.
 3. Launch **PoundControl**, open **Settings → Web Deck → Pair New Device** on your desktop, and scan the QR code to connect.
 
 ### Wear OS Smartwatch Deck
 The Wear OS watch app communicates with your desktop through the **PoundControl Android companion app** over Bluetooth/Wearable Data Layer:
-1. Install and pair the **Android companion app** (`PoundControl_v*_android.apk`) on the phone paired to your watch first.
-2. Enable **Developer options → ADB debugging** (or **Wireless debugging**) on your Wear OS watch and install `PoundControl_v*_wear.apk`:
+1. Install and pair the **Android companion app** (`PoundControl-v*-android.apk`) on the phone paired to your watch first.
+2. Enable **Developer options → ADB debugging** (or **Wireless debugging**) on your Wear OS watch and install `PoundControl-v*-wear.apk`:
    ```bash
-   adb install PoundControl_v*_wear.apk
+   adb install PoundControl-v*-wear.apk
    ```
    *(Or sideload using a Wear OS sideloader app such as Wear Installer.)*
 3. Launch **PoundControl** on your watch to tap deck buttons, navigate pages/folders, adjust rotary dials, or add the **PoundControl** watch face complication.
@@ -93,7 +93,6 @@ gh attestation verify <downloaded-file> --repo mrpoundsign/PoundControl
 .\build.ps1 -Target android   # Test & build both Android and Wear OS APKs -> build\bin\
 .\build.ps1 -Target test   # Run all unit & headless UI tests
 .\build.ps1 -Target lint   # Run go fix -diff and golangci-lint-v2
-.\build.ps1 -Target check  # Validate GoReleaser configuration
 .\build.ps1 -Target clean  # Clean build artifacts
 ```
 

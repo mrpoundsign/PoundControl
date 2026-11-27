@@ -58,6 +58,7 @@ type Options struct {
 	HTTPClient        *http.Client
 	CallTimeout       time.Duration
 	OnStatusChange    func()
+	OnActionsChanged  func()
 }
 
 type timerHandle struct {
@@ -83,6 +84,7 @@ type wasmInstance struct {
 	timerFn          api.Function
 	globalSettingsFn api.Function
 	configActionFn   api.Function
+	startFn          api.Function
 
 	lifeCtx    context.Context
 	lifeCancel context.CancelFunc
@@ -185,6 +187,14 @@ func (p *Provider) Actions() []plugin.ActionDescriptor {
 func (p *Provider) BindHost(host plugin.HostAPI) {
 	p.mu.Lock()
 	p.host = host
+	p.mu.Unlock()
+}
+
+// SetOnActionsChanged registers a callback invoked asynchronously whenever a
+// running plugin updates its action catalog at runtime via pc_register_actions.
+func (p *Provider) SetOnActionsChanged(fn func()) {
+	p.mu.Lock()
+	p.opts.OnActionsChanged = fn
 	p.mu.Unlock()
 }
 
@@ -296,10 +306,7 @@ func (p *Provider) reloadLocked() error {
 	wasmPaths := discoverWasmFiles(p.opts.DefaultPluginsDir, cfg.ExtraPaths)
 
 	newInstances := make(map[string]*wasmInstance, len(wasmPaths))
-	newActionToPlugin := make(map[string]string)
-	var newManifests []plugin.Manifest
-	var newActions []plugin.ActionDescriptor
-
+	var startList []*wasmInstance
 	for _, path := range wasmPaths {
 		inst := p.loadInstance(path)
 		key := inst.manifest.UUID
@@ -311,28 +318,102 @@ func (p *Provider) reloadLocked() error {
 			continue
 		}
 		newInstances[key] = inst
-		if inst.state == StatusRunning {
-			newManifests = append(newManifests, inst.manifest)
-			for _, act := range inst.manifest.Actions {
-				if _, exists := newActionToPlugin[act.UUID]; exists {
-					continue
-				}
-				newActionToPlugin[act.UUID] = key
-				newActions = append(newActions, act)
-			}
+		if inst.state == StatusRunning && inst.startFn != nil {
+			startList = append(startList, inst)
 		}
 	}
 
 	p.mu.Lock()
 	p.instances = newInstances
-	p.actionToPlugin = newActionToPlugin
-	p.manifests = newManifests
-	p.actions = newActions
+	p.rebuildCatalogLocked()
 	cb := p.opts.OnStatusChange
 	p.mu.Unlock()
 
 	if cb != nil {
 		cb()
+	}
+	for _, inst := range startList {
+		go func(in *wasmInstance) {
+			if _, err := in.callNoArgsTimeout(in.startFn, p.callTimeout); err != nil {
+				p.mu.RLock()
+				host := p.host
+				pid := in.manifest.UUID
+				p.mu.RUnlock()
+				if host != nil {
+					host.Log(pid, "pc_on_start error: "+err.Error())
+				}
+			}
+		}(inst)
+	}
+	return nil
+}
+
+func (p *Provider) rebuildCatalogLocked() {
+	keys := make([]string, 0, len(p.instances))
+	for k := range p.instances {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+
+	newActionToPlugin := make(map[string]string)
+	var newManifests []plugin.Manifest
+	var newActions []plugin.ActionDescriptor
+	for _, key := range keys {
+		inst := p.instances[key]
+		if inst == nil {
+			continue
+		}
+		if curState, _ := inst.snapshotState(); curState != StatusRunning {
+			continue
+		}
+		newManifests = append(newManifests, inst.manifest)
+		for _, act := range inst.manifest.Actions {
+			if _, exists := newActionToPlugin[act.UUID]; exists {
+				continue
+			}
+			newActionToPlugin[act.UUID] = key
+			newActions = append(newActions, act)
+		}
+	}
+	p.actionToPlugin = newActionToPlugin
+	p.manifests = newManifests
+	p.actions = newActions
+}
+
+func (p *Provider) updateInstanceActions(inst *wasmInstance, guestActions []GuestAction) error {
+	if inst == nil {
+		return errors.New("nil wasm instance")
+	}
+	pluginDir := filepath.Dir(inst.path)
+	pluginUUID := inst.manifest.UUID
+	defaultCat := inst.manifest.Name
+
+	converted := make([]plugin.ActionDescriptor, 0, len(guestActions))
+	seen := make(map[string]struct{}, len(guestActions))
+	for _, ga := range guestActions {
+		act := ga.toPluginAction(pluginUUID, defaultCat, pluginDir)
+		if act.UUID == "" {
+			continue
+		}
+		if _, dup := seen[act.UUID]; dup {
+			continue
+		}
+		seen[act.UUID] = struct{}{}
+		converted = append(converted, act)
+	}
+
+	p.mu.Lock()
+	if cur, ok := p.instances[pluginUUID]; !ok || cur != inst {
+		p.mu.Unlock()
+		return errors.New("stale wasm instance")
+	}
+	inst.manifest.Actions = converted
+	p.rebuildCatalogLocked()
+	cb := p.opts.OnActionsChanged
+	p.mu.Unlock()
+
+	if cb != nil {
+		go cb()
 	}
 	return nil
 }
@@ -529,6 +610,7 @@ func (p *Provider) loadInstance(path string) *wasmInstance {
 	inst.timerFn = mod.ExportedFunction("pc_on_timer")
 	inst.globalSettingsFn = mod.ExportedFunction("pc_on_global_settings")
 	inst.configActionFn = mod.ExportedFunction("pc_on_config_action")
+	inst.startFn = mod.ExportedFunction("pc_on_start")
 
 	if manifestFn == nil || inst.eventFn == nil {
 		inst.errMsg = "missing required PoundControl exports (pc_manifest, pc_handle_event)"
@@ -751,6 +833,23 @@ func (p *Provider) instantiateHostModule(ctx context.Context, rt wazero.Runtime,
 		}).
 		Export("pc_deck_nav")
 
+	builder.NewFunctionBuilder().
+		WithFunc(func(_ context.Context, m api.Module, actionsPtr, actionsLen uint32) int32 {
+			raw, ok := readGuestBytes(m, actionsPtr, actionsLen)
+			if !ok {
+				return -1
+			}
+			var guestActions []GuestAction
+			if err := json.Unmarshal(raw, &guestActions); err != nil {
+				return -2
+			}
+			if err := p.updateInstanceActions(inst, guestActions); err != nil {
+				return -3
+			}
+			return 0
+		}).
+		Export("pc_register_actions")
+
 	_, err := builder.Instantiate(ctx)
 	return err
 }
@@ -900,6 +999,31 @@ func (inst *wasmInstance) callWithBytesTimeoutCtx(callerCtx context.Context, fn 
 	}
 
 	res, err := fn.Call(ctx, uint64(ptr), uint64(len(payload)))
+	if err != nil {
+		inst.failLocked(err.Error())
+		return -1, err
+	}
+	if len(res) > 0 {
+		return int32(res[0]), nil
+	}
+	return 0, nil
+}
+
+func (inst *wasmInstance) callNoArgsTimeout(fn api.Function, timeout time.Duration) (int32, error) {
+	if timeout <= 0 {
+		timeout = defaultCallTimeout
+	}
+	inst.callMu.Lock()
+	defer inst.callMu.Unlock()
+
+	if curState, _ := inst.snapshotState(); curState != StatusRunning || inst.mod == nil || fn == nil {
+		return -1, errors.New("wasm module cannot accept calls")
+	}
+
+	ctx, cancel := context.WithTimeout(inst.lifeCtx, timeout)
+	defer cancel()
+
+	res, err := fn.Call(ctx)
 	if err != nil {
 		inst.failLocked(err.Error())
 		return -1, err

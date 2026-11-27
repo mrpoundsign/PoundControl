@@ -10,7 +10,7 @@ require (
 	github.com/jchv/go-webview2 v0.0.0-20260205173254-56598839c808
 	github.com/jfreymuth/oggvorbis v1.0.6
 	github.com/mewkiz/flac v1.0.14
-	github.com/mrpoundsign/appinstaller v0.0.1
+	github.com/mrpoundsign/appinstaller v0.1.0
 	github.com/ncruces/zenity v0.10.15
 	github.com/rymdport/portal v0.4.2
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e

@@ -718,6 +718,20 @@ body[data-view="deck"] .app-shell {
   max-height: 100%;
 }
 
+.key-tile[data-full-bleed-art="true"]:not([data-flash]) {
+  border-color: rgb(51 65 85 / 0.55);
+}
+
+.key-tile[data-full-bleed-art="true"] {
+  padding: 0;
+  background: var(--bg-deep);
+  box-shadow: none;
+}
+
+.key-tile[data-full-bleed-art="true"] .key-art {
+  border-radius: inherit;
+}
+
 .key-title {
   font-size: clamp(0.5rem, 11cqi, 1.25rem);
   font-weight: 700;

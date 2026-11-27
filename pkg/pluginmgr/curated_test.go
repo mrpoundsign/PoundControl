@@ -110,8 +110,21 @@ func TestCuratedClientFetchCacheAndFallback(t *testing.T) {
 	if !fbUsed {
 		t.Fatal("expected fromFallback=true when remote fails")
 	}
-	if len(fbEntries) == 0 || fbEntries[0].ID != "com.github.mrpoundsign.poundcontrol.twitch" {
-		t.Fatalf("expected embedded Twitch fallback entry, got %+v", fbEntries)
+	if len(fbEntries) < 2 {
+		t.Fatalf("expected at least 2 embedded fallback entries, got %+v", fbEntries)
+	}
+	foundByID := make(map[string]CuratedEntry, len(fbEntries))
+	for _, e := range fbEntries {
+		foundByID[e.ID] = e
+	}
+	for _, wantID := range []string{
+		"com.github.mrpoundsign.towncrier.wasm",
+		"com.github.mrpoundsign.poundcontrol.twitch",
+	} {
+		e, ok := foundByID[wantID]
+		if !ok || !e.Featured {
+			t.Fatalf("expected featured fallback entry %q, got %+v", wantID, fbEntries)
+		}
 	}
 }
 

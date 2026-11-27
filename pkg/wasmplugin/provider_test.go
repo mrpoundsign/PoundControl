@@ -1110,3 +1110,138 @@ func TestSanitizeWasmImageURI(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderDynamicActionsOnStartAndRegister(t *testing.T) {
+	tmp := t.TempDir()
+	modDir := filepath.Join(tmp, "dynplugin")
+	defaultDir := filepath.Join(tmp, "wasm")
+	if err := os.MkdirAll(modDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(modDir): %v", err)
+	}
+	if err := os.MkdirAll(defaultDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(defaultDir): %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(modDir, "go.mod"), []byte("module example.com/dynplugin\n\ngo 1.24\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(go.mod): %v", err)
+	}
+	guestSrc := `package main
+
+import (
+	"sync"
+	"unsafe"
+)
+
+//go:wasmimport poundcontrol pc_register_actions
+func hostRegisterActions(ptr, length uint32) int32
+
+var (
+	allocMu sync.Mutex
+	allocs  = map[uint32][]byte{}
+)
+
+//go:wasmexport pc_alloc
+func pc_alloc(size uint32) uint32 {
+	if size == 0 {
+		size = 1
+	}
+	buf := make([]byte, size)
+	ptr := uint32(uintptr(unsafe.Pointer(&buf[0])))
+	allocMu.Lock()
+	allocs[ptr] = buf
+	allocMu.Unlock()
+	return ptr
+}
+
+//go:wasmexport pc_free
+func pc_free(ptr uint32) {
+	allocMu.Lock()
+	delete(allocs, ptr)
+	allocMu.Unlock()
+}
+
+func allocAndWrite(data []byte) (uint32, uint32) {
+	ptr := pc_alloc(uint32(len(data)))
+	allocMu.Lock()
+	buf := allocs[ptr]
+	allocMu.Unlock()
+	copy(buf, data)
+	return ptr, uint32(len(data))
+}
+
+//go:wasmexport pc_manifest
+func pc_manifest() uint64 {
+	raw := []byte(` + "`" + `{"uuid":"com.test.dyn","name":"DynTest","version":"1.0.0","actions":[]}` + "`" + `)
+	ptr, n := allocAndWrite(raw)
+	return (uint64(ptr) << 32) | uint64(n)
+}
+
+//go:wasmexport pc_on_start
+func pc_on_start() int32 {
+	raw := []byte(` + "`" + `[
+		{"uuid":"com.test.dyn.one","name":"Dynamic One","hideTitle":true,"controllers":["Keypad","Encoder"]},
+		{"uuid":"com.test.dyn.one","name":"Duplicate Ignored"},
+		{"uuid":"","name":"Empty Ignored"}
+	]` + "`" + `)
+	ptr, n := allocAndWrite(raw)
+	defer pc_free(ptr)
+	return hostRegisterActions(ptr, n)
+}
+
+//go:wasmexport pc_handle_event
+func pc_handle_event(ptr, length uint32) int32 {
+	return 0
+}
+
+func main() {}
+`
+	if err := os.WriteFile(filepath.Join(modDir, "main.go"), []byte(guestSrc), 0o600); err != nil {
+		t.Fatalf("WriteFile(main.go): %v", err)
+	}
+	compileWasmFixture(t, modDir, filepath.Join(defaultDir, "dyn.wasm"))
+
+	changedCh := make(chan struct{}, 4)
+	host := newFakeHostAPI()
+	prov := NewProvider(Options{
+		DefaultPluginsDir: defaultDir,
+	})
+	prov.SetOnActionsChanged(func() {
+		select {
+		case changedCh <- struct{}{}:
+		default:
+		}
+	})
+	prov.BindHost(host)
+	t.Cleanup(func() { _ = prov.Close() })
+
+	if err := prov.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	select {
+	case <-changedCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for OnActionsChanged from pc_on_start -> pc_register_actions")
+	}
+
+	acts := prov.Actions()
+	if len(acts) != 1 || acts[0].UUID != "com.test.dyn.one" || acts[0].Name != "Dynamic One" || !acts[0].HideTitle {
+		t.Fatalf("unexpected dynamically registered actions: %+v", acts)
+	}
+	if len(acts[0].Controllers) != 2 {
+		t.Fatalf("expected Keypad+Encoder controllers preserved, got %+v", acts[0].Controllers)
+	}
+
+	manifests := prov.Manifests()
+	if len(manifests) != 1 || len(manifests[0].Actions) != 1 || manifests[0].Actions[0].UUID != "com.test.dyn.one" {
+		t.Fatalf("unexpected manifest after dynamic registration: %+v", manifests)
+	}
+
+	if err := prov.Dispatch(context.Background(), plugin.ActionEvent{
+		Type:       plugin.EventKeyDown,
+		Context:    "slot-dyn",
+		ActionUUID: "com.test.dyn.one",
+	}); err != nil {
+		t.Fatalf("Dispatch on dynamically registered action failed: %v", err)
+	}
+}

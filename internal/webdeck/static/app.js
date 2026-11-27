@@ -651,12 +651,13 @@
     const state = slot ? Number(slot.state) || 0 : 0;
     const color = slot && HEX_RE.test(slot.color || '') ? slot.color : '';
     const bgColor = slot && HEX_RE.test(slot.bgColor || '') ? slot.bgColor : '';
-    const active = Boolean((assigned || autoBack) && state > 0);
-    const effectiveAccent = color || '#38BDF8';
-    const ambientGlow = Boolean((assigned || autoBack) && isChromaticHex(effectiveAccent));
     const fullArt = Boolean((imageUrl || bgImageUrl) && title.trim() === '' && subtitle.trim() === '');
+    const fullBleedArt = Boolean(slot && slot.fullBleedArt && fullArt);
+    const active = Boolean((assigned || autoBack) && state > 0 && !fullBleedArt);
+    const effectiveAccent = color || '#38BDF8';
+    const ambientGlow = Boolean((assigned || autoBack) && !fullBleedArt && isChromaticHex(effectiveAccent));
 
-    const sig = JSON.stringify([assigned, autoBack, title, subtitle, imageUrl, bgImageUrl, flash, state, color, bgColor]);
+    const sig = JSON.stringify([assigned, autoBack, title, subtitle, imageUrl, bgImageUrl, flash, state, color, bgColor, fullBleedArt]);
     if (btn._slotSig === sig) {
       return;
     }
@@ -664,6 +665,11 @@
 
     btn.dataset.assigned = String(assigned);
     btn.dataset.autoback = String(autoBack);
+    if (fullBleedArt) {
+      btn.dataset.fullBleedArt = 'true';
+    } else {
+      delete btn.dataset.fullBleedArt;
+    }
     if (ambientGlow) {
       btn.dataset.glow = 'true';
     } else {

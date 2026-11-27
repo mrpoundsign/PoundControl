@@ -79,8 +79,8 @@ github.com/mewkiz/pkg v0.0.0-20250417130911-3f050ff8c56d h1:IL2tii4jXLdhCeQN69HN
 github.com/mewkiz/pkg v0.0.0-20250417130911-3f050ff8c56d/go.mod h1:SIpumAnUWSy0q9RzKD3pyH3g1t5vdawUAPcW5tQrUtI=
 github.com/mewpkg/term v0.0.0-20241026122259-37a80af23985 h1:h8O1byDZ1uk6RUXMhj1QJU3VXFKXHDZxr4TXRPGeBa8=
 github.com/mewpkg/term v0.0.0-20241026122259-37a80af23985/go.mod h1:uiPmbdUbdt1NkGApKl7htQjZ8S7XaGUAVulJUJ9v6q4=
-github.com/mrpoundsign/appinstaller v0.0.1 h1:p9gg/3lnKHkrTf3M9/GPNa06/9EF0VamUB+WzXT/5WM=
-github.com/mrpoundsign/appinstaller v0.0.1/go.mod h1:1ejz+IPFwPW3whyRe0bw1wvXMNy+z865p+kZXh8vUl4=
+github.com/mrpoundsign/appinstaller v0.1.0 h1:KazYabADFrKH+gXzZqf2kPGBH+l0AiAeceeCJa1akoM=
+github.com/mrpoundsign/appinstaller v0.1.0/go.mod h1:1ejz+IPFwPW3whyRe0bw1wvXMNy+z865p+kZXh8vUl4=
 github.com/ncruces/zenity v0.10.15 h1:UaHekkxwt7QjoZmMWtzhqSEtQT97/Cux6FDBWwfyuqk=
 github.com/ncruces/zenity v0.10.15/go.mod h1:45d81tt+vF/UjBjlWE/vvE0oD0hWuHUQld4vPbA4VxE=
 github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 h1:zYyBkD/k9seD2A7fsi6Oo2LfFZAehjjQMERAvZLEDnQ=
