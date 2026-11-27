@@ -43,6 +43,7 @@
                 <li><a href="#touch-decks">LAN, Android &amp; Wear OS Decks</a></li>
                 <li><a href="#built-in">Built-In Plugins</a></li>
                 <li><a href="#plugins">.sdPlugin &amp; Wasm Extensions</a></li>
+                <li><a href="#configuration">Configuring OBS, Plugins &amp; TownCrier</a></li>
                 <li><a href="#security">Security &amp; Local-First Design</a></li>
               </ul>
             </li>
@@ -125,15 +126,15 @@
           <div class="card-grid">
             <article class="card">
               <h3>Zero-Install LAN Web Deck</h3>
-              <p>Scan a temporary QR code or enter a 6-digit pairing PIN to connect any browser. Configure independent per-device viewports or Follow-Studio mode.</p>
+              <p>Scan a temporary QR code or enter a 6-digit pairing PIN to connect any browser. Configure independent per-device viewports that persist seamlessly across reconnects, or use Follow-Studio mode.</p>
             </article>
             <article class="card">
               <h3>Android Companion App</h3>
-              <p>Dedicated Android 8.0+ app with QR pairing, fullscreen deck grid, tactile feedback, and Wear OS Wearable Data Layer bridging.</p>
+              <p>Dedicated Android 8.0+ app with QR pairing, fullscreen deck grid, tactile feedback, persistent page viewports, and Wear OS Wearable Data Layer bridging.</p>
             </article>
             <article class="card">
               <h3>Wear OS Smartwatch Deck</h3>
-              <p>Tap deck keys, navigate pages and folders, adjust rotary dials, or launch directly from a Wear OS watch face complication.</p>
+              <p>Round Wear OS smartwatch layout with tap keys, page/folder navigation, rotary crown &amp; bezel dial adjustment, and a watch face complication launcher.</p>
             </article>
           </div>
           <div class="callout">
@@ -146,7 +147,7 @@
           <p>PoundControl ships with four native plugins ready out of the box:</p>
           <ul>
             <li><strong>Core:</strong> Page navigation, folder entry/exit, profile switching, and Visual Multi-Action sequences.</li>
-            <li><strong>OBS Studio (WebSocket v5):</strong> Switch scenes, toggle sources and filters, control audio mute/volume, and start/stop streaming or recording.</li>
+            <li><strong>OBS Studio (WebSocket v5):</strong> Switch scenes, toggle sources and filters, adjust 0&ndash;100% cubic perceptual audio faders (`0.5%` steps, dial push mute toggle or reset-to-100%), and start/stop streaming or recording.</li>
             <li><strong>Soundboard:</strong> Polyphonic playback for WAV, MP3, OGG Vorbis, and FLAC clips with per-slot trigger modes, master volume, and output device selection.</li>
             <li><strong>Apps &amp; System Control:</strong> Launch applications or scripts, open URLs, send HTTP or WebSocket webhooks, fire keyboard macros/hotkeys, and send media keys.</li>
           </ul>
@@ -159,8 +160,25 @@
           </p>
           <ul>
             <li><strong>Elgato Stream Deck (<code>.sdPlugin</code>) Host:</strong> Loads standard SDK v2/v3 bundles with an optional 1-click Node.js setup, WebView2/browser Property Inspector bridge, and <strong>OpenAction Marketplace</strong> browsing.</li>
-            <li><strong>Sandboxed WebAssembly (<code>wazero</code>) Runtime:</strong> Executes single-file <code>.wasm</code> WASI Preview 1 reactor plugins compiled from Go, TinyGo, Rust, Zig, or C/C++, complete with a <strong>Curated Catalog</strong> and SHA-256 verified updates. See the full <a href="wasm-abi.html">Wasm Plugin ABI Reference</a>.</li>
+            <li><strong>Sandboxed WebAssembly (<code>wazero</code>) Runtime:</strong> Executes single-file <code>.wasm</code> WASI Preview 1 reactor plugins compiled from Go, TinyGo, Rust, Zig, or C/C++ with full-bleed borderless SVG tiles (`hideTitle`), startup action discovery (`pc_on_start` + `pc_register_actions`), and a <strong>Curated Catalog</strong> featuring <strong>Twitch</strong> and <strong>TownCrier &amp; Plugins</strong> with SHA-256 verified updates. See the full <a href="wasm-abi.html">Wasm Plugin ABI Reference</a>.</li>
           </ul>
+        </section>
+
+        <section id="configuration" class="doc-section" tabindex="-1">
+          <h2>Configuring OBS Studio, Curated Plugins &amp; TownCrier</h2>
+          <p>Configure PoundControl's built-in integrations directly from the Settings sidebar:</p>
+          <h3>1. Connecting OBS Studio (WebSocket v5)</h3>
+          <ol>
+            <li>In OBS Studio, open <strong>Tools &rarr; WebSocket Server Settings</strong>, enable the server (default port <code>4455</code>), and copy or set your password.</li>
+            <li>In PoundControl, open <strong>Settings &rarr; OBS Studio</strong>, verify Host (<code>127.0.0.1</code>) and Port (<code>4455</code>), enter your password (stored encrypted in your OS keyring), and check <strong>Auto-Connect</strong>.</li>
+            <li>Drag <strong>Audio Volume</strong> onto any keypad slot or rotary dial to use the 0&ndash;100% perceptual fader scale (matching OBS Studio's fader slider), with configurable step % and dial push behavior (<em>Toggle Mute</em>, <em>Reset to 100%</em>, or <em>Step Delta</em>).</li>
+          </ol>
+          <h3>2. Installing Curated Wasm Plugins &amp; Pairing TownCrier</h3>
+          <ol>
+            <li>Open <strong>Settings &rarr; Plugins &rarr; Curated Catalog</strong> and click <strong>Install</strong> next to <strong>TownCrier &amp; Plugins</strong> (and/or <strong>Twitch</strong>). PoundControl downloads the verified <code>.wasm</code> plugin from GitHub Releases and checks its SHA-256 checksum.</li>
+            <li>Open <strong>Settings &rarr; TownCrier</strong>, keep Host (<code>127.0.0.1</code>) and Port (<code>8765</code>) matched to your TownCrier Control API settings, enter your <strong>Auth Token</strong> if one is set in TownCrier, and click <strong>Save</strong>.</li>
+            <li>Once TownCrier is running (with <strong>Settings &rarr; OBS &amp; Overlays &rarr; Enable External Control API</strong> checked), the plugin dynamically registers all active TownCrier Bot Automation actions and native plugins (such as <strong>CrowdDJ</strong>) directly into the PoundControl Action Catalog under the <strong>TownCrier</strong> category.</li>
+          </ol>
         </section>
 
         <section id="security" class="doc-section" tabindex="-1">

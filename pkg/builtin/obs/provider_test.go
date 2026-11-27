@@ -346,3 +346,85 @@ func TestAudioVolumeCubicFaderHalfPctAndNullDbHandling(t *testing.T) {
 		t.Fatalf("expected 95%% after legacy stepDb=-2 (-5%%), got %q", got)
 	}
 }
+
+func TestWarmSlotStateDoesNotOverwriteNewerVolumeMutation(t *testing.T) {
+	srv := newMockOBSServer("")
+	defer srv.Close()
+
+	eng, prov, _ := setupOBSTestEngine(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := prov.SaveConnectionConfig(ConnectionConfig{Host: srv.Host, Port: srv.Port}, "", false); err != nil {
+		t.Fatalf("SaveConnectionConfig error = %v", err)
+	}
+	if err := prov.Connect(ctx); err != nil {
+		t.Fatalf("Connect error = %v", err)
+	}
+
+	if _, err := eng.AssignDialAction(0, ActionAudioVolume); err != nil {
+		t.Fatalf("AssignDialAction error = %v", err)
+	}
+	if err := eng.UpdateDialSlot(0, "Music", "", map[string]any{
+		"inputName": "Desktop Audio",
+		"stepPct":   5.0,
+	}); err != nil {
+		t.Fatalf("UpdateDialSlot error = %v", err)
+	}
+
+	// Set dial input and keypad button to 100%.
+	c00 := deck.Coordinates{Row: 0, Col: 0}
+	if _, err := eng.AssignKeypadAction(c00, ActionAudioVolume); err != nil {
+		t.Fatalf("AssignKeypadAction error = %v", err)
+	}
+	if err := eng.UpdateKeypadSlot(c00, "Set 100%", "", map[string]any{
+		"inputName": "Desktop Audio",
+		"mode":      "set",
+		"targetPct": 100.0,
+	}); err != nil {
+		t.Fatalf("UpdateKeypadSlot error = %v", err)
+	}
+	if err := eng.PressKey(ctx, c00); err != nil {
+		t.Fatalf("PressKey(100%%) error = %v", err)
+	}
+
+	// Race background warmSlotState reads against rapid 100% <-> 95% mutations.
+	for range 10 {
+		go prov.warmSlotState(ActionAudioVolume, map[string]any{"inputName": "Desktop Audio"})
+		if err := eng.UpdateDialSlot(0, "Music", "", map[string]any{
+			"inputName": "Desktop Audio",
+			"stepPct":   -5.0,
+		}); err != nil {
+			t.Fatalf("UpdateDialSlot error = %v", err)
+		}
+		if err := prov.Dispatch(ctx, plugin.ActionEvent{
+			Type:       plugin.EventKeyDown,
+			Context:    "set-100-ctx",
+			ActionUUID: ActionAudioVolume,
+			Settings: map[string]any{
+				"inputName": "Desktop Audio",
+				"mode":      "set",
+				"targetPct": 100.0,
+			},
+		}); err != nil {
+			t.Fatalf("Dispatch(100%%) error = %v", err)
+		}
+		if err := prov.Dispatch(ctx, plugin.ActionEvent{
+			Type:       plugin.EventKeyDown,
+			Context:    "step-ctx",
+			ActionUUID: ActionAudioVolume,
+			Settings: map[string]any{
+				"inputName": "Desktop Audio",
+				"mode":      "step",
+				"stepPct":   -5.0,
+			},
+		}); err != nil {
+			t.Fatalf("Dispatch(-5%%) error = %v", err)
+		}
+	}
+
+	time.Sleep(80 * time.Millisecond)
+	if got := eng.Snapshot().DialSlots[0].Visual.Subtitle; got != "95%" {
+		t.Fatalf("expected 95%% to remain intact after background warmSlotState, got %q", got)
+	}
+}
