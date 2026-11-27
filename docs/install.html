@@ -100,27 +100,27 @@
               <tbody>
                 <tr>
                   <th scope="row">Windows (64-bit)</th>
-                  <td><code>PoundControl_v*_windows_amd64_setup.exe</code></td>
+                  <td><code>PoundControl-v*-windows-amd64-setup.exe</code></td>
                   <td>Guided installer with shortcuts, clean uninstall, and SHA-256 self-updates (portable <code>.exe</code> also available).</td>
                 </tr>
                 <tr>
-                  <th scope="row">macOS (Universal)</th>
-                  <td><code>PoundControl_v*_darwin_all.zip</code></td>
-                  <td>Extracts <code>PoundControl.app</code> for Apple Silicon and Intel Macs.</td>
+                  <th scope="row">macOS (Apple Silicon)</th>
+                  <td><code>PoundControl-v*-darwin-arm64.zip</code></td>
+                  <td>Extracts <code>PoundControl.app</code> for Apple Silicon Macs.</td>
                 </tr>
                 <tr>
                   <th scope="row">Linux (x86_64)</th>
-                  <td><code>PoundControl_v*_linux_amd64.tar.gz</code></td>
+                  <td><code>PoundControl-v*-linux-amd64.tar.gz</code></td>
                   <td>Standalone <code>poundcontrol</code> binary archive for desktop Linux.</td>
                 </tr>
                 <tr>
                   <th scope="row">Android (8.0+)</th>
-                  <td><code>PoundControl_v*_android.apk</code></td>
+                  <td><code>PoundControl-v*-android.apk</code></td>
                   <td>Phone &amp; tablet companion app; also acts as bridge for Wear OS watches.</td>
                 </tr>
                 <tr>
                   <th scope="row">Wear OS</th>
-                  <td><code>PoundControl_v*_wear.apk</code></td>
+                  <td><code>PoundControl-v*-wear.apk</code></td>
                   <td>Smartwatch deck &amp; watch face complication; pair via the Android companion app.</td>
                 </tr>
               </tbody>
@@ -131,8 +131,8 @@
         <section id="windows" class="doc-section" tabindex="-1">
           <h2>Windows (64-bit)</h2>
           <ul>
-            <li><strong>Guided Installer (Recommended):</strong> Download <code>PoundControl_v*_windows_amd64_setup.exe</code> and double-click to install with Start Menu / Desktop shortcuts, clean uninstall support, and automatic SHA-256 self-updates.</li>
-            <li><strong>Portable Binary:</strong> Download <code>PoundControl_v*_windows_amd64.exe</code> and run it directly from any folder — no installation needed.</li>
+            <li><strong>Guided Installer (Recommended):</strong> Download <code>PoundControl-v*-windows-amd64-setup.exe</code> and double-click to install with Start Menu / Desktop shortcuts, clean uninstall support, and automatic SHA-256 self-updates.</li>
+            <li><strong>Portable Binary:</strong> Download <code>PoundControl-v*-windows-amd64.exe</code> and run it directly from any folder — no installation needed.</li>
           </ul>
           <div class="callout">
             <strong>SmartScreen first-launch note:</strong> Because release binaries are not signed with a commercial EV certificate, Windows SmartScreen may show <em>"Windows protected your PC"</em>. Click <strong>More info &rarr; Run anyway</strong>, or verify the binary using <a href="#verify">checksums / SLSA provenance</a> below.
@@ -142,7 +142,7 @@
         <section id="macos" class="doc-section" tabindex="-1">
           <h2>macOS</h2>
           <ol>
-            <li>Download <code>PoundControl_v*_darwin_all.zip</code> from the <a href="https://github.com/mrpoundsign/PoundControl/releases/latest">Latest Release</a> and unzip it.</li>
+            <li>Download <code>PoundControl-v*-darwin-arm64.zip</code> from the <a href="https://github.com/mrpoundsign/PoundControl/releases/latest">Latest Release</a> and unzip it.</li>
             <li>Drag <code>PoundControl.app</code> into your <strong>Applications</strong> folder.</li>
             <li>On first launch, if macOS Gatekeeper warns about an unidentified developer, <strong>Control-click (right-click) <code>PoundControl.app</code> &rarr; Open &rarr; Open</strong>, or open <strong>System Settings &rarr; Privacy &amp; Security &rarr; Open Anyway</strong>.</li>
           </ol>
@@ -151,14 +151,14 @@
         <section id="linux" class="doc-section" tabindex="-1">
           <h2>Linux (<code>x86_64</code>)</h2>
           <ol>
-            <li>Download <code>PoundControl_v*_linux_amd64.tar.gz</code> from the <a href="https://github.com/mrpoundsign/PoundControl/releases/latest">Latest Release</a>.</li>
+            <li>Download <code>PoundControl-v*-linux-amd64.tar.gz</code> from the <a href="https://github.com/mrpoundsign/PoundControl/releases/latest">Latest Release</a>.</li>
             <li>Extract and run (optionally move <code>poundcontrol</code> onto your <code>PATH</code> such as <code>~/.local/bin/poundcontrol</code>):</li>
           </ol>
 
           <figure class="code-figure">
             <figcaption>Extract and launch PoundControl on Linux</figcaption>
             <div class="copyable">
-              <pre><code id="code-linux-install">mkdir -p poundcontrol &amp;&amp; tar -xzf PoundControl_v*_linux_amd64.tar.gz -C poundcontrol
+              <pre><code id="code-linux-install">mkdir -p poundcontrol &amp;&amp; tar -xzf PoundControl-v*-linux-amd64.tar.gz -C poundcontrol
 cd poundcontrol
 ./poundcontrol</code></pre>
               <button type="button" class="copy-button" command="--copy" commandfor="code-linux-install" aria-label="Copy code snippet">
@@ -188,7 +188,7 @@ cd poundcontrol
         <section id="android" class="doc-section" tabindex="-1">
           <h2>Android Companion App</h2>
           <ol>
-            <li>On your Android phone or tablet (Android 8.0+), download <code>PoundControl_v*_android.apk</code> from the <a href="https://github.com/mrpoundsign/PoundControl/releases/latest">Latest Release</a>.</li>
+            <li>On your Android phone or tablet (Android 8.0+), download <code>PoundControl-v*-android.apk</code> from the <a href="https://github.com/mrpoundsign/PoundControl/releases/latest">Latest Release</a>.</li>
             <li>Tap the downloaded APK and allow <strong>Install unknown apps</strong> when prompted by Android.</li>
             <li>Launch <strong>PoundControl</strong>, open <strong>Settings &rarr; Web Deck &rarr; Pair New Device</strong> on your desktop, and scan the QR code to connect.</li>
           </ol>
@@ -198,14 +198,14 @@ cd poundcontrol
           <h2>Wear OS Smartwatch Deck</h2>
           <p>The Wear OS watch app communicates with your desktop through the <strong>PoundControl Android companion app</strong> over Bluetooth/Wearable Data Layer:</p>
           <ol>
-            <li>Install and pair the <strong>Android companion app</strong> (<code>PoundControl_v*_android.apk</code>) on the phone paired to your watch first.</li>
-            <li>Enable <strong>Developer options &rarr; ADB debugging</strong> (or <strong>Wireless debugging</strong>) on your Wear OS watch and install <code>PoundControl_v*_wear.apk</code> (or sideload with a Wear OS installer app):</li>
+            <li>Install and pair the <strong>Android companion app</strong> (<code>PoundControl-v*-android.apk</code>) on the phone paired to your watch first.</li>
+            <li>Enable <strong>Developer options &rarr; ADB debugging</strong> (or <strong>Wireless debugging</strong>) on your Wear OS watch and install <code>PoundControl-v*-wear.apk</code> (or sideload with a Wear OS installer app):</li>
           </ol>
 
           <figure class="code-figure">
             <figcaption>Install the Wear OS APK via ADB</figcaption>
             <div class="copyable">
-              <pre><code id="code-wear-adb">adb install PoundControl_v*_wear.apk</code></pre>
+              <pre><code id="code-wear-adb">adb install PoundControl-v*-wear.apk</code></pre>
               <button type="button" class="copy-button" command="--copy" commandfor="code-wear-adb" aria-label="Copy code snippet">
                 <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                   <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
@@ -260,8 +260,7 @@ gh attestation verify &lt;downloaded-file&gt; --repo mrpoundsign/PoundControl</c
 .\build.ps1 -Target installer # Build Windows installer -&gt; build\bin\PoundControl-Setup.exe
 .\build.ps1 -Target android   # Test &amp; build both Android and Wear OS APKs -&gt; build\bin\
 .\build.ps1 -Target test      # Run all unit &amp; headless UI tests
-.\build.ps1 -Target lint      # Run go fix -diff and golangci-lint-v2
-.\build.ps1 -Target check     # Validate GoReleaser configuration</code></pre>
+.\build.ps1 -Target lint      # Run go fix -diff and golangci-lint-v2</code></pre>
               <button type="button" class="copy-button" command="--copy" commandfor="code-build-ps1" aria-label="Copy code snippet">
                 <svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                   <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>

@@ -66,10 +66,9 @@ PoundControl/
 │   ├── tile/             # Button image/SVG/title/state compositor
 │   └── builtin/          # Built-in native Go plugins (core/, obs/, apps/)
 ├── planning/             # Local-only git repo (PRDs & task lists per milestone/ticket)
-├── build.ps1             # Windows PowerShell build/lint/test/check script (Zig CGo)
+├── build.ps1             # Windows PowerShell build/lint/test script (Zig CGo)
 ├── build.sh              # Linux/macOS/WSL build/lint/test/cross-compile script
 ├── .golangci.yml         # golangci-lint v2 configuration
-├── .goreleaser.yaml      # GoReleaser v2 release configuration
 └── FyneApp.toml          # Fyne application metadata
 ```
 
@@ -82,10 +81,9 @@ PoundControl/
 2. **Cross-Platform Builds**:
    - **Windows PowerShell**:
      - `.\build.ps1` (lint + test + GUI build to `build\bin\poundcontrol.exe`)
-     - `.\build.ps1 -Target lint` (`go fix -diff ./...` + `golangci-lint-v2 run ./...`)
-     - `.\build.ps1 -Target test` (`go test -count=1 -v ./cmd/... ./internal/... ./pkg/...`)
+     - `.\build.ps1 -Target lint` (`go fix -diff ./cmd/... ./internal/... ./pkg/...` + `golangci-lint-v2 run ./cmd/... ./internal/... ./pkg/...`)
+     - `.\build.ps1 -Target test` (`go test -count=1 ./cmd/... ./internal/... ./pkg/...`)
      - `.\build.ps1 -Target gui` (Zig CGo + `go-winres` -> `build\bin\poundcontrol.exe`)
-     - `.\build.ps1 -Target check` (`goreleaser check`)
    - **Linux / macOS / WSL Bash**:
      - `./build.sh` (lint + test + native GUI build to `build/bin/poundcontrol`)
      - `./build.sh gui-win` (MinGW cross-compile -> `build/bin/poundcontrol.exe`)

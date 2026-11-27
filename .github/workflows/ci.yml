@@ -10,22 +10,23 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'testdata/**'
+      - 'build.sh'
       - '.golangci.yml'
       - '.github/workflows/ci.yml'
       - '.github/workflows/release.yml'
-      - '.goreleaser.yaml'
   pull_request:
     branches:
       - main
+      - dev
     paths:
       - '**.go'
       - 'go.mod'
       - 'go.sum'
       - 'testdata/**'
+      - 'build.sh'
       - '.golangci.yml'
       - '.github/workflows/ci.yml'
       - '.github/workflows/release.yml'
-      - '.goreleaser.yaml'
   workflow_dispatch:
 
 permissions:
@@ -57,33 +58,24 @@ jobs:
             libxinerama-dev libxi-dev libxxf86vm-dev libwayland-dev \
             libxkbcommon-dev libasound2-dev fonts-dejavu-core
 
-      - name: Cache golangci-lint-v2 binary
-        id: cache-golangci-lint-v2
-        uses: actions/cache@v4
-        with:
-          path: ~/go/bin/golangci-lint-v2
-          key: ${{ runner.os }}-golangci-lint-v2-2.14.0
-
-      - name: Install golangci-lint-v2
-        if: steps.cache-golangci-lint-v2.outputs.cache-hit != 'true'
-        run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
-          mv ~/go/bin/golangci-lint ~/go/bin/golangci-lint-v2
-
       - name: Run go fix -diff
         run: |
-          DIFF="$(go fix -diff ./...)"
+          DIFF="$(go fix -diff ./cmd/... ./internal/... ./pkg/...)"
           if [ -n "$DIFF" ]; then
             echo "$DIFF"
             exit 1
           fi
 
       - name: Run go vet
-        run: go vet ./...
+        run: go vet ./cmd/... ./internal/... ./pkg/...
 
-      - name: Run golangci-lint-v2
-        run: |
-          golangci-lint-v2 run ./...
+      - name: Run golangci-lint (v2)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+          args: ./cmd/... ./internal/... ./pkg/...
 
       - name: Run Full Test Suite
-        run: go test -count=1 -v ./...
+        run: |
+          go test -count=1 ./cmd/... ./internal/... ./pkg/...
+          go test -race -count=1 ./cmd/... ./internal/app/... ./internal/hotkey/... ./internal/webdeck/... ./pkg/builtin/... ./pkg/deck/... ./pkg/plugin/... ./pkg/pluginmgr/... ./pkg/sdplugin/... ./pkg/secrets/... ./pkg/tile/...

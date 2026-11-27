@@ -212,7 +212,9 @@ func TestProviderWebSocketAndPropertyInspectorBridge(t *testing.T) {
 		DefaultPluginsDir: root,
 		nodeManager:       nm,
 		OpenURL: func(_ context.Context, rawURL string) error {
+			host.mu.Lock()
 			openedURL = rawURL
+			host.mu.Unlock()
 			return nil
 		},
 		spawnOverride: func(inst *pluginInstance, _ int) error {

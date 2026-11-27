@@ -32,17 +32,17 @@ fi
 run_lint() {
     echo "==> Verifying code modernizations (go fix -diff)..."
     local DIFF
-    DIFF="$(go fix -diff ./...)"
+    DIFF="$(go fix -diff ./cmd/... ./internal/... ./pkg/...)"
     if [ -n "$DIFF" ]; then
         echo "$DIFF"
-        echo "Error: Unfixed code modernization diffs found. Run 'go fix ./...' to apply them."
+        echo "Error: Unfixed code modernization diffs found. Run 'go fix ./cmd/... ./internal/... ./pkg/...' to apply them."
         exit 1
     fi
     echo "✓ Code modernizations verified!"
 
     echo "==> Running golangci-lint-v2..."
     if command -v golangci-lint-v2 &>/dev/null; then
-        golangci-lint-v2 run ./...
+        golangci-lint-v2 run ./cmd/... ./internal/... ./pkg/...
     else
         echo "Error: golangci-lint-v2 not found in PATH"
         exit 1
@@ -93,8 +93,13 @@ build_gui_win() {
         VER_LDFLAG=" -X github.com/mrpoundsign/PoundControl/internal/version.Version=${VERSION#v}"
     fi
     CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
-        go build -trimpath -ldflags="-H windowsgui -s -w${VER_LDFLAG}" -o "$BIN_DIR/poundcontrol.exe" ./cmd/poundcontrol
+        go build -trimpath -ldflags="-H windowsgui -s -w${VER_LDFLAG} -extldflags '-static-libgcc'" -o "$BIN_DIR/poundcontrol.exe" ./cmd/poundcontrol
     echo "✓ Successfully built $BIN_DIR/poundcontrol.exe"
+
+    if command -v x86_64-w64-mingw32-objdump &>/dev/null; then
+        echo "==> Verifying poundcontrol.exe DLL Dependencies..."
+        x86_64-w64-mingw32-objdump -p "$BIN_DIR/poundcontrol.exe" | grep "DLL Name"
+    fi
 }
 
 clean_installer_payload() {
@@ -128,7 +133,7 @@ build_installer_win() {
 
     echo "==> Cross-compiling PoundControl-Setup.exe (via MinGW)..."
     CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
-        go build -trimpath -ldflags="-H windowsgui -s -w${VER_LDFLAG}" -o "$BIN_DIR/PoundControl-Setup.exe" ./cmd/installer
+        go build -trimpath -ldflags="-H windowsgui -s -w${VER_LDFLAG} -extldflags '-static-libgcc'" -o "$BIN_DIR/PoundControl-Setup.exe" ./cmd/installer
     echo "✓ Successfully built $BIN_DIR/PoundControl-Setup.exe"
 
     if command -v x86_64-w64-mingw32-objdump &>/dev/null; then
@@ -145,7 +150,9 @@ build_wasm() {
 
 run_tests() {
     echo "==> Running unit and headless UI tests..."
-    go test -count=1 -v ./cmd/... ./internal/... ./pkg/...
+    go test -count=1 ./cmd/... ./internal/... ./pkg/...
+    echo "==> Running race detector on concurrent/network packages..."
+    go test -race -count=1 ./cmd/... ./internal/app/... ./internal/hotkey/... ./internal/webdeck/... ./pkg/builtin/... ./pkg/deck/... ./pkg/plugin/... ./pkg/pluginmgr/... ./pkg/sdplugin/... ./pkg/secrets/... ./pkg/tile/...
     echo "✓ All tests passed!"
 }
 

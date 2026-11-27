@@ -7,11 +7,10 @@
 #   .\build.ps1 -Target android  # Test & build Android Companion APK -> build\bin\poundcontrol-android.apk
 #   .\build.ps1 -Target test     # Run all unit & headless UI tests
 #   .\build.ps1 -Target lint     # Run go fix -diff & golangci-lint-v2
-#   .\build.ps1 -Target check    # Run goreleaser check
 #   .\build.ps1 -Target clean    # Clean build artifacts
 
 param(
-    [ValidateSet("all", "gui", "installer", "wasm", "android", "test", "lint", "check", "clean")]
+    [ValidateSet("all", "gui", "installer", "wasm", "android", "test", "lint", "clean")]
     [string]$Target = "all"
 )
 
@@ -189,7 +188,7 @@ function Build-Wasm {
 function Run-Tests {
     Write-Host "`n==> Running unit and headless UI tests..." -ForegroundColor Cyan
     Enable-CGoToolchain
-    & $GoExe test -count=1 -v ./cmd/... ./internal/... ./pkg/...
+    & $GoExe test -count=1 ./cmd/... ./internal/... ./pkg/...
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[OK] All tests passed!" -ForegroundColor Green
     } else {
@@ -197,30 +196,16 @@ function Run-Tests {
     }
 }
 
-function Run-Check {
-    Write-Host "`n==> Checking goreleaser configuration..." -ForegroundColor Cyan
-    $goreleaser = Find-Tool "goreleaser" @(
-        (Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\goreleaser*" -Recurse -Filter "goreleaser.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
-    )
-    if (-not $goreleaser) {
-        Write-Error "goreleaser not found in PATH."
-    }
-    & $goreleaser check
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "goreleaser check failed."
-    }
-}
-
 function Run-Lint {
     Write-Host "`n==> Verifying code modernizations (go fix -diff)..." -ForegroundColor Cyan
     Enable-CGoToolchain
-    $fixDiff = & $GoExe fix -diff ./...
+    $fixDiff = & $GoExe fix -diff ./cmd/... ./internal/... ./pkg/...
     if ($LASTEXITCODE -ne 0) {
         Write-Error "go fix -diff failed."
     }
     if ($fixDiff) {
         Write-Host $fixDiff
-        Write-Error "Unfixed code modernization diffs found. Run 'go fix ./...' to apply them."
+        Write-Error "Unfixed code modernization diffs found. Run 'go fix ./cmd/... ./internal/... ./pkg/...' to apply them."
     }
     Write-Host "[OK] Code modernizations verified!" -ForegroundColor Green
 
@@ -231,7 +216,7 @@ function Run-Lint {
     if (-not $linter) {
         Write-Error "golangci-lint-v2 not found in PATH or ~/go/bin."
     }
-    & $linter run ./...
+    & $linter run ./cmd/... ./internal/... ./pkg/...
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[OK] Lint passed!" -ForegroundColor Green
     } else {
@@ -333,6 +318,5 @@ switch ($Target) {
     "android"   { Build-Android }
     "test"      { Run-Tests }
     "lint"      { Run-Lint }
-    "check"     { Run-Check }
     "clean"     { Clean-Artifacts }
 }
