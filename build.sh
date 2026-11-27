@@ -61,6 +61,7 @@ generate_winres_syso() {
     fi
     local VER="${VERSION:-0.1.0}"
     VER="${VER#v}"
+    local FILE_VER="${VER%%-*}"
     go tool go-winres simply \
         --arch amd64 \
         --out "$OUT_PREFIX" \
@@ -69,7 +70,7 @@ generate_winres_syso() {
         --product-name "$PRODUCT_NAME" \
         --file-description "$DESCRIPTION" \
         --product-version "$VER" \
-        --file-version "$VER" \
+        --file-version "$FILE_VER" \
         --original-filename "$ORIG_FILENAME"
 }
 
@@ -107,6 +108,7 @@ clean_installer_payload() {
     mkdir -p "$PAYLOAD_DIR"
     find "$PAYLOAD_DIR" -mindepth 1 ! -name 'placeholder.txt' -exec rm -rf {} + 2>/dev/null || true
     touch "$PAYLOAD_DIR/placeholder.txt"
+    rm -rf "$BUILD_DIR/installer_payload_stage_win"
     rm -f "$ROOT_DIR/cmd/installer/rsrc_windows_amd64.syso"
 }
 
@@ -115,14 +117,20 @@ build_installer_win() {
         build_gui_win
     fi
 
-    echo "==> Staging payload for PoundControl-Setup.exe..."
+    echo "==> Packing compressed payload for PoundControl-Setup.exe..."
     local PAYLOAD_DIR="$ROOT_DIR/cmd/installer/payload"
+    local STAGE_DIR="$BUILD_DIR/installer_payload_stage_win"
     clean_installer_payload
     trap 'clean_installer_payload' RETURN
 
-    cp -f "$BIN_DIR/poundcontrol.exe" "$PAYLOAD_DIR/poundcontrol.exe"
-    [ -f "$ROOT_DIR/LICENSE" ] && cp -f "$ROOT_DIR/LICENSE" "$PAYLOAD_DIR/LICENSE"
-    [ -f "$ROOT_DIR/README.md" ] && cp -f "$ROOT_DIR/README.md" "$PAYLOAD_DIR/README.md"
+    mkdir -p "$STAGE_DIR"
+    cp -f "$BIN_DIR/poundcontrol.exe" "$STAGE_DIR/poundcontrol.exe"
+    [ -f "$ROOT_DIR/LICENSE" ] && cp -f "$ROOT_DIR/LICENSE" "$STAGE_DIR/LICENSE"
+    [ -f "$ROOT_DIR/README.md" ] && cp -f "$ROOT_DIR/README.md" "$STAGE_DIR/README.md"
+    go run github.com/mrpoundsign/appinstaller/cmd/packpayload \
+        -src "$STAGE_DIR" \
+        -out "$PAYLOAD_DIR/payload.tar.zst"
+    rm -rf "$STAGE_DIR"
 
     local VER_LDFLAG=""
     if [ -n "${VERSION:-}" ]; then

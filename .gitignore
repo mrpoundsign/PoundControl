@@ -16,6 +16,8 @@ testdata/scratch/
 planning/
 cmd/installer/payload/*
 !cmd/installer/payload/placeholder.txt
+**/payload/payload.tar.*
+**/payload/payload.zip
 *.syso
 mobile/android/.gradle/
 mobile/android/app/build/

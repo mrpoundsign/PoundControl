@@ -63,6 +63,7 @@ function New-WinResSyso {
     if ($env:VERSION) {
         $ver = $env:VERSION.TrimStart('v')
     }
+    $fileVer = ($ver -split '-')[0]
 
     & $GoExe tool go-winres simply `
         --arch amd64 `
@@ -72,7 +73,7 @@ function New-WinResSyso {
         --product-name $ProductName `
         --file-description $Description `
         --product-version $ver `
-        --file-version $ver `
+        --file-version $fileVer `
         --original-filename $OriginalFilename
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Failed to generate Windows resource (.syso) for $OriginalFilename."
@@ -127,18 +128,26 @@ function Build-Installer {
 
     $payloadDir = Join-Path $PSScriptRoot "cmd\installer\payload"
     if (-not (Test-Path $payloadDir)) { New-Item -ItemType Directory -Path $payloadDir | Out-Null }
+    $stageDir = Join-Path $BuildDir "installer_payload_stage_win"
 
     $cleanupPayload = {
         Get-ChildItem -Path $payloadDir -Force | Where-Object { $_.Name -ne "placeholder.txt" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     $sysoPrefix = Join-Path $PSScriptRoot "cmd\installer\rsrc"
     $sysoPath = "${sysoPrefix}_windows_amd64.syso"
     try {
         & $cleanupPayload
-        Copy-Item $guiExe (Join-Path $payloadDir "poundcontrol.exe") -Force
-        if (Test-Path (Join-Path $PSScriptRoot "LICENSE")) { Copy-Item (Join-Path $PSScriptRoot "LICENSE") (Join-Path $payloadDir "LICENSE") -Force }
-        if (Test-Path (Join-Path $PSScriptRoot "README.md")) { Copy-Item (Join-Path $PSScriptRoot "README.md") (Join-Path $payloadDir "README.md") -Force }
+        New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+        Copy-Item $guiExe (Join-Path $stageDir "poundcontrol.exe") -Force
+        if (Test-Path (Join-Path $PSScriptRoot "LICENSE")) { Copy-Item (Join-Path $PSScriptRoot "LICENSE") (Join-Path $stageDir "LICENSE") -Force }
+        if (Test-Path (Join-Path $PSScriptRoot "README.md")) { Copy-Item (Join-Path $PSScriptRoot "README.md") (Join-Path $stageDir "README.md") -Force }
+        & $GoExe run github.com/mrpoundsign/appinstaller/cmd/packpayload -src $stageDir -out (Join-Path $payloadDir "payload.tar.zst")
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to pack compressed installer payload."
+        }
+        Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
 
         $ldflags = "-s -w -H=windowsgui -extldflags=-Wl,--subsystem,windows"
         if ($env:VERSION) {
